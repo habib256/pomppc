@@ -22,6 +22,7 @@
 # (seul qemu-system-ppc64 est MTTCG-safe). Les deux binaires comparés doivent
 # donc avoir leur jumeau 64 bits à côté, sous le même nom suffixé — sinon le
 # run s'arrête net, ce qui vaut mieux qu'une mesure « SMP » faite mono-cœur.
+# (01/11 : run_tiger.sh, lui, fait SMP sur qemu-system-ppc depuis tcg/0050, PPC32MT=1.)
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 

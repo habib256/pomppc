@@ -1,10 +1,9 @@
 # Protocole v9 — le doorbell asynchrone
 
-*Tâche 2.2 de `docs/todo-gpu-3d.md`. Ce document décrit ce que le **device**
-fait désormais, et ce que le **kext** et le **plugin** devront faire pour en
-tirer le gain. Le contrat lui-même, qui fait foi, est dans
-`patches/qgpu/qgpu_proto.h` (section « v9 »), recopié à l'identique dans
-`kext/POMPPCGPU/qgpu_proto.h`.*
+*Tâche 2.2 de `docs/archive/todo-gpu-3d-2026-09-24.md` (axe 2). Ce document décrit ce que le
+**device** fait désormais, et ce que le **kext** et le **plugin** devront faire pour en tirer le
+gain. Le contrat lui-même, qui fait foi, est dans `patches/qgpu/qgpu_proto.h` (section « v9 »),
+recopié à l'identique dans `kext/POMPPCGPU/qgpu_proto.h`.*
 
 ## 1. Pourquoi
 

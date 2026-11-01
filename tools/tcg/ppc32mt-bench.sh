@@ -3,11 +3,12 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # ppc32mt-bench.sh ÉTIQUETTE JOB [JOB…] — un démarrage de la VM de DÉVELOPPEMENT
 # (single-user, PC Linux) avec toutes les options de production de run_tiger.sh
-# (Linux x86-64), puis les jobs devloop donnés, chacun sous `perf stat` (instructions
+# (Linux x86-64 au 23/10 ; 01/11 : sans x-lfs-known, x-tlb-base ni x-tcg-cold, allumés
+# depuis, à passer par CPU_EXTRA/TCG_EXTRA), puis les jobs devloop donnés, chacun sous `perf stat` (instructions
 # et cycles de l'hôte en mode utilisateur, tout le processus QEMU). Pour le levier
 # « G4 sur la cible 32 bits en MTTCG » (docs/ppc32-mttcg.md). Jamais la VM quotidienne.
 #
-#   DEVDISK=~/src/pomppc/disks/tiger-dev-ppc32.raw \
+#   DEVDISK=~/src/pomppc/disks/tiger-dev-ppc32.raw \   (01/11 : copie effacée ; 0050 est dans les binaires de référence)
 #   QEMU_BIN=~/src/qemu-ppc32mt/build-mt/qemu-system-ppc SMP=2 PPC32MT=1 \
 #       tools/tcg/ppc32mt-bench.sh mt-ppc32 mtbench t2bench
 #

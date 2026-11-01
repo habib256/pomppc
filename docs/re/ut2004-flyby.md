@@ -100,7 +100,8 @@ La quotidienne `disks/tiger.qcow2` n'est pas modifiée.
 
 La découverte du parcours a révélé des milliers de refus `id-texture`, puis
 un rendu principalement logiciel. Le protocole réserve actuellement 128
-identifiants de texture par client (`QGPU_CLIENT_TEX_IDS`). Les fichiers de
+identifiants de texture par client (`QGPU_CLIENT_TEX_IDS`) (01/11 : 1 024 aujourd'hui,
+`patches/qgpu/qgpu_proto.h`). Les fichiers de
 preuve sont dans `bench/ut-flyby/`. Les images présentent encore des défauts :
 ce banc mesure l'état actuel du pilote, pas un rendu validé comme correct.
 

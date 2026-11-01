@@ -36,7 +36,8 @@ dans les `CFLAGS` serait écrasé par le `-O2` de meson), avec le profil PGO s'i
 
 - **profil** : `PGO_DIR`, par défaut `~/src/qemu/pgo-fast/` (stable, hors du dossier de build ;
   `pomppc-profil.txt` y dit d'où il vient). Absent ⇒ construction **sans PGO, avec un
-  avertissement** (−8 % au lieu de −13 % en `-O2` le 03/10, §5.5) ; `QEMU_FAST_PGO=use` l'exige,
+  avertissement** (−8 % au lieu de −13 % en `-O2` le 03/10,
+  `vitesse-doom3-x86.md` §5.5) ; `QEMU_FAST_PGO=use` l'exige,
   `=non` s'en passe ;
 - les `.gcda` portent le chemin de l'objet (`#home#…#qemu#build-fast#…`) : un profil d'un autre
   arbre ou d'un autre dossier serait ignoré en silence, le script refuse et renvoie à
@@ -188,8 +189,8 @@ rapide (PGO, -O3, -march=native) »), avec les nouveaux défauts de Linux x86-64
 **A/B contre la référence, hôte au repos** (06/10 au soir, `docs/vitesse-doom3-x86.md` §13.5,
 `bench/tcg/ab/x86-fast`) : DOOM 3 `d3-fen`, 3 parties par bras, mêmes défauts : référence
 122,9 ms/image (121,8..124,6), **binaire rapide 111,5 (108,9..112,9), −9,3 %**. Matrice finale
-avec vidage (§13.6, `x86-final`) : Marble Blast 14,9, Zenerchi 5,9, UT2004 48,7, DOOM 3 111,9,
-images justes.
+avec vidage (`vitesse-doom3-x86.md` §13.6, `x86-final`) : Marble Blast 14,9, Zenerchi 5,9,
+UT2004 48,7, DOOM 3 111,9, images justes.
 
 ## Reconstruction sous Ubuntu 26.04 (14/10/2026)
 

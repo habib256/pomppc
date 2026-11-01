@@ -219,7 +219,8 @@ juste sur l'hôte v16 (format `0x80a`, générique 1, env, local, clé). `gltest
 arbfp` : juste sur l'hôte ; le rendu d'Apple n'annonce pas
 `GL_ARB_fragment_program` et **ignore** `glEnable(GL_FRAGMENT_PROGRAM_ARB)`
 sans erreur — sous Apple, les huit programmes de fragments de Colin McRae ne
-jouaient donc pas. Colin McRae : voir `docs/todo-gpu-3d.md` (état du jour).
+jouaient donc pas. Colin McRae : voir `docs/archive/todo-gpu-3d-2026-09-24.md`
+(état du 23/09) ; état courant : `TODO.md`, « Matrice de jeux ».
 
 ## 6. Génériques à taille déclarée (24/09/2026)
 

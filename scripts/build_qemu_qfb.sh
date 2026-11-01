@@ -1062,7 +1062,8 @@ TCG48_MARKERS
   # registres (un G4 sur qemu-system-ppc64 n'ajoute plus num_insns à un PMC5 fantôme à
   # chaque sortie de bloc) ; propriété éteinte par défaut, sans effet sur qemu-system-ppc.
   # 0050 : mttcg_supported pour la cible 32 bits aussi (le lanceur ne s'en sert que
-  # derrière PPC32MT=1, et force thread=single en SMP=1).
+  # derrière PPC32MT=1, et force thread=single en SMP=1 ; PPC32MT=1 est le défaut de
+  # run_tiger.sh sur les deux hôtes depuis le 23/10 et le 26/10).
   if ! grep -q "x-pmu-real" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : PMU POWER8 seulement sur les CPU qui l'ont (x-pmu-real)"
     patch_strict "$ROOT/patches/tcg/0049-ppc-pmu-real.patch"
@@ -1397,13 +1398,14 @@ case "$(uname -s)" in
   *)      check audio-pa        qemu_has_audiodev "$BIN" pa ;;
 esac
 # SMP : sondé sur LE BINAIRE, et sur celui que le lanceur emploie réellement
-# (qemu-system-ppc64 dès SMP >= 2). Un grep dans hw/misc/macio/gpio.c ne
+# (qemu-system-ppc64 dès SMP >= 2 ; 01/11 : seulement en repli, sans PPC32MT ou sans
+# tcg/0050 — mttcg-ppc32 est sondé plus bas). Un grep dans hw/misc/macio/gpio.c ne
 # disait que « le source est patché » — pas « ce binaire accepte -smp 2 », ce
 # qui est la seule question. -smp 2 exige via=pmu : la machine sondée est celle
 # du lanceur.
 check smp-mac99  qemu_machine_smp_ok "${BIN}64" "mac99,via=pmu" 2
 # Flottant rapide : sondé sur LES DEUX binaires. Le lanceur emploie
-# qemu-system-ppc64 dès SMP >= 2, et rien ne garantit a priori que la propriété
+# qemu-system-ppc64 dès SMP >= 2 sans PPC32MT, et rien ne garantit a priori que la propriété
 # soit visible des deux côtés (le type de CPU n'a pas le même nom).
 check x-fast-fp        qemu_cpu_has_fastfp "$BIN"        "mac99,via=pmu" g4
 check x-fast-fp-ppc64  qemu_cpu_has_fastfp "${BIN}64"    "mac99,via=pmu" g4

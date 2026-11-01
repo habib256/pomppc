@@ -11,7 +11,7 @@ travail, avec la date et l'heure.
 | `uname -sm` | hôte | binaire QEMU quotidien | défauts de `run_tiger.sh` |
 |---|---|---|---|
 | `Linux x86_64` | **PC** (Ubuntu 26.04, Core i7-10700F, RTX 4060 Ti) | `~/src/qemu/build-fast` (PGO), référence `~/src/qemu/build` | branche `Linux:x86_64` |
-| `Darwin arm64` | **M4** (macOS, GL d'Apple sur Metal) | `~/src/qemu` (reconstruit par `scripts/build_qemu_qfb.sh`) | branche `Darwin:arm64` |
+| `Darwin arm64` | **M4** (macOS, GL d'Apple sur Metal) | `~/src/qemu/build` (reconstruit par `scripts/build_qemu_qfb.sh`) | branche `Darwin:arm64` |
 
 Au début d'une séance :
 1. `git pull` : l'autre hôte a peut-être poussé.
@@ -34,9 +34,10 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 01/11/2026, 12 h (fin de séance PC ; VM quotidienne relancée sur le binaire rapide avec le kext et le plugin du 01/11)
+## 2. PC x86-64 : état au 01/11/2026, 13 h 45 (VM quotidienne sur le binaire rapide avec le kext et le plugin du 01/11 ; un A/B PRESENTQ tourne)
 
-**Fait le 01/11 en matinée** (séance close vers 12 h, la suite se fait sur le M4)
+**Fait le 01/11** (matinée close vers 12 h ; l'après-midi : `pgo-train.sh` et PRESENTQ, fin de
+cette liste ; la séance suivante se fait sur le M4)
 - **Bug de l'ombre QE corrigé** (agent Opus, `docs/quartz-extreme.md` journal du 01/11,
   CHANGELOG) : la bande d'ancien jeu sous l'ombre du Terminal venait du chemin direct, qui
   n'avisait plus le WindowServer ; kext **méthode 6** (`POMPPC_GA_PRESENT2`) + plugin
@@ -56,6 +57,13 @@ Au début d'une séance :
   dans `pgo-fast-pgo0111cmr/` (`docs/binaire-rapide-x86.md` §7).
 - `~/src/qemu-jcp/` et `~/src/qemu-bat/` effacés par l'utilisateur à 12 h 10 ; `qemu-nuit`
   contient 0060-0063.
+- `tools/tcg/pgo-train.sh` cible **ppc32mt** par défaut (`cf6cf61`) : avant, le défaut
+  « ppc64 » héritait du `PPC32MT=1` de `run_tiger.sh` et entraînait en fait ppc32mt ; le bras
+  ppc64 pose maintenant `PPC32MT=0`. Les profils déjà construits ne changent pas.
+- **`POMPPC_GL_PRESENTQ` rouvert** (demande de l'utilisateur) : A/B au repos en plein écran
+  lancé à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras), **en cours** ;
+  verdict et suite dans `TODO.md` (« Ensuite », PRESENTQ). Code de l'invité : s'il est allumé,
+  le M4 le reçoit avec le bundle.
 
 **Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
 - **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la
@@ -221,16 +229,10 @@ le plugin avec `tex_bind_id` (`9b5431a`, 30/10 ; révision `20261023-uvwon`). Ni
 - Les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque de
   l'invité** (16 Go) le 29/10 : les effacer après usage.
 
-**À faire sur le M4, dans l'ordre** (même ordre que le chantier M4 de `TODO.md`)
-1. Le rattrapage du §4, « Venu du PC le 01/11 ».
-2. Profil croisé des cinq jeux avec `sample` (JIT, recherche de blocs, `mftb`, helpers, fil
-   `qgpu-render`) : il ordonne les leviers suivants.
-3. `tcg/0058` limité aux délais courts (`select` sous la milliseconde), profil d'UT.
-4. Parité de **tcg/0056** (zone froide, allumée sur le PC le 31/10) : un saut long vers le
-   chemin lent sur aarch64 (le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région de
-   64 Mio).
-5. Seulement si besoin : parité de **tcg/0055** (si les traces de second niveau reprennent,
-   arrêtées depuis le 22/10) ; `vperm` en ligne (TBL/TBX, gain plafonné vers 0,3 %).
+**À faire sur le M4** : la liste ordonnée est **au §4, « Venu du PC le 01/11 »** (même ordre que
+le chantier M4 de `TODO.md`). Hors de cette liste, seulement si besoin : parité de **tcg/0055**
+(si les traces de second niveau reprennent, arrêtées depuis le 22/10) ; `vperm` en ligne
+(TBL/TBX, gain plafonné vers 0,3 %).
 
 **Propres au M4** : pas de `qemu-ppc` linux-user (les preuves passent par l'invité), outils
 `ppc32mt-bench.sh` et `chargehote.py` portés sur macOS, et `references.csv`, le fichier de
@@ -255,11 +257,15 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
   4. A/B au repos, ancien bundle contre nouveau : mb-fen, mb-pe, cmr-pe et d3-fen au moins
      (PACKBITS attendu −1 à −4 % ; l'avis d'ombre coûte sur mb-fen seulement quand une fenêtre
      est posée sur le jeu, +6 % sur le PC) ; cmr-pe rejoué avec la fenêtre de mesure **en
-     course** (`6054367`) et sa référence reprise si elle porte le faux reflet. `references.csv`
-     du M4 ne se touche que là-bas.
-  5. Profil croisé des cinq jeux avec `sample` (part du JIT, recherche de blocs, helpers, et
-     part du fil `qgpu-render` sur d3) : c'est lui qui ordonne les leviers du M4 (TODO,
-     chantier M4). Puis `tcg/0058` limité aux délais courts, zone froide en dernier.
+     course** (`6054367` ; le M4 mesurait peut-être déjà la course : le voir sur ses
+     `frames.csv`) et sa référence reprise si elle porte le faux reflet. `references.csv` du M4
+     ne se touche que là-bas.
+  5. Profil croisé des cinq jeux avec `sample` (part du JIT, recherche de blocs, `mftb`,
+     helpers, et part du fil `qgpu-render` sur d3) : c'est lui qui ordonne les leviers du M4
+     (TODO, chantier M4). Puis `tcg/0058` limité aux délais courts (`select` sous la
+     milliseconde, profil d'UT) ; parité de la zone froide **tcg/0056** en dernier (un saut long
+     vers le chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région
+     de 64 Mio).
   6. Une tranche d'endurance avec le nouveau kext, puis cette page.
 
 - **Avant de quitter un hôte** : arrêter les campagnes en cours, remettre la VM quotidienne

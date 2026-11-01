@@ -34,7 +34,9 @@
  * Variables d'environnement :
  *   POMPPC_GL_DISABLE=1   ne jamais accélérer (le plugin reste un mandataire)
  *   POMPPC_GL_STATS=1     bilan sur stderr à la fin du processus
- *   POMPPC_GL_DIRECT=0    pas de présentation directe (voir present_direct)
+ *   POMPPC_GL_DIRECT=0    pas de présentation directe (voir present_direct) ;
+ *                         =f en plein écran seulement, =c même sous un curseur
+ *                         en mouvement
  *   POMPPC_GL_PRESENT=0   pas de SURF_PRESENT (relecture + copie G4, pour A/B)
  *   POMPPC_GL_STATS=fichier  bilan ajouté au fichier toutes les 5 s (images/s,
  *                         relectures, replis, temps passé à soumettre et à copier)
@@ -72,6 +74,41 @@
  *                         écrit : le plugin tourne aussi dans le WindowServer,
  *                         en root. Ouvert une fois, O_EXCL|O_NOFOLLOW.
  *   POMPPC_GLTRACE=dir    trace (voir pomppc_gld.c)
+ *
+ * Index des autres variables, préfixe POMPPC_GL_ omis (01/11 ; détail au point
+ * de lecture, getenv, et près des *_DEFAULT). Lues une fois pour la plupart ;
+ * sauf mention, « =0 » coupe et le défaut
+ * est allumé, à condition que le device annonce la capacité concernée :
+ *
+ *   Capacités et annonce : TEX3 (conversion des texels par l'hôte, v10), TEX3D,
+ *     CUBE, RECT, SURFTEX (v20), TEX13, TEX14, XBAR (v12), COMBINE3 (v22),
+ *     PIXEL (opérations de pixels, v13), PROG (programmes ARB, v16), GLSL (v21),
+ *     GLSLPP (retouche du source GLSL avant glShaderSourceARB), GENSIZES, S3TC et
+ *     VAR (extensions annoncées), ANNOUNCE (=0 : annonce d'Apple intacte), HIDDEN
+ *     (échange d'un drawable caché sans présentation), RDIRTY (cfg+0x7a),
+ *     TRIFILTER, VPNEED, VPIMM, MERGE (fusion des primitives), PENDCLOSE, TEXPAGE
+ *     (pagination des textures, R5), TCLLOST, QFLUSH (soumission anticipée des
+ *     requêtes ; =<n> : seuil en mots).
+ *   Allégement du plugin (défaut *_DEFAULT = 1 ; « 2 » = contrôle, le calcul
+ *     complet refait et comparé, là où il existe) : LAZYAPPLE, VERDICT,
+ *     WHITELIST, TEXMEMO, STSKIP, STATEBLK, WLUNIF, IDXLAZY (0-2), IDXVEC (0-2),
+ *     DISPONE, UNITVD, UVWIDE (0-2), PACKBITS (01/11), DISPFAST (0-2), PROGMEMO,
+ *     MTXDIRTY (0-2), DISPLOCK, STUNIT (0-2), BEGINVD (0-2), LIGHTDIRTY (0-2),
+ *     ZONES (0-2, défaut 1 ; ZONES_FORCE=1), et le bloc du levier B plus bas
+ *     (TEXDEFER, SWAPLITE, DISPSEED, WINSEED ; PRESENTQ éteint, =1 l'allume).
+ *   Quartz Extreme : QE_HZ (cadence des avis, défaut 60, 0 = sans limite),
+ *     QE_ASYNC (=0 : avis synchrone), QE_DIRECT (=0 : pas de présentation par
+ *     le noyau, méthode 5), QE_NONSIMPLE (=0 : pas d'avis pour une surface non
+ *     simple, méthode 6), QE_NONSIMPLE_HZ (cadence de ces avis, défaut 20).
+ *   Mesure et preuves : FRAMES=/chemin (frames.csv), DUMP=/dossier,
+ *     DUMP_FRAMES=n (défaut 400), DUMP_TRIGGER=fichier|@image, DUMPFAIL=dossier,
+ *     CAPTURE=chemin et CAPTURE_DELAY=n (défaut 2) : capture de la matrice.
+ *   Sondes, éteintes sans la variable : COUNT, VERDICTCHECK, STATECHECK,
+ *     BLOCKDUMP=a[:n], GEOMCHECK, GEOMDUMP=/chemin, GEOMDUMP_AT=n,
+ *     GEOM_SLOTS=n, T3DDUMP, UNITPROBE=1, CMRPROBE=n, TEXALWAYS=1, NOCULL,
+ *     FLIPFACE, GLYPHTEST=1|2, ALLEXT=1, TRYCUBE=n, TRY3D=n, VRAM_MB=n (défaut
+ *     64), DP7B=1, ARRAY_STUB_SYNC ; CUBEPROBE (allumée, armée par le fichier
+ *     du vidage déclenché, =0 la coupe).
  */
 #include <stdio.h>
 #include <stdlib.h>

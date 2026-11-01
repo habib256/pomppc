@@ -285,6 +285,10 @@ groupement des appels, pas le calcul.
 
 ## 11. Outillage (derrière `POMPPC_GL_TCL` uniquement)
 
+> (01/11 : ces variables n'existent plus dans le plugin, retirées quand le chemin brut est
+> devenu le chemin de production, voir `verification-tcl.md` §10 ; le tableau décrit les
+> essais de ce relevé. La scène `gltest tclprobe` existe toujours.)
+
 | variable | effet |
 |---|---|
 | `POMPPC_GL_TCL_DESC=pas,e0,e1,…` | publie un descripteur en `cfg+0x11c` ; `pas` en mots de 4 octets ; chaque entrée est soit brute (`0x0300`), soit **`code:décalage[:composantes]`** (composantes = 4 par défaut) |

@@ -4,7 +4,8 @@
 les kexts chargés.
 
 Les fichiers viennent de l'invité (voir docs/endurance.md) et vivent hors
-dépôt, dans bench/endurance/invite/ :
+dépôt, dans bench/endurance/invite/ (un dossier par noyau : $ENDURANCE_INVITE, p. ex.
+bench/endurance/invite-10.4.11 sur le PC) :
   mach_kernel                    copie de /mach_kernel (tssh.sh 'cat /mach_kernel')
   endurance-syms/*.sym           kextload -n -s -A (tools/endurance/invite-syms.sh)
   endurance-syms/kextstat.txt    adresses du démarrage où les .sym ont été liés

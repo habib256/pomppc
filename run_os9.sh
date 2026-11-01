@@ -24,7 +24,8 @@
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
 #
-# OS 9 = mono-cœur (SMP OS 9 buggé). Fenêtre GTK ; ferme-la pour quitter.
+# OS 9 = mono-cœur (SMP OS 9 buggé). Fenêtre GTK (Cocoa sous macOS ; POMPPC_DISPLAY=… la
+# choisit) ; ferme-la pour quitter.
 # Auto-boot activé : aucune invite OpenFirmware. (Secours '0 >' : boot cd:,\:tbxi)
 set -euo pipefail
 USER_RES="${RES:-}"                        # RES explicite (frontend, utilisateur) : config.env l'écraserait

@@ -367,6 +367,10 @@ classée.
 
 ## 5. Relevés GLEngine et CGL encore à faire en VM
 
+> (01/11 : dépassé. R4 est fait (`bloc-changements-r4.md`), R5 aussi (`verdict-lots-4-5.md`
+> §3) ; l'option A est classée le 26/09 (`verdict-lots-4-5.md`, fin du lot 5), ce qui retire
+> l'objet de R1-R3 et R7 tant qu'elle n'est pas rouverte.)
+
 | n° | question | méthode |
 |---|---|---|
 | **R1** | Que sont `gctx+0x4680` et `gctx+0x4684` ? Égaux ? L'un vaut-il `(char*)CGLGetCurrentContext() + 4` (`&ctx->disp`) ? Contenu de `T4684` (tout à zéro ?) | sonde dans le plugin au premier `RenderVertexArray` : noter les deux pointeurs, `CGLGetCurrentContext()`, et un vidage de `T4684` (0xab8 octets) ; lire `CGLContext.h` du SDK 10.4 dans l'invité |

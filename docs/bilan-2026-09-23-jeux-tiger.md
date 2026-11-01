@@ -93,12 +93,12 @@ CPU est du travail GL que l'on pourrait supprimer en prenant les tableaux tels q
 
 `RenderVertexArray` (canal ARRAY) prend les tableaux de l'application sans passer par le
 déroulage de GLEngine ; il est refusé sous programme (`NO_G_GENERIC` : il ne packe pas les
-génériques 16..31 du VAO). L'ouvrir avec les génériques (`docs/todo-gpu-3d.md`) supprime le
-travail par sommet de GLEngine pour DOOM 3, Prey, UT2004 et WC3, et devrait ramener les ~175 ms
-à ce que le jeu coûte seul. À prouver par `gltest` (scène génériques + tableaux) puis mesure
-`frames.csv` avant/après. Dans le même mouvement : réutiliser les VBO hôte (`DRAW_RAW_BUF`)
-sans réécriture quand l'application ne les a pas touchés (aujourd'hui 159 `BUF_SUBDATA` par
-image dans Prey).
+génériques 16..31 du VAO). L'ouvrir avec les génériques (`docs/archive/todo-gpu-3d-2026-09-24.md`,
+état du 23/09) supprime le travail par sommet de GLEngine pour DOOM 3, Prey, UT2004 et WC3, et
+devrait ramener les ~175 ms à ce que le jeu coûte seul. À prouver par `gltest` (scène génériques +
+tableaux) puis mesure `frames.csv` avant/après. Dans le même mouvement : réutiliser les VBO hôte
+(`DRAW_RAW_BUF`) sans réécriture quand l'application ne les a pas touchés (aujourd'hui 159
+`BUF_SUBDATA` par image dans Prey).
 
 ### P2 — Zéro repli par image
 
@@ -112,7 +112,7 @@ Objectif chiffré : `fb=0 rb=1` par image dans `frames.csv`.
 
 - DOOM 3 : « quelques bugs graphiques » (dixit l'utilisateur) à caractériser avec le vidage
   maintenant autonome : `~/doom3.command` + `POMPPC_GL_DUMP_TRIGGER`, rejeu, réécriture du
-  programme pour isoler le terme fautif (méthode de ce soir, §1.2.4).
+  programme pour isoler le terme fautif (méthode de ce soir, §1.2, point 4).
 - Prey : miroirs et sous-vues (`_currentRender`, COPY_TEX), `screenprocess.vfp`, distorsions ;
   vérifier `fragment.position` sous programme de fragments (noté « non retourné »).
 - `POMPPC_GL_S3TC` : rendre le repli impossible quand une texture DXT à mipmaps est liée

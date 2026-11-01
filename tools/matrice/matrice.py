@@ -10,12 +10,13 @@ et range, pour chaque cellule, les trois preuves du TODO §1 :
      natif (tests/qgpu_replay.c, backend gl) ; l'une des images rejouées doit
      être identique, à la tolérance près, à la capture de l'écran de la VM
      prise VM arrêtée pendant le vidage ; et le rejeu de la RÉFÉRENCE rangée
-     (bench/matrice/ref/, empreinte versionnée dans references.csv, validée à
-     l'œil une fois) doit redonner l'image de référence ;
+     (bench/matrice/ref/, empreinte versionnée dans references.csv sur le M4,
+     references-linux.csv sur le PC, validée à l'œil une fois) doit redonner
+     l'image de référence ;
   2. zéro repli : `fallbacks` de frames.csv constant de la fenêtre de mesure à
      la fin du vidage ;
   3. vitesse : ms/image sur la fenêtre de mesure de la scène fixe, sous le
-     plancher du jeu.
+     plancher du jeu (plancher_ms, plancher_ms_linux sur le PC : tools/matrice/jeux/).
 
     tools/matrice/matrice.py                    tout (jeux automatisés, deux modes)
     tools/matrice/matrice.py -j mb,zen -m fen   un sous-ensemble
@@ -869,8 +870,10 @@ def main():
     ap.add_argument("--env", action="append", default=[], metavar="K=V",
                     help="variable POMPPC_GL_* en plus pour chaque lancement (A/B d'un drapeau)")
     ap.add_argument("--sample-hote", type=int, default=0, metavar="S",
-                    help="`sample` du processus QEMU sur l'hôte pendant S s, juste avant "
-                         "celui de l'invité (sample-hote-<mesure|invite>.txt à la racine de la cellule)")
+                    help="profil du processus QEMU sur l'hôte pendant S s, juste avant "
+                         "celui de l'invité : `sample` sur macOS, `perf record` sur Linux, "
+                         "POMPPC_PERF_CMD ou POMPPC_SELFPROF s'ils sont posés "
+                         "(sample-hote-<mesure|invite>.txt à la racine de la cellule)")
     ap.add_argument("--sample", type=int, default=0, metavar="S",
                     help="`sample` du jeu dans l'invité pendant S s, la fenêtre de mesure passée "
                          "(sample.txt dans le dossier de la cellule)")
@@ -936,7 +939,7 @@ def main():
             anciens[(par_titre.get(r["jeu"]), par_mode.get(r["mode"]))] = r
     h = Hote()
     if not h.attend_ssh(60):
-        sys.exit("l'invité ne répond pas (VM lancée ? .run/cmr/tssh.sh uptime)")
+        sys.exit("l'invité ne répond pas (VM lancée ? tools/guest/tssh.sh uptime)")
     if not h.noyau_local():
         journal("pas de copie de /mach_kernel : un gel ne sera pas symbolisé")
     # un tour interrompu a pu laisser un jeu en marche : on l'arrête (et on

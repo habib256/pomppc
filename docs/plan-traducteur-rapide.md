@@ -340,6 +340,9 @@ gain de la phase 1 sur DOOM 3.
 
 ### 8.5 Commandes pour la session principale (VM quotidienne, DOOM 3)
 
+(01/11 : le worktree `agent-t2-phase0` n'existe plus ; `W` est le dépôt, qui porte
+`tools/tcg/tbedges.c` et `libtbedges.so`.)
+
     W=~/src/pomppc/.claude/worktrees/agent-t2-phase0   # ou le dépôt après fusion
     # 1. arêtes (greffon tbedges, instantanés toutes les 30 s ; mesure de forme, jeu ralenti)
     mkdir -p ~/src/pomppc/bench/tcg/t2/d3-edges

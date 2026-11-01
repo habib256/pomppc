@@ -51,6 +51,8 @@ done
 # l'invité bootait mono-cœur — une mesure « SMP » fausse mais parfaitement
 # plausible, le pire mode de panne de cet instrument. run_tiger.sh bascule sur
 # qemu-system-ppc64 et pose -bios dès SMP >= 2 ; on fait pareil, et on SONDE.
+# (01/11 : run_tiger.sh lance désormais SMP sur qemu-system-ppc en MTTCG, PPC32MT=1 par
+# défaut, tcg/0050 ; cet instrument garde la bascule ppc64 d'origine.)
 SMP_N="${SMP_N:-$SMP}"
 BIN="$QEMU_BIN"
 BIOS_ARGS=()

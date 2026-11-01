@@ -8,6 +8,9 @@ nommé en tête de section.
 
 Convention : **[É]** = établi par lecture du code ; **[H]** = hypothèse à vérifier.
 
+> (01/11 : « aujourd'hui », « chemin actuel » et « 4 unités » désignent le plugin d'avant le
+> 18/09 (T&L par GLEngine, 4 unités). Ce qui en est advenu : §10, et `verification-tcl.md`.)
+
 ---
 
 ## 1. Résumé
@@ -685,6 +688,11 @@ Vérifier, en modifiant `RendererInfo` dans `pomppc_patch_renderer_info`, que **
 ---
 
 ## 10. Recommandation pour le plugin
+
+> (01/11 : recommandation du 18/09, appliquée puis dépassée : « 1.5 POMPPC-1.0 » annoncé depuis
+> le 19/09, 8 unités accélérées depuis la v17, géométrie non transformée (`+0x79`, `+0x7a = 1`)
+> en production, réglée par `POMPPC_GL_GEOM`. État : `version-extensions.md` §3,
+> `verification-tcl.md` §10, `guest/gldriver/pomppc_accel.c`.)
 
 ### (a) Annoncer une version et des extensions supérieures
 

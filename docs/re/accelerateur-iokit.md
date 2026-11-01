@@ -132,6 +132,12 @@ installé, chargé **avant** le WindowServer, le bureau démarre normalement et
 
 ## 7. Ce que fait POMPPC (kext `POMPPCGPU`, 19/09/2026)
 
+> (01/11 : dépassé pour Quartz Extreme. Depuis le 29/10, la personnalité porte
+> `POMPPCQuartzExtreme` = `auto` : le kext publie `AccelCaps` quand l'hôte le recommande
+> (`QGPU_CAP_QE_DEFAULT`), et `POMPPCAccelerator` ouvre ses propres clients (surfaces, GA 2D,
+> méthodes 0-6) ; QE est allumé sur les deux hôtes. Voir `docs/quartz-extreme.md` et
+> `kext/POMPPCGPU/POMPPCGPU.h`. Ce qui suit, §7 à §9, est l'état et le plan du 19/09.)
+
 - Un **nub enfant** `POMPPCAccelerator : IOAccelerator` sous `POMPPCGPU`, avec
   `IOGLBundleName = GLDriver-POMPPC`. Pas `POMPPCGPU` lui-même : le transport s'ouvre en type 0,
   qui est aussi `kIOAccelSurfaceClientType`, et changer ce type casserait tous les clients

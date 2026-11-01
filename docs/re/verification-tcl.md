@@ -351,6 +351,9 @@ mêmes sommets, même `drapeau = 2`. C'est cohérent avec le §5.3 du relevé �
 différence ne se manifeste qu'à un **changement d'état entre `glBegin` et
 `glEnd`**, que ces scènes ne font pas. Le test reste à écrire (scène à
 `glDisable(GL_TEXTURE_2D)` en cours de primitive).
+(01/11 : établi le 19/09, `opengl-1.4.md` §3, scène `tcprobe` : à 0, une coordonnée r ou q
+donnée entre `glBegin` et `glEnd` fait basculer la primitive vers `_gleForceToSoftwareTCL` ;
+d'où `cfg+0x7a = 1` par défaut dans le plugin.)
 `_gleUpdatePrimitiveData 0x6704 lbz r0,0x7a(r2)` confirme que l'octet est bien
 lu, et directement dans le bloc de configuration.
 

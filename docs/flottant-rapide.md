@@ -288,6 +288,9 @@ fabrique pas) :
 ./tests/fastfp-ppc.sh ~/src/qemu-fastfp/build-user/qemu-ppc [qemu-ppc-non-patché]
 ```
 
+(01/11 : `~/src/qemu-fastfp` n'existe plus ; le `qemu-ppc` patché est à reconstruire en
+`ppc-linux-user` sur `~/src/qemu`, qui porte la série.)
+
 Un binaire PowerPC 32 bits autonome (`-nostdlib -static`, pas de libc) exécute
 les vraies instructions et imprime, pour chacune, le résultat **et le FPSCR**
 lu par `mffs` :

@@ -8,8 +8,9 @@
 #          précédent archivé en <PGO_DIR>.<date> ;
 #   jouer  charge MIXTE sur la VM QUOTIDIENNE par tools/tcg/matab.sh (un bras
 #          « train » sur le binaire instrumenté, matrice sans vidage) : par défaut
-#          Marble Blast, Zenerchi, UT2004 et DOOM 3 en fenêtre, une partie (≈ 45 min :
-#          le binaire instrumenté est lent, DOOM 3 seul a pris 25 min le 03/10) ;
+#          Marble Blast, Zenerchi, UT2004 et DOOM 3 en fenêtre (+ cmr en plein écran depuis
+#          le 01/11, --plein-ecran), une partie (≈ 45 min : le binaire instrumenté est lent,
+#          DOOM 3 seul a pris 25 min le 03/10) ;
 #          les .gcda s'écrivent quand QEMU quitte (matab arrête l'invité proprement) ;
 #   use    build-fast/ reconstruit avec le profil (QEMU_FAST_PGO=use).
 #
@@ -27,12 +28,12 @@
 # hôtes depuis le 23/10 et le 26/10, bras PPC32MT=1 : qemu-system-ppc en MTTCG), ppc64 (bras
 # PPC32MT=0 explicite : qemu-system-ppc64 ; avant le 01/11 le défaut était « ppc64 » mais le
 # bras héritait du PPC32MT=1 de run_tiger.sh, donc entraînait en fait ppc32mt), les-deux (un
-# bras par cible, les .gcda s'additionnent).
-# --banc dev : la partie se joue sur une VM de DÉVELOPPEMENT (DEVDISK=<raw>, jamais la
-# VM quotidienne) par tools/tcg/ppc32mt-bench.sh : un démarrage du bureau
-# (devloop start --gui, PGO_GUI s de bureau, défaut 120), puis un démarrage
+# bras par cible, les .gcda s'additionnent). --banc dev : la partie se joue sur une VM de
+# DÉVELOPPEMENT (DEVDISK=<raw>, jamais la VM quotidienne) par tools/tcg/ppc32mt-bench.sh :
+# un démarrage du bureau (devloop start --gui, PGO_GUI s de bureau, défaut 120), puis un démarrage
 # single-user avec les jobs PGO_JOBS (défaut « plugmd5 gpu suite mtbench t2bench »),
-# SMP=2, toutes les options de production, pour chaque cible demandée. Les .gcda
+# SMP=2, les options de production du 23/10 (PGO_CPU/PGO_TCG ; 01/11 : sans x-lfs-known,
+# x-tlb-base ni x-tcg-cold, allumés depuis), pour chaque cible demandée. Les .gcda
 # s'écrivent quand l'invité s'éteint (halt) et que QEMU quitte de lui-même.
 #
 # Environnement : QEMU_SRC (défaut ~/src/qemu), QEMU_FAST_BUILD (dossier de build,
@@ -58,6 +59,7 @@ PGO_DIR="${PGO_DIR:-$SRC/pgo-${FASTB#build-}}"
 CIBLE=ppc32mt; BANC=matrice
 read -r -a WRAP <<< "${PGO_WRAP:-}"
 # Options de production (Linux x86-64), celles de tools/tcg/ppc32mt-bench.sh : bureau du --banc dev
+# (01/11 : celles du 23/10 ; run_tiger.sh allume en plus x-lfs-known, x-tlb-base et x-tcg-cold)
 PGO_CPU="${PGO_CPU:-x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on,x-fp-inline=on,x-fp-native=on,x-fp-native64=on,x-fp-native-cmp=on,x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on,x-vfp-native-cmp=on,x-tb-fast=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on,x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on,x-dirty-skip=on,x-pteg-map=on}"
 PGO_TCG="${PGO_TCG:-x-jit-near=on,x-jit-rel32=on,x-jc-bits=14,x-jc-word=on,x-jc-2way=on}"
 MEM="${PGO_MEM:-20G}"

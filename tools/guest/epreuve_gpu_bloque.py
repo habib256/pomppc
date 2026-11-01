@@ -7,7 +7,9 @@ et A6 (L2 : créneau rendu malgré un nettoyage échoué), côté HÔTE.
 Pilote une VM de dev (tools/guest/devloop.py, single-user) dont le device
 qgpu-pci a les propriétés de test x-test-stall-ms et x-test-refuse-reset
 (patches/qgpu/qgpu-pci.c, 14/10/2026), et le job invité tools/guest/jobs/stall.
-Procédure et verdicts : docs/epreuve-gpu-bloque.md.
+Procédure et verdicts : docs/epreuve-gpu-bloque.md. (01/11 : ~/src/qemu-stall et
+disks/tiger-dev-stall.raw n'existent plus sur le PC, à recréer avant de rejouer, §5 ;
+les propriétés x-test-* sont dans les binaires de référence.)
 
     export DEVDISK=disks/tiger-dev-stall.raw QEMU_BIN=~/src/qemu-stall/build/qemu-system-ppc
     export SND=none GPU_TRACE=1 QEMU_EXTRA="-device qfb-pci -global qgpu-pci.scanout=qfb"

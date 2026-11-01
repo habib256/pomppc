@@ -5,7 +5,9 @@ le vérifier** (sonde `guest/gltest`, trace `POMPPC_GLTRACE`, diff de vidages). 
 
 Les désassemblages annotés sont produits par `tools/re/ppcanno.py` à partir des binaires du
 système installé ; ils ne sont pas dans le dépôt (code d'Apple). Une copie de travail est gardée
-hors dépôt (disque USB : `pomppc/re/`).
+hors dépôt : l'ancien `~/src/pomppc-re` (binaires et pilotes GL de 10.4.6, en-têtes du SDK,
+désassemblages `asm/*.s`), archivé le 22/09 sur le disque USB TEST dans `pomppc-re.tar.zst` ;
+le restaurer depuis `~/src` par `zstd -dc /media/gistarcade/TEST/pomppc-re.tar.zst | tar -xf -`.
 
 | Fichier | Sujet |
 |---|---|

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 # t2dev.sh ÉTIQUETTE [PROPS_CPU_EN_PLUS] — le banc t2bench (scène gltest d3inter : plugin,
-# GLEngine, kext) sur la VM de DÉVELOPPEMENT en single-user, PC Linux, toutes les options de production de run_tiger.sh (Linux x86-64) plus
+# GLEngine, kext) sur la VM de DÉVELOPPEMENT en single-user, PC Linux, toutes les options de production de run_tiger.sh (Linux x86-64 au 21/10 ;
+# 01/11 : sans x-lfs-known, x-tlb-base, x-tcg-cold ni PPC32MT, venus depuis) plus
 # PROPS_CPU_EN_PLUS (p. ex. x-tier2=4096), pour le traducteur de second niveau
 # (docs/plan-traducteur-rapide.md). Jamais la VM quotidienne.
 #

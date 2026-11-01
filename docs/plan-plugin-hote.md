@@ -137,14 +137,13 @@ là sous cette forme ; ce qui est construit reste éteint par défaut (branche
 ### 5.2 Méthode
 
 QEMU 11.1.2 construit à part (`~/src/qemu-hostcall`, copie de `~/src/qemu` + device +
-tcg/0050, `-O3 -march=native`, **sans PGO ni LTO** : le chemin MMIO du binaire rapide peut
-être un peu plus court). VM de dev `tiger-dev-plugin2.raw`, single-user, SMP 2 (ppc64,
-MTTCG), RTX, avec **les options CPU et TCG de la VM quotidienne** (relevées dans un
-`run_tiger.log` : `x-sr-tlb`, `x-msr-nobql`, `x-lmw-vector`, `x-dcbz-inline`, `x-jit-*`,
-`x-jc-*`…). Temps par `mach_absolute_time` dans l'invité ; durée du gestionnaire mesurée par
-le device ; instructions invitées par le greffon `hotblocks` (instantanés autour de
-`d3inter`, `HOSTCALL=0` puis `=1`, `tools/re/hotplug.py` et un relevé par bloc pour `memcmp`
-de libSystem, 0x901311a0).
+`tcg/0050-tcg-mmio-lockless`, `-O3 -march=native`, **sans PGO ni LTO** : le chemin MMIO du
+binaire rapide peut être un peu plus court). VM de dev `tiger-dev-plugin2.raw`, single-user, SMP 2
+(ppc64, MTTCG), RTX, avec **les options CPU et TCG de la VM quotidienne** (relevées dans un
+`run_tiger.log` : `x-sr-tlb`, `x-msr-nobql`, `x-lmw-vector`, `x-dcbz-inline`, `x-jit-*`, `x-jc-*`…).
+Temps par `mach_absolute_time` dans l'invité ; durée du gestionnaire mesurée par le device ;
+instructions invitées par le greffon `hotblocks` (instantanés autour de `d3inter`, `HOSTCALL=0` puis
+`=1`, `tools/re/hotplug.py` et un relevé par bloc pour `memcmp` de libSystem, 0x901311a0).
 
 ### 5.3 Question 1 : le coût d'un appel
 
@@ -243,8 +242,8 @@ décider par l'utilisateur ; la porte de celui-ci est fermée.
 
 Pièges notés en route :
 
-- `memory_region_enable_lockless_io` n'a **aucun effet sous TCG** sans tcg/0050 (cputlb.c
-  prend le BQL inconditionnellement) ; `io_mem_unassigned` est aussi « lockless ».
+- `memory_region_enable_lockless_io` n'a **aucun effet sous TCG** sans `tcg/0050-tcg-mmio-lockless`
+  (cputlb.c prend le BQL inconditionnellement) ; `io_mem_unassigned` est aussi « lockless ».
 - devloop nu ≠ VM quotidienne : sans `CPU_OPTS`/`TCG_OPTS` relevés dans `run_tiger.log`, les
   allers-retours par le noyau sont 5 fois plus chers et `memcpy` 3 fois plus lent.
 - Sous Tiger, `getrusage` rend 0 changement de contexte : `task_info(TASK_EVENTS_INFO)`.
@@ -253,8 +252,8 @@ Pièges notés en route :
 - Un worktree neuf n'a pas `bench/devloop/mailbox.json` : le copier du dépôt principal (les
   copies du disque de dev ont les mêmes boîtes).
 
-Reproduire (QEMU construit avec tcg/0050 et le device ; `OPTS_CPU` = la ligne `cpu=` d'un
-`run_tiger.log` récent, sans `g4,` ni `x-tier2`) :
+Reproduire (QEMU construit avec `tcg/0050-tcg-mmio-lockless` et le device ; `OPTS_CPU` = la ligne
+`cpu=` d'un `run_tiger.log` récent, sans `g4,` ni `x-tier2`) :
 
 ```
 DEVDISK=…/tiger-dev-plugin2.raw SMP=2 QEMU_BIN=~/src/qemu-hostcall/build/qemu-system-ppc \

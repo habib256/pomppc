@@ -87,6 +87,10 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
 2. **Un média d'installation Tiger PPC que vous possédez**, dans `images/` (gitignoré), nommé
    dans `config.env` (`INSTALL_MEDIA`). ISO tel quel ; un DMG compressé doit être converti
    (`dmg2img`, ou `hdiutil convert -format UDRO`). Aucune ROM Apple : OpenBIOS suffit.
+   **Compatibilité** : testé avec Tiger **10.4.6**, la version dont `OpenGL.framework` a été
+   relevé (`docs/re/`), et **10.4.11**, celle des VM quotidiennes des deux hôtes depuis octobre
+   2026. Les autres 10.4.x ne sont pas éprouvées : le plugin lit les structures internes de
+   GLEngine.
 3. Pour OS 9 : le CD 9.2.2 dans `disks/os9-install.iso`, ou `OS9_CD=… ./run_os9.sh install`.
 
 ### Installer Tiger

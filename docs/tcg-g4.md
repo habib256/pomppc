@@ -1,23 +1,23 @@
 # TCG et le G4 émulé — relevé, A/B des cœurs, patches
 
-Chantier « le G4 émulé lui-même » (`TODO.md` §4, 25/09/2026). Au-delà des lots du plugin,
-le plafond des jeux est la vitesse à laquelle TCG exécute le code PowerPC. Ce document
-relève **où part le temps du processeur émulé** (instructions exécutées, helpers, coût
-hôte), mesure **1 contre 2 cœurs**, et décrit **les patches qui en sont sortis** :
+Chantier « le G4 émulé lui-même » (`TODO.md` du 25/09, §4 ; 01/11 : archivé dans
+`docs/archive/todo-par-domaines-2026-09-27.md` §4, « Processeur émulé »). Au-delà des lots du
+plugin, le plafond des jeux est la vitesse à laquelle TCG exécute le code PowerPC. Ce document
+relève **où part le temps du processeur émulé** (instructions exécutées, helpers, coût hôte), mesure
+**1 contre 2 cœurs**, et décrit **les patches qui en sont sortis** :
 `patches/tcg/0001-ppc-sr-tlb.patch` (propriété de CPU `x-sr-tlb`), puis, pour DOOM 3,
 `0002-ppc-lfs-inline` (`x-lfs-inline`, §8), `0003-ppc-vfp-fast` (`x-vfp-fast`, §9) et
 `0004-ppc-vperm-fast` (`x-vperm-fast`, §10), puis `0006-tcg-jit-near` (`x-jit-near`, §14) et
 `0007-ppc-fp-inline` (`x-fp-inline`, le flottant scalaire simple sans ses helpers, §15), puis
 `0008-tcg-ret-inline` (`x-ret-inline`, `x-jc-idx` : les sorties indirectes, §16), puis
 `0010-tcg-smc-mttcg` (le code réécrit par l'autre vCPU : trois courses de QEMU corrigées et
-`x-icbi-sync`, §17, allumée par défaut depuis l'A/B du §20), puis `0011-tcg-jc-bits`
-(`x-jc-bits`, le cache de sauts de 16 384 entrées, §18) et `0012-ppc-msr-nobql`
-(`x-msr-nobql`, `mtmsr`/`rfi` sans verrou global, §19), puis `0013-ppc-fp-flat` (`x-fp-flat`)
-et `0014-tcg-fp-native` (`x-fp-native`, le flottant scalaire simple par le FPU de l'hôte dans
-le code généré, une op TCG nouvelle, §22), puis `0015-ppc-tb-fast` (`x-tb-fast`, la base de
-temps par le compteur de l'hôte, §23) et `0016-tcg-fp-native64` (`x-fp-native64`, le flottant
-double par la même op, §24) ; trois essais exacts mais sans gain,
-`patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
+`x-icbi-sync`, §17, allumée par défaut depuis l'A/B du §20), puis `0011-tcg-jc-bits` (`x-jc-bits`,
+le cache de sauts de 16 384 entrées, §18) et `0012-ppc-msr-nobql` (`x-msr-nobql`, `mtmsr`/`rfi` sans
+verrou global, §19), puis `0013-ppc-fp-flat` (`x-fp-flat`) et `0014-tcg-fp-native` (`x-fp-native`,
+le flottant scalaire simple par le FPU de l'hôte dans le code généré, une op TCG nouvelle, §22),
+puis `0015-ppc-tb-fast` (`x-tb-fast`, la base de temps par le compteur de l'hôte, §23) et
+`0016-tcg-fp-native64` (`x-fp-native64`, le flottant double par la même op, §24) ; trois essais
+exacts mais sans gain, `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-inline`) et
 `essais/0005-ppc-vfp-nrwg.patch` (`x-vfp-nrwg`, §11) et `essais/0009-ppc-isync-chain.patch`
 (`x-isync-chain`, §16.8), ne sont pas appliqués.
 
@@ -368,6 +368,9 @@ binaire des deux côtés (`qsr`, la propriété seule change).
 
 ### 5.2 1 contre 2 cœurs (TODO §5 « SMP », seuil +15 %)
 
+(01/11 : TODO du 25/09 ; l'entrée « Cœurs invités » est dans
+`docs/archive/todo-par-domaines-2026-09-27.md` §4.)
+
 | | img/s, paires | rapport |
 |---|---|---|
 | stock : SMP=2 → SMP=1 | 66,0 → 61,6 | **−6,7 %** (médiane des paires −7,7 %, 129 paires) |
@@ -613,8 +616,9 @@ d'instructions `lfs`/`stfs` : l'attendu (~1 %) est sous la dispersion des régim
 de 0002 sur Marble Blast n'est pas mesurable** avec ce protocole ; le banc (§8.3) l'établit
 à l'échelle de l'instruction, DOOM 3 (8,8 % de `lfs`/`stfs`) est le vrai juge.
 
-La cause des régimes devient la question de métrologie numéro un (TODO §4) : un
-démarrage entier est lent ou rapide, sur Marble Blast comme sur DOOM 3.
+La cause des régimes devient la question de métrologie numéro un
+(`docs/archive/todo-par-domaines-2026-09-27.md` §4) : un démarrage entier est lent ou rapide, sur
+Marble Blast comme sur DOOM 3.
 
 ### 8.5 DOOM 3
 
@@ -778,9 +782,9 @@ entrelacées (ordre alterné), `demo_mars_city1` T+50..T+280 ; journaux `bench/t
 
 Conclusion : **aucune régression** (preuves exhaustives, images justes, zéro repli en plus),
 gain **entre 0,7 % et 8 %** selon qu'on lit la médiane ou la moyenne. Le trancher exige de
-comprendre les régimes (TODO §4) ; un test direct : forcer le régime (fils vCPU épinglés,
-`taskpolicy`) et rejouer six paires dans chaque régime. **Cause trouvée au §14** : le
-placement du tampon du JIT ; le §14.5 relit ces chiffres.
+comprendre les régimes (`docs/archive/todo-par-domaines-2026-09-27.md` §4) ; un test direct : forcer
+le régime (fils vCPU épinglés, `taskpolicy`) et rejouer six paires dans chaque régime. **Cause
+trouvée au §14** : le placement du tampon du JIT ; le §14.5 relit ces chiffres.
 
 ## 14. Les deux régimes (25/09/2026, nuit)
 
@@ -931,8 +935,8 @@ Même effet en mono-cœur (**+8,2 %**) : le régime n'est pas une affaire de MTT
 second vCPU (hypothèse 4 éliminée) ; les deux régimes de DOOM 3 en SMP=1 (74,6 / 103,2,
 §6 bis) en sont sans doute un tirage. En passant : **SMP=1 près (73,7) vaut SMP=2 près
 (73,3)** sur ce protocole (passe de 150 s), alors que le §5.2 donnait −7 % à SMP=1 avec des
-placements tirés au hasard — la question « un ou deux cœurs » (TODO §4) est à reprendre à
-placement forcé.
+placements tirés au hasard — la question « un ou deux cœurs »
+(`docs/archive/todo-par-domaines-2026-09-27.md` §4) est à reprendre à placement forcé.
 
 ### 14.5 Relecture de DOOM 3 (§6 bis, §13)
 
@@ -1557,8 +1561,8 @@ fenêtre restante (écriture invalidée avant d'être faite).
 - **Étiquettes multiples par mode pour `x-sr-tlb`** (§3.4) : les ratés « entrée vidée » de
   Marble Blast et les remplissages du TLB viennent du vidage du `mmu_idx` utilisateur à
   chaque changement de processus.
-- **Verrou global à chaque `mtmsr`/`rfi`** : 6-10 % du temps vCPU (TODO §4) ; fait, §19
-  (`x-msr-nobql`, DOOM 3 −0,6 %).
+- **Verrou global à chaque `mtmsr`/`rfi`** : 6-10 % du temps vCPU
+  (`docs/archive/todo-par-domaines-2026-09-27.md` §4) ; fait, §19 (`x-msr-nobql`, DOOM 3 −0,6 %).
 - **Le défaut du §16.7** (code réécrit par l'autre vCPU) : corrigé, §17.
 
 Commande de l'A/B DOOM 3 (jouée ci-dessus ; pour la rejouer, depuis le worktree de cette
@@ -3938,7 +3942,7 @@ Les cas tombent entre 10 et 25 s après le lancement.
 | configuration (VM de dev, single-user) | démarrages | cas « sans traduction » |
 |---|---|---|
 | 1 024 Mo, SMP=2, `x-tlb-precise` allumé / éteint | 1 / 1 | **0 / 0** |
-| 768 Mo (la RAM de la VM quotidienne avec le son), SMP=2, `x-tlb-precise` **allumé** (dont un avec tous les vérificateurs de la partie du §13.1) | 5 | **4 à chaque démarrage**, toujours les mêmes : `0xfff1c914`, `0x5605d24`, `0x5610664` (×2) |
+| 768 Mo (la RAM de la VM quotidienne avec le son), SMP=2, `x-tlb-precise` **allumé** (dont un avec tous les vérificateurs de la partie du §13.1 de `vitesse-doom3-x86.md`) | 5 | **4 à chaque démarrage**, toujours les mêmes : `0xfff1c914`, `0x5605d24`, `0x5610664` (×2) |
 | 768 Mo, SMP=2, `x-tlb-precise` **éteint** | 1 | **0** |
 | 768 Mo, SMP=1, `x-tlb-precise` allumé / éteint | 1 / 1 | **1** (`0xfff1c914`) / **0** |
 
@@ -4023,9 +4027,9 @@ remplissage suivant, en `0x2fe08410`), qui est évincée de nouveau un peu plus 
   de code l'invalide par `tlbie` de cette page ou par un balayage complet) est donc violée par
   OpenBIOS, sans conséquence parce que ses traductions ne changent pas. Quand le noyau prend la
   main, sa nouvelle table hachée (`mtsdr1`) vide tout le TLB de QEMU et le cache de sauts
-  (`helper_store_sdr1`) ; ensuite, **0 cas en jeu** sur ~12,8 G sorties vérifiées (§13.1) et sur
-  les 34 G du §16.4 : xnu respecte l'hypothèse (non relu dans son source ici ; c'est ce que
-  montrent les vérificateurs).
+  (`helper_store_sdr1`) ; ensuite, **0 cas en jeu** sur ~12,8 G sorties vérifiées
+  (`vitesse-doom3-x86.md` §13.1) et sur les 34 G du §16.4 : xnu respecte l'hypothèse (non relu dans
+  son source ici ; c'est ce que montrent les vérificateurs).
 
 ### 35.4 Ce qui n'a pas été changé, et comment lire le vérificateur
 

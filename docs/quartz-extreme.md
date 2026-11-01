@@ -264,9 +264,9 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
      rattachement rend 0 sans rien toucher. cmr-pe sous QE : **47,1 ms**, image juste
      (0,00 % contre la VM et la référence). (Fausse piste écartée : la contention du BQL
      relevée par `perf -e context-switches -g`, identique avec et sans QE.)
-  8. **Endurance et allumage (20 h 30-22 h 10).** Tranche comme au §13 du M4
-     (`docs/endurance.md` §14) : 30 démarrages, puis 16 cycles de jeu mb/zen/ut/d3 sous QE,
-     **aucun gel, aucune panique**, `qemu-img check` propre. `run_tiger.sh` pose maintenant
+  8. **Endurance et allumage (20 h 30-22 h 10).** Tranche comme au §13 (M4) de
+     `docs/endurance.md`, compte rendu au §14 : 30 démarrages, puis 16 cycles de jeu
+     mb/zen/ut/d3 sous QE, **aucun gel, aucune panique**, `qemu-img check` propre. `run_tiger.sh` pose maintenant
      `qe=on` sur `Linux:x86_64` comme sur `Darwin:arm64` ; `QE=0` l'éteint. Matrice de
      contrôle avec ce défaut (`pc-qedefaut-3010`, une passe) : toutes les images justes, aucun
      repli ; mb-fen 7,9, mb-pe 9,8, zen-fen 4,7, d3-fen 78,2, d3-pe 79,2, ut-fen 39,3, ut-pe

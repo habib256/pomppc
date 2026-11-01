@@ -4,7 +4,8 @@ La v7 a confié à l'hôte la *géométrie* (matrices, éclairage, texgen, déco
 restait, entre elle et OpenGL 1.5, une poignée d'étages du pipeline fixe que le device ne savait
 pas faire : le mélange à couleur constante et ses équations minimum/maximum, les opérations
 logiques, les modes de polygone, les pointillés de ligne et de polygone, et les requêtes
-d'occlusion. La v8 les ajoute (tâches 3.2, 3.3 et 3.7 de `docs/todo-gpu-3d.md`).
+d'occlusion. La v8 les ajoute (tâches 3.2, 3.3 et 3.7 de
+`docs/archive/todo-gpu-3d-2026-09-24.md`, axe 3).
 
 Règle inchangée à chaque version : **rien n'est retiré, aucune longueur de commande existante ne
 change**. La v8 n'ajoute que des clés d'état et quatre opcodes ; toutes les valeurs initiales sont

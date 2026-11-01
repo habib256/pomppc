@@ -211,3 +211,5 @@ sur toutes les scènes et sur Marble Blast.
 - L'atténuation de la taille des points (`GL_POINT_DISTANCE_ATTENUATION`) n'est pas portée par le
   protocole : le chemin brut la refuse, le chemin hérité l'**ignore** (il envoie la taille de base).
   À corriger avant d'annoncer `GL_ARB_point_parameters` (cf. `docs/re/version-extensions.md`).
+  (01/11 : dépassé, l'hôte les porte depuis la v10, `QGPU_SK_POINT_*` dans
+  `patches/qgpu/qgpu_proto.h` ; le plugin les vérifie par `point_params_ok`.)

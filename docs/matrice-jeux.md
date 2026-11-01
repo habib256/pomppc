@@ -475,11 +475,13 @@ conservé dans `docs/archive/` ; le `TODO.md` d'aujourd'hui n'a plus de sections
   (Swap60, Swap58), ~38 ms/image au lieu de 12 en plein écran. Corrigé le 27/09 en
   réglant les deux exports de préférences (voir en tête).
 - **Gel de l'invité au chargement de DOOM 3** (1 lancement sur ~12), puis démarrages bloqués
-  après `system_reset` : seul un QEMU relancé repart. TODO §5.
+  après `system_reset` : seul un QEMU relancé repart. TODO §5 (archivé :
+  `docs/archive/todo-par-domaines-2026-09-27.md`).
 - **Rejoueur** (`tests/qgpu_replay.c`), corrigé : surface synthétique à la taille présentée,
   relecture de la zone présentée, `TEX_CREATE` v3 et `TEX_DESTROY` dans le prologue.
 - **Le texte des menus de Warcraft III** est juste le 26/09 (image validée) : la ligne du
-  TODO §6 date d'avant les corrections du chemin tableaux.
+  TODO §6 (`docs/archive/todo-par-domaines-2026-09-27.md`) date d'avant les corrections du chemin
+  tableaux.
 - **Fausse régression de Zenerchi (29-30/09)** : 4,4 ms/image au 27/09, 6,0 au tour
   `20260929-1234`, 7,9 au tour `20260929-2344`, lue comme un coût fixe ajouté par les bug
   hunts. Ce n'en était pas un : la fenêtre FIXE 1500..2500 tombait sur le chargement du menu.
@@ -505,6 +507,7 @@ conservé dans `docs/archive/` ; le `TODO.md` d'aujourd'hui n'a plus de sections
   `jeux/zen.py` (fenêtre repérée sur la scène, plancher 7 → 6) : 4,5 / 4,4 / 4,4 ms/image
   (tours `zenreg-corr-*`) ; tour complet `20260930-0128` : 16 vertes sur 16. Le mode vidage (un `access()` et un `fflush` par image) coûte
   ~0,4 ms/image à Zenerchi : les vitesses de la matrice l'incluent.
-- **Anciennes vitesses du TODO §1** : « Marble Blast ~88 img/s », « Zenerchi ~50 img/s »
-  venaient d'autres scènes (bureau du disque de dev, démo) ; à scène fixe : Marble Blast
-  12,4 ms/image (~80 img/s) en plein écran, Zenerchi 5,2 ms/image au menu.
+- **Anciennes vitesses du TODO §1** (`docs/archive/todo-par-domaines-2026-09-27.md`) : « Marble
+  Blast ~88 img/s », « Zenerchi ~50 img/s » venaient d'autres scènes (bureau du disque de dev,
+  démo) ; à scène fixe : Marble Blast 12,4 ms/image (~80 img/s) en plein écran, Zenerchi 5,2
+  ms/image au menu.

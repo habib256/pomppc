@@ -1,6 +1,6 @@
 # Le bloc de changements de GLEngine, bit par bit (relevé R4, 24/09/2026)
 
-Lot 3 du verdict unique (`TODO.md` §2, `docs/re/etude-court-circuit-glengine.md` §4-§5).
+Lot 3 du verdict unique (`TODO.md` §2 de l'époque, `docs/re/etude-court-circuit-glengine.md` §4-§5).
 `gldUpdateDispatch` reçoit en troisième argument le **bloc de changements** `gctx+0x310` :
 19 mots que GLEngine remplit entre deux dessins et remet à zéro après chaque dispatch
 (`_gleDrawArraysOrElements_VBO_Exec`, 0xa7d40). La question du relevé R4 : **quel bit pose

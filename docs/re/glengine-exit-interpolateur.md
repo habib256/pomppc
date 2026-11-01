@@ -60,3 +60,8 @@ Si la sortie disparaît, le compromis est à revoir : soit `cfg+0x7a = 0` et gé
 repli `_gleForceToSoftwareTCL` (F1 sait maintenant refermer un `pend` orphelin), soit
 prendre en brut *aussi* les `glDrawElements` (canal tableaux, `POMPPC_GL_ARRAY=1`) pour
 que GLEngine ne découpe plus rien.
+
+> (01/11 : expérience close, sans résultat consigné ici. Le plugin garde `cfg+0x7a = 1` par
+> défaut (`POMPPC_GL_RDIRTY=0` pour l'essai) et `POMPPC_GL_ARRAY` vaut 0 par défaut ; la parade
+> retenue est de ne pas replier sous programme, en étendant le protocole à chaque notion
+> refusée (`docs/bilan-2026-09-23-jeux-tiger.md` §1).)

@@ -13,9 +13,9 @@ supérieure à 1.1 (`docs/re/version-extensions.md` §7) :
 | 1.4 | textures de profondeur et comparaison d'ombre, `GL_MIRRORED_REPEAT`, biais de LOD, mipmaps automatiques ; **couleur secondaire** ; **paramètres de point** |
 
 La v10 les ajoute **côté hôte** (tâches 3.4 et 3.6, la moitié hôte de 2.5 et de 3.5 de
-`docs/todo-gpu-3d.md`). Elle ajoute aussi les textures **rectangle**, hors OpenGL 1.5 strict mais
-indispensables à Quartz Extreme et Core Image plus tard (4.4). Le multiéchantillonnage (3.8) et
-les sprites de points restent hors de la v10.
+`docs/archive/todo-gpu-3d-2026-09-24.md`, axe 3). Elle ajoute aussi les textures **rectangle**, hors
+OpenGL 1.5 strict mais indispensables à Quartz Extreme et Core Image plus tard (4.4). Le
+multiéchantillonnage (3.8) et les sprites de points restent hors de la v10.
 
 Règle inchangée : **rien n'est retiré, aucune longueur de commande existante ne change**.
 `TEX_CREATE` crée une texture 2D, `TEX_IMAGE` envoie des texels ARGB, exactement comme avant ; les
@@ -140,11 +140,12 @@ GLEngine.
 
 **`QGPU_SK_COLOR_SUM`** a **trois** valeurs, pas deux, pour tenir la promesse de compatibilité.
 Jusqu'à la v9, `DRAW_RAW` ajoutait la couleur secondaire dès que le format de sommet en portait
-une : c'est ce qui empêchait le plugin de l'envoyer (`todo-gpu-3d.md`, « Ce que le lot 2 a laissé
-derrière lui »). La valeur initiale, `QGPU_CSUM_FORMAT`, garde exactement cette règle ;
-`QGPU_CSUM_OFF` et `QGPU_CSUM_ON` sont `glDisable` / `glEnable(GL_COLOR_SUM)`. Avec l'éclairage,
-c'est lui qui produit la couleur secondaire (la spéculaire en `GL_SEPARATE_SPECULAR_COLOR`, zéro
-sinon), et elle s'ajoute toujours : règle d'OpenGL, suivie à l'identique par les deux backends.
+une : c'est ce qui empêchait le plugin de l'envoyer (`docs/archive/todo-gpu-3d-2026-09-24.md`,
+« Ce que le lot 2 a laissé derrière lui »). La valeur initiale, `QGPU_CSUM_FORMAT`, garde exactement
+cette règle ; `QGPU_CSUM_OFF` et `QGPU_CSUM_ON` sont `glDisable` / `glEnable(GL_COLOR_SUM)`. Avec
+l'éclairage, c'est lui qui produit la couleur secondaire (la spéculaire en
+`GL_SEPARATE_SPECULAR_COLOR`, zéro sinon), et elle s'ajoute toujours : règle d'OpenGL, suivie à
+l'identique par les deux backends.
 
 **Paramètres de point** : `QGPU_SK_POINT_SIZE_MIN`, `_MAX`, `QGPU_SK_POINT_FADE` et les trois
 coefficients a, b, c de `GL_POINT_DISTANCE_ATTENUATION`. Taille dérivée
@@ -225,7 +226,8 @@ de développement ; rien n'a donc été touché côté invité. Dans l'ordre :
 1. ✅ **Formats convertis par l'hôte — fait le 19/09/2026.** Le plugin envoie `TEX_IMAGE3` avec
    le `LV_FORMAT` / `LV_TYPE` du niveau et son pas réel (`LV_ROWPIX`) ; les niveaux à pas aligné
    ne sont plus refusés. Images identiques au pixel près à l'ancien chemin ; +7 à +9 % sur la
-   scène `texup` en RGBA et RGB, rien en 565 et BGRA (`todo-gpu-3d.md`, 2.5).
+   scène `texup` en RGBA et RGB, rien en 565 et BGRA (`docs/archive/todo-gpu-3d-2026-09-24.md`,
+   2.5).
 2. **Textures 3D** : poser `cfg+0xbe` (`GL_MAX_3D_TEXTURE_SIZE`) à `QGPU_MAX_TEX_3D_DIM`. La sonde
    `POMPPC_GL_TRY3D` a montré que GLEngine accepte alors `glTexImage3D` et remet les niveaux par
    `gldCreateTextureLevel`. **À relever** : où le niveau porte sa profondeur (la structure de

@@ -8,6 +8,11 @@ big-endian, ABI Mach-O (arguments entiers `r3..r10`, flottants `f1..f13`).
 Objectif : recevoir dans le plugin la géométrie **avant** transformation, pour faire la
 transformation et l'éclairage sur le GPU de l'hôte (tâches 1.2 et 2.1 de `docs/todo-gpu-3d.md`).
 
+> (01/11 : objectif atteint depuis ; le plugin prend `Begin/EndPrimitiveBuffer` (chemin brut,
+> 18/09, `verification-tcl.md` §10) et `RenderVertexArray` vers `DRAW_NATIVE`
+> (`etude-court-circuit-glengine.md`). « Le comportement actuel de notre plugin » (§6.5) et
+> « l'axe 1 du TODO » désignent l'état et le TODO du 17-18/09.)
+
 Convention de ce document :
 - **[L]** = établi par lecture du code (adresse et extrait donnés) ;
 - **[H]** = hypothèse, cohérente mais non prouvée ;

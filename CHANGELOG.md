@@ -15,8 +15,8 @@ de commit et dans `docs/`.
   (`POMPPC_GA_PRESENT2`, dit si la surface est « non simple ») ; plugin `20261101-ombre` : avis
   cadencé (`POMPPC_GL_QE_NONSIMPLE_HZ`, 20) par le fil des avis, qui garde le dernier en
   attente. Protocole qgpu et QEMU inchangés ; **le kext change : réinstaller et redémarrer
-  l'invité sur les deux hôtes.** Coût seulement sous une fenêtre posée : mb-fen +6 %, d3
-  neutre. `docs/quartz-extreme.md`, journal du 01/11.
+  l'invité sur les deux hôtes.** Coût seulement sous une fenêtre posée : mb-fen +6,2 %, d3
+  +0,9 % (`4033e94`). `docs/quartz-extreme.md`, journal du 01/11.
 - **Frontal ImGuiDock : fin du double curseur, 01/11 (PC).** Le curseur de l'hôte est masqué
   au-dessus de l'image de l'invité en souris absolue (Tiger dessine le sien dans le framebuffer) ;
   il revient hors de l'image, en pause et VM arrêtée (`wantsHiddenHostCursor`, `PointerPolicy.h`,

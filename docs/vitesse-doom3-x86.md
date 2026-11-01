@@ -18,8 +18,8 @@ les leviers de l'hôte. Preuves : `bench/vitesse/d3-x86/` et `bench/tcg/ab/x86-*
   (§25, `docs/binaire-rapide-x86.md` §7).
 - **Allumé par défaut sur Linux x86-64** (`run_tiger.sh`) : la série du 04/10 au 25/10
   (`x-jit-rel32` compris depuis le 06/10, §13.4), MTTCG sur `qemu-system-ppc` (`PPC32MT`,
-  tcg/0050), `x-lfs-known` (0051), `x-tlb-base` (0052), la zone froide `x-tcg-cold` (0056, depuis
-  le 31/10, §23) ; plugin `POMPPC_GL_PACKBITS` (§25).
+  `tcg/0050-ppc-mttcg-32`), `x-lfs-known` (0051), `x-tlb-base` (0052), la zone froide
+  `x-tcg-cold` (0056, depuis le 31/10, §23) ; plugin `POMPPC_GL_PACKBITS` (§25).
 - **Éteints** : `x-tier2` (0048), `x-vperm-inline` (0059, §22), tcg/0057-0058 (macOS seul),
   tcg/0060 (x8, §24-§25), 0061 (abandonné), 0062 (diagnostic), 0063 (`tcg-g4.md` §47) ; ni
   0060-0063 ni rien d'autre au-delà de 0059 n'est nommé dans `scripts/build_qemu_qfb.sh`.
@@ -688,6 +688,8 @@ Boucle principale de QEMU : 5 % d'un cœur (38 % le 03/10). Fil de rendu qgpu : 
 Conséquence : ce qui reste côté hôte, c'est la **qualité du code généré** (sur tout le jeu,
 sans point chaud), donc le traducteur de second niveau (`docs/plan-traducteur-rapide.md`) ;
 côté invité, le plugin (agent en cours, `docs/d3-plugin-x86.md` §11) et les tics du jeu (§3.1).
+(01/11 : ce §11 n'est que sur l'étiquette `archive/plugin-d3q` ; sur `main`, le second lot
+non fusionné est résumé au §10.6 de `d3-plugin-x86.md`.)
 
 ## 15. Profil et anatomie au 24/10 : ppc32mt, binaire quotidien (`x86-hprof-2410`, `x86-asm-2410`)
 
@@ -721,8 +723,8 @@ trois `cmov`…), plus le TLB.
 **D'où viennent les opérandes du flottant** (`tools/tcg/fpsrc.py`, même pondération) : sur les
 lectures d'opérande des opérations flottantes, **38,3 % viennent d'un `lfs` du même bloc**,
 25,7 % d'un producteur de `x-fp-known` (test déjà retiré), 16,3 % d'ailleurs (inconnu).
-`x-fp-known` ne fait pas de `lfs` un producteur (§39.1 : « sa valeur vient de la mémoire ») :
-ces opérandes sont donc testés (`fpi_zon`, ~10 instructions chacun).
+`x-fp-known` ne fait pas de `lfs` un producteur (`tcg-g4.md` §39.1 : « sa valeur vient de la
+mémoire ») : ces opérandes sont donc testés (`fpi_zon`, ~10 instructions chacun).
 
 **Levier proposé (`x-lfs-known`)** : un `lfs` qui convertit par l'hôte (`vcvtss2sd`, `fcvt`) quand
 le mot chargé est un simple nul ou normal, et qui part sinon au talon (conversion DOUBLE exacte,
@@ -736,7 +738,8 @@ porte sur les instructions x86 des blocs chauds :
 sur les 2^32 mots (modèle des deux émetteurs, talon, et le vrai émetteur x86_64 en linux-user),
 mutants, Zenerchi et Marble Blast vérifiés sans divergence (4 sorties de bloc par million de
 `lfs`) ; sur ces mêmes blocs retraduits, `lfs` 26,9 → 11,3 instructions x86, tout le code
-−26 % (linux-user, sans TLB), **≈ −20 %** ramené au binaire système. A/B en jeu à faire (§40.6).
+−26 % (linux-user, sans TLB), **≈ −20 %** ramené au binaire système. A/B en jeu à faire
+(`tcg-g4.md` §40.6).
 
 ## 16. Porte du « TLB par base » (24/10, `tools/tcg/tlbbase.py`)
 

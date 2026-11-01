@@ -44,13 +44,17 @@ Autres vus, pas corrigés :
 - FASTFP **éteint** sur le QEMU quotidien (`~/src/qemu/build`, pas
   `qemu-fastfp`). `FASTFP=1 ./run_tiger.sh` est le levier de vitesse déjà
   prouvé (Marble ×1,2, Zenerchi −12 s, `docs/flottant-rapide.md`).
+  (01/11 : dépassé, `x-fast-fp` est allumé par défaut dans `run_tiger.sh`, `FASTFP=0`
+  pour le flottant exact ; l'arbre `~/src/qemu-fastfp` n'existe plus.)
 
 ## 3. Où est le code
 
 - Plugin : `guest/gldriver/pomppc_accel.c` (`tex_base_ok`, `sane_f`, `u_insane`,
   `raw_fix_nan`, `prim`, `broken_all`, drapeaux `RI_*`).
 - Identité CGL : `guest/gldriver/pomppc_gld.c` (`gldChoosePixelFormat` copie
-  traduite). `gldAttachDrawable` est encore un `FWD8` vers Apple.
+  traduite). `gldAttachDrawable` est encore un `FWD8` vers Apple (01/11 : dépassé, il
+  attache lui-même le plein écran, la surface du WindowServer et les fenêtres sous QE,
+  et ne transmet à Apple que le reste).
 - Sonde : `guest/gltest/accelprobe.c` (plein écran / fenêtre / liste SDL).
 - Job jeux : `tools/guest/jobs/games/job.sh`, `GAMES=… ut` (pas dans le défaut).
 - Hôte (inchangé ce jour) : `patches/qgpu/qgpu-core.c` `do_draw` / `do_draw_raw`

@@ -3,9 +3,9 @@
 Jusqu'à la v6, l'invité envoyait au device des sommets **déjà transformés, éclairés, découpés et
 aplatis** par GLEngine sur le PowerPC émulé : x, y en pixels, z fenêtre, couleur finale,
 coordonnées de texture déjà divisées par w. C'est ce travail-là qui limite aujourd'hui les jeux
-(cf. `docs/todo-gpu-3d.md`, axe 1). La v7 ajoute de quoi confier **tout le pipeline fixe
-d'OpenGL 1.x** à l'hôte : matrices, viewport, éclairage, matériaux, génération de coordonnées de
-texture, plans de découpe, et un dessin indexé de sommets **bruts**.
+(cf. `docs/archive/todo-gpu-3d-2026-09-24.md`, axe 1). La v7 ajoute de quoi confier **tout le
+pipeline fixe d'OpenGL 1.x** à l'hôte : matrices, viewport, éclairage, matériaux, génération de
+coordonnées de texture, plans de découpe, et un dessin indexé de sommets **bruts**.
 
 Règle inchangée à chaque version : **rien n'est retiré, aucune longueur de commande existante ne
 change**. Les opcodes de dessin v1–v6 ignorent tout l'état ci-dessous et gardent exactement leur

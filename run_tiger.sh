@@ -12,8 +12,10 @@
 #   NET=0 ./run_tiger.sh      # coupe le réseau (actif par défaut si QEMU a slirp :
 #                             # NAT, DHCP 10.0.2.15, passerelle 10.0.2.2, DNS 10.0.2.3)
 #   SSH_FWD=0                 # coupe la redirection SSH localhost:2222 → invité:22
-#                             # (10.0.2.15 n'est pas joignable depuis l'hôte)
-#   WEBPROXY=0                # ne lance pas le relais web HTTPS→HTTP (10.0.2.2:8080)
+#                             # (10.0.2.15 n'est pas joignable depuis l'hôte) ; SSH_FWD=N part du
+#                             # port N (les 9 suivants essayés s'il est pris)
+#   WEBPROXY=0                # ne lance pas le relais web HTTPS→HTTP (10.0.2.2:8080 ;
+#                             # WEBPROXY_PORT=… change le port)
 #   HEADLESS=1 ./run_tiger.sh # sans fenêtre (moniteur seul, pour scripting)
 #   POMPPC_DISPLAY=sdl        # affichage QEMU explicite, sans ImGuiDock
 #   QFB=1 ./run_tiger.sh      # + écran paravirtuel qfb-pci (kext POMPPCQFB)
@@ -22,7 +24,10 @@
 #   GPU_BACKEND=soft|gl|auto  # backend de rendu hôte du qgpu (défaut : auto ;
 #                             # le backend RÉELLEMENT pris est sondé et annoncé)
 #   GPU_SCANOUT=auto|qfb|vga|none  # cible de présentation de SURF_PRESENT
-#                             # (vide par défaut : rien n'est passé au device)
+#                             # (vide par défaut : rien n'est passé au device) ;
+#                             # GPU_TRACE=1 journalise chaque commande qgpu sur stderr
+#   QE=0 ./run_tiger.sh       # coupe Quartz Extreme (qgpu qe=on, allumé par défaut sur Linux x86-64
+#                             # et macOS arm64, sondé ; QE=1 le demande ailleurs ; docs/quartz-extreme.md)
 #   FASTFP=0 ./run_tiger.sh   # flottant exact ; le rapide (FPU hôte) est le défaut
 #   SRTLB=0 ./run_tiger.sh    # coupe le TLB gardé d'un jeu de segments à l'autre (x-sr-tlb, défaut allumé,
 #                             # patches/tcg/, docs/tcg-g4.md) ; CPU_OPTS=… propriétés brutes
@@ -35,8 +40,8 @@
 #                             # code généré (x-vfp-native, tcg/0022 : allumé par défaut sur Linux
 #                             # x86-64 et sur macOS arm64 depuis le 05/10, rebuild requis) ; VFPNVERIFY=1 : mode preuve
 #   TLBPRECISE=0 LMWINLINE=0 DCBZINLINE=0 ./run_tiger.sh  # coupe le côté mémoire (tcg/0031, 0032, 0035,
-#                             # allumés par défaut sur Linux x86-64 depuis le 06/10, éteints ailleurs,
-#                             # docs/tcg-g4.md §32) ; TLBPVERIFY=N LMWVERIFY=1 DCBZVERIFY=1 : preuves
+#                             # allumés par défaut sur Linux x86-64 depuis le 06/10 et sur macOS arm64
+#                             # depuis le 26/10, docs/tcg-g4.md §32) ; TLBPVERIFY=N LMWVERIFY=1 DCBZVERIFY=1 : preuves
 #   FPINLINE=0 ./run_tiger.sh # coupe le flottant scalaire simple (fmuls, fmadds, fcmpu…) sans ses
 #                             # deux helpers dans le cas courant (x-fp-inline, tcg/0007, allumé
 #                             # par défaut, docs/tcg-g4.md §15) ; FPVERIFY=1 : mode preuve
@@ -47,18 +52,23 @@
 #                             # hors ligne sinon (x-fp-native,
 #                             # tcg/0014, allumé par défaut depuis le 01/10, docs/tcg-g4.md §22)
 #   VFPNATIVECMP=0 ./run_tiger.sh # coupe vcmp*fp vcfsx vcfux vctsxs vctuxs par le FPU de l'hôte
-#                             # (x-vfp-native-cmp, patches/tcg/0034, x86-64 ; allumé par défaut sur
-#                             # Linux x86-64 depuis le 06/10) ; VFPNCMPVERIFY=1 : preuve
+#                             # (x-vfp-native-cmp, patches/tcg/0034, émetteur aarch64 tcg/0038 ; allumé
+#                             # par défaut sur Linux x86-64 depuis le 06/10, sur le M4 depuis le 26/10) ;
+#                             # VFPNCMPVERIFY=1 : preuve
 #   FPNATIVECMP=0 ./run_tiger.sh # coupe frsp fctiw fctiwz fcmpo fdivs fdiv par le FPU de l'hôte, fsel en
-#                             # ops TCG (x-fp-native-cmp, patches/tcg/0033, x86-64 ; allumé par défaut
-#                             # sur Linux x86-64 depuis le 06/10) ; FPNCMPVERIFY=1 : preuve
+#                             # ops TCG (x-fp-native-cmp, patches/tcg/0033, émetteur aarch64 tcg/0037 ;
+#                             # allumé par défaut sur Linux x86-64 depuis le 06/10, sur le M4 depuis
+#                             # le 26/10) ; FPNCMPVERIFY=1 : preuve
 #   FPKNOWN=0 ./run_tiger.sh  # coupe : dans un bloc, omettre les tests d'opérande et la porte du FPSCR que
 #                             # l'op de x-fp-native n'a plus à refaire (x-fp-known, patches/tcg/0045,
-#                             # allumé sur Linux x86-64 depuis le 20/10, docs/tcg-g4.md §37) ; FPVERIFY=1 : preuve
+#                             # allumé sur Linux x86-64 depuis le 20/10, sur le M4 depuis le 26/10,
+#                             # docs/tcg-g4.md §37) ; FPVERIFY=1 : preuve
 #   FPRFLAZY=0 ./run_tiger.sh # coupe : FPRF et FI calculés à la lecture du FPSCR, pas à chaque opération
-#                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10, §38)
+#                             # (x-fprf-lazy, patches/tcg/0046, allumé sur Linux x86-64 depuis le 20/10,
+#                             # sur le M4 depuis le 26/10, §38)
 #   STFSKNOWN=0 ./run_tiger.sh # coupe : stfs d'une valeur connue (x-fp-known) sans la conversion complète
-#                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10, §39)
+#                             # (x-stfs-known, patches/tcg/0047, allumé sur Linux x86-64 depuis le 20/10,
+#                             # sur le M4 depuis le 26/10, §39)
 #   LFSKNOWN=0 ./run_tiger.sh # coupe : lfs converti par l'hôte quand le mot est un simple nul ou normal, et
 #                             # producteur de x-fp-known (x-lfs-known, patches/tcg/0051, docs/tcg-g4.md §40 ;
 #                             # allumé par défaut depuis le 24/10, d3 −9,5 % ; n'agit qu'avec FPKNOWN=1)
@@ -68,10 +78,21 @@
 #   PPC32MT=0 ./run_tiger.sh  # coupe : SMP >= 2 sur qemu-system-ppc (cible 32 bits, celle du G4) en MTTCG au
 #                             # lieu de qemu-system-ppc64 (patches/tcg/0050, docs/ppc32-mttcg.md ; allumé par
 #                             # défaut depuis le 23/10 (PC) et le 26/10 (M4), sondé : sans le patch, repli ppc64)
+#   TCGCOLD=0 ./run_tiger.sh  # Linux x86-64 : coupe les chemins lents du code généré en zone froide de la
+#                             # région (x-tcg-cold, patches/tcg/0056, propriété de l'accélérateur ; allumé
+#                             # par défaut sur Linux x86-64 depuis le 31/10, docs/vitesse-doom3-x86.md §23 ;
+#                             # éteint sur le M4, où il serait sans effet : b.cond imm19)
+#   VPERMINLINE=1 ./run_tiger.sh # vperm en pshufb dans le code généré (x-vperm-inline, patches/tcg/0059,
+#                             # éteint par défaut, neutre) ; VPERMVERIFY=1 : preuve
+#   VCPUQOS=1 POLLNS=1 ./run_tiger.sh # macOS : fils vCPU en QoS interactive (x-vcpu-qos, tcg/0057) et
+#                             # attente de la boucle principale à la µs (POMPPC_POLL_NS, tcg/0058) ;
+#                             # éteints par défaut tant que l'A/B n'est pas fait
+#   MEMSTATS=1 ./run_tiger.sh # compteurs mémoire toutes les 10 s sur stderr (x-mem-stats, tcg/0031, 0042)
 #   PMUREAL=1 ./run_tiger.sh  # ppc64 : le PMU POWER8 ne compte plus sur un G4 (PMC5 fantôme à chaque
 #                             # sortie de bloc, x-pmu-real, patches/tcg/0049 ; éteint par défaut)
 #   TIER2=4096 ./run_tiger.sh # DOOM 3 +3,3 % PC, +5,7 % M4 (docs/plan-traducteur-rapide.md §9.6, §9.9) — traces d'une page (x-tier2, patches/tcg/0048,
-#                             # éteint par défaut ; TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
+#                             # éteint par défaut ; TIER2TBS=K : au plus K TB par trace, défaut 16 ;
+#                             # TIER2VERIFY=64 rejoue une trace sur 64 contre ses TB)
 #   FPNATIVE64=0 ./run_tiger.sh # coupe le même pour le flottant DOUBLE (fadd fmul fmadd… : x-fp-native64,
 #                             # tcg/0016, allumé par défaut, docs/tcg-g4.md §24) ; FPVERIFY=1 : preuve
 #   TBFAST=0 ./run_tiger.sh   # coupe mftb/mftbu calculés depuis le compteur de l'hôte (cntvct, 1 GHz ;
@@ -94,8 +115,9 @@
 #   JITREL32=0 ./run_tiger.sh # x86-64 Linux : coupe le tampon du JIT à moins de 2 Gio du texte, appels
 #                             # de helpers directs (x-jit-rel32, tcg/0024, allumé par défaut depuis le
 #                             # 06/10 : les deux régimes d'UT2004 étaient un artefact de mesure, §31)
-#   DIRTYSKIP=0 PTEGMAP=0 JC2WAY=0 ./run_tiger.sh # coupe les helpers côté hôte (tcg/0040, 0041, allumés sur Linux x86-64
-#                             # depuis le 20/10, docs/tcg-g4.md §36) ; DIRTYSKIPVERIFY=1 PTEGMAPVERIFY=1 : preuves
+#   DIRTYSKIP=0 PTEGMAP=0 JC2WAY=0 ./run_tiger.sh # coupe les helpers côté hôte (tcg/0040, 0041, 0043, allumés
+#                             # sur Linux x86-64 depuis le 20/10 et sur le M4 depuis le 26/10, docs/tcg-g4.md §36) ;
+#                             # DIRTYSKIPVERIFY=1 PTEGMAPVERIFY=1 : preuves
 #   LMWVEC=0 JCWORD=0 ./run_tiger.sh # coupe la copie lmw/stmw vectorielle (tcg/0025/0029) et le
 #                             # cache de sauts par mot (tcg/0026) ; allumés sur macOS arm64 et Linux x86-64
 #   QEMU_FAST=0 ./run_tiger.sh  # Linux x86-64 : binaire de référence build/ au lieu du binaire
@@ -126,7 +148,8 @@
 # Le son est SONDÉ, pas supposé : si le binaire n'a pas la classe 'screamer', le
 # lanceur le dit, coupe l'audio et NE rabote PAS la RAM. (Un -global sur une
 # classe absente n'est qu'un warning côté QEMU : rien ne signalait la panne.)
-# SMP >= 2 : qemu-system-ppc64 (target MTTCG-safe) + réveil CPU secondaire via
+# SMP >= 2 : qemu-system-ppc en MTTCG (PPC32MT=1, défaut des deux hôtes, tcg/0050 sondé ;
+# repli sur qemu-system-ppc64 sans le patch ou avec PPC32MT=0) + réveil CPU secondaire via
 # GPIO KeyLargo. Vérifie le nb de CPU dans « À propos de ce Mac ». Son via
 # PulseAudio sous Linux, CoreAudio sous macOS (activer la Mémoire Virtuelle
 # côté invité aide). Fenêtre fermée -> quitte.
@@ -155,7 +178,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Marble Blast −21 %, UT2004 −7 %) et, par-dessus, JITREL32 (tcg/0024, ses « deux
 # régimes » étaient un artefact de mesure, tcg-g4 §31) FPNATIVECMP VFPNATIVECMP
 # (tcg/0033-0034) LMWVEC (tcg/0029) JCWORD (tcg/0026) ensemble : DOOM 3 −2,6 %.
-# Tous allumés par défaut sur ce seul hôte ; chacun reste surchargeable à 0.
+# Tous allumés par défaut sur ce seul hôte ; chacun reste surchargeable à 0. (01/11 : le M4
+# les a aussi depuis le 26/10, bloc Darwin:arm64 ci-dessous ; JITREL32 reste propre à Linux.)
 # Depuis le 20/10/2026 (docs/tcg-g4.md §36-§39, hôte au repos, binaire -O2 des deux
 # côtés) : DIRTYSKIP PTEGMAP JC2WAY (tcg/0040, 0041, 0043 : DOOM 3 −4,4 %) et
 # FPKNOWN FPRFLAZY STFSKNOWN (tcg/0045-0047 : DOOM 3 −6,3 %), sur Linux x86-64 seul :
@@ -604,10 +628,10 @@ if [ "${FPNATIVE64:-0}" != 0 ]; then
 fi
 # --- Comparaisons et conversions flottantes par le FPU de l'hôte (x-fp-native-cmp,
 # patches/tcg/0033, docs/tcg-g4.md §33) --- frsp fctiw fctiwz fcmpo fdivs fdiv par
-# la même op TCG que x-fp-native (émetteur x86-64 seulement : sans effet sur arm64),
+# la même op TCG que x-fp-native (émetteurs x86-64 et, depuis tcg/0037, aarch64),
 # fsel en ops TCG. Mêmes résultats, même FPSCR au bit près. N'agit qu'avec
 # x-fast-fp. Allumé par défaut sur Linux x86-64 depuis le 06/10 (A/B en jeu,
-# docs/vitesse-doom3-x86.md §13), éteint ailleurs : FPNATIVECMP=0 / =1 ;
+# docs/vitesse-doom3-x86.md §13) et sur macOS arm64 depuis le 26/10 : FPNATIVECMP=0 / =1 ;
 # FPNCMPVERIFY=1 ajoute le mode preuve (x-fp-native-cmp-verify, bilan sur stderr).
 if [ "${FPNATIVECMP:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-native-cmp=on"; then
@@ -629,7 +653,8 @@ fi
 # instruction précédente du bloc garantit flottant simple nul ou normal (résultat de son
 # chemin court), ni la porte du FPSCR déjà franchie ; l'instruction qui garantit quitte le
 # bloc quand son chemin lent rompt la garantie. Mêmes résultats au bit près. N'agit
-# qu'avec x-fp-native. Allumé par défaut sur Linux x86-64 (20/10) ; FPVERIFY=1 le vérifie.
+# qu'avec x-fp-native. Allumé par défaut sur Linux x86-64 (20/10) et macOS arm64 (26/10) ;
+# FPVERIFY=1 le vérifie.
 if [ "${FPKNOWN:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fp-known=on"; then
     case "$CPU_SPEC" in
@@ -645,7 +670,8 @@ fi
 # --- FPRF paresseux (x-fprf-lazy, patches/tcg/0046, docs/tcg-g4.md §38) --- le chemin
 # court de x-fp-native range son résultat au lieu de calculer FPSCR[FPRF] et FI ; mffs,
 # mtfsf…, les helpers, gdbstub, la migration et les interruptions voient le FPSCR complet.
-# Mêmes résultats au bit près. N'agit qu'avec x-fp-native. Allumé par défaut sur Linux x86-64 (20/10).
+# Mêmes résultats au bit près. N'agit qu'avec x-fp-native. Allumé par défaut sur Linux x86-64 (20/10)
+# et macOS arm64 (26/10).
 if [ "${FPRFLAZY:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-fprf-lazy=on"; then
     case "$CPU_SPEC" in
@@ -660,7 +686,8 @@ if [ "${FPRFLAZY:-0}" != 0 ]; then
 fi
 # --- stfs court (x-stfs-known, patches/tcg/0047, docs/tcg-g4.md §39) --- stfs d'un
 # registre que x-fp-known sait flottant simple nul ou normal : un décalage et un dépôt au
-# lieu de la conversion SINGLE() entière. N'agit qu'avec x-fp-known. Allumé sur Linux x86-64 (20/10).
+# lieu de la conversion SINGLE() entière. N'agit qu'avec x-fp-known. Allumé sur Linux x86-64 (20/10)
+# et macOS arm64 (26/10).
 if [ "${STFSKNOWN:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-stfs-known=on"; then
     case "$CPU_SPEC" in
@@ -725,10 +752,11 @@ if [ "${TIER2:-0}" != 0 ]; then
 fi
 # --- Comparaisons et conversions AltiVec par le FPU de l'hôte (x-vfp-native-cmp,
 # patches/tcg/0034, docs/tcg-g4.md §34) --- vcmpeqfp vcmpgefp vcmpgtfp vcmpbfp
-# (et formes Rc), vcfsx vcfux vctsxs vctuxs par l'op TCG de x-vfp-native (émetteur
-# x86-64 seulement : sans effet sur arm64). Mêmes résultats, même VSCR[SAT], même
+# (et formes Rc), vcfsx vcfux vctsxs vctuxs par l'op TCG de x-vfp-native (émetteurs
+# x86-64 et, depuis tcg/0038, aarch64). Mêmes résultats, même VSCR[SAT], même
 # CR6 au bit près. N'agit qu'avec x-vfp-native (VFPNATIVE). Allumé par défaut sur Linux
-# x86-64 depuis le 06/10, éteint ailleurs : VFPNATIVECMP=0 / =1 ; VFPNCMPVERIFY=1 le vérifie.
+# x86-64 depuis le 06/10 et sur macOS arm64 depuis le 26/10 : VFPNATIVECMP=0 / =1 ;
+# VFPNCMPVERIFY=1 le vérifie.
 if [ "${VFPNATIVECMP:-0}" != 0 ]; then
   if qemu_cpu_has_prop "$BIN" "$MACHINE" "$CPU" "x-vfp-native-cmp=on"; then
     case "$CPU_SPEC" in
@@ -825,7 +853,8 @@ done
 # accès mot en ligne ; DCBZINLINE=1 : x-dcbz-inline, dcbz en quatre rangements de
 # zéros ; LMWVERIFY=1 / DCBZVERIFY=1 : leurs modes preuve. MEMSTATS=1 :
 # x-mem-stats (compteurs toutes les 10 s sur stderr). Allumés par défaut sur Linux
-# x86-64 depuis le 06/10 (docs/vitesse-doom3-x86.md §13), éteints ailleurs ; =0 les coupe.
+# x86-64 depuis le 06/10 (docs/vitesse-doom3-x86.md §13) et sur macOS arm64 depuis le
+# 26/10 ; =0 les coupe.
 for _p in "TLBPRECISE x-tlb-precise TLB-PRÉCIS" "LMWINLINE x-lmw-inline LMW-EN-LIGNE" \
           "LMWVERIFY x-lmw-inline-verify LMW-VÉRIFIÉ" "DCBZINLINE x-dcbz-inline DCBZ-EN-LIGNE" \
           "DCBZVERIFY x-dcbz-inline-verify DCBZ-VÉRIFIÉ" "MEMSTATS x-mem-stats COMPTEURS-MÉMOIRE"; do
@@ -847,7 +876,8 @@ done
 # DIRTYSKIPVERIFY=1 : mode preuve (parcours complet derrière, qui ne doit rien
 # trouver). PTEGMAP=1 : x-pteg-map, la recherche dans la table des pages (MMU
 # 32 bits à hachage) lit chaque PTEG par un seul pointeur hôte ; PTEGMAPVERIFY=1 :
-# mode preuve (recherche d'origine refaite et comparée). Allumés sur Linux x86-64 (20/10).
+# mode preuve (recherche d'origine refaite et comparée). Allumés sur Linux x86-64 (20/10)
+# et macOS arm64 (26/10).
 # PMUREAL=1 : x-pmu-real (patches/tcg/0049, docs/ppc32-mttcg.md), le modèle de PMU POWER8
 # de qemu-system-ppc64 ne compte que sur un CPU qui en a les registres : un G4 n'ajoute
 # plus num_insns à un PMC5 fantôme à chaque sortie de bloc. Sans effet sur qemu-system-ppc.
@@ -972,7 +1002,8 @@ if [ "${JCWORD:-0}" != 0 ]; then
   fi
 fi
 # JC2WAY=1 : x-jc-2way (tcg/0043, propriété de l'accélérateur, docs/tcg-g4.md §36),
-# cache de sauts à deux voies (case h puis h^1, même groupe de page). Allumé sur Linux x86-64 (20/10).
+# cache de sauts à deux voies (case h puis h^1, même groupe de page). Allumé sur Linux x86-64 (20/10)
+# et macOS arm64 (26/10).
 if [ "${JC2WAY:-0}" != 0 ]; then
   if qemu_tcg_has_prop "$BIN" "$MACHINE" "x-jc-2way=on"; then
     TCG_ACCEL="${TCG_ACCEL:-tcg},x-jc-2way=on"

@@ -21,7 +21,9 @@ Si l'image vient du rendu logiciel, ou si `POMPPC_GL_DIRECT=0`, elle est
 synchronisée puis copiée depuis le tampon arrière. Les transferts en vol sont
 terminés avant libération du tampon lors d'un détachement ou d'une destruction.
 Ce chemin vise l'écran principal de la VM, en 32 bits ; le multi-écran et les
-formats 16 bits ne sont pas couverts.
+formats 16 bits ne sont pas couverts. (01/11 : dépassé pour le 16 bits :
+`pomppc_attach_fullscreen` demande le mode 32 bits et, s'il est refusé, attache
+quand même en 16 bits 1555 ; l'écran du WindowServer sous QE passe aussi par lui.)
 
 ## Lancer le jeu
 

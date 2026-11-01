@@ -96,7 +96,8 @@ spéculaire) en **`+0x30`** du sommet et la **spéculaire en `+0x50`** (RGB). En
 `+0x50` est nul et la spéculaire est déjà dans `+0x30`. Le rendu d'Apple ignore `+0x50` : la
 spéculaire séparée n'est **pas tenue** sous lui. Le chemin brut la tient (l'hôte éclaire) ; le
 chemin hérité ne la tient pas encore (le protocole n'a pas de dessin hérité avec couleur
-secondaire).
+secondaire). (01/11 : dépassé, tenue sur les deux chemins depuis la v11, voir le commentaire de
+`pomppc_override_string` dans `guest/gldriver/pomppc_accel.c`.)
 
 ## 6. Ce qui en découle dans le plugin
 

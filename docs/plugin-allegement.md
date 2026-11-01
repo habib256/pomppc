@@ -70,9 +70,9 @@ Méthode du §10 de `d3-plugin-x86.md` : chaque levier derrière une variable `P
 éteinte d'abord, un mode `=2` de contrôle (refait la voie complète et compte les écarts), et
 les preuves `plugmd5` (66 scènes à l'octet), job `gpu` et compteurs de contrôle sur la VM de
 dev. Ensuite un A/B sur la VM quotidienne pour les **quatre** jeux, pas seulement DOOM 3. Un
-levier n'est allumé que s'il ne perd sur aucun jeu. Leçon du §10.6 : le compte à l'instruction
-d'une scène ne prédit le jeu qu'au-delà de ~1 000 instructions par dessin ; viser des postes
-visibles dans ces profils.
+levier n'est allumé que s'il ne perd sur aucun jeu. Leçon du §10.6 de `d3-plugin-x86.md` : le
+compte à l'instruction d'une scène ne prédit le jeu qu'au-delà de ~1 000 instructions par dessin ;
+viser des postes visibles dans ces profils.
 
 - **A. Chemin Begin/End** : reprendre au Begin ce que le dispatch a déjà décidé
   (verdict, unités, format, programmes, état, matrices) quand les blocs reçus depuis le dernier
@@ -180,7 +180,8 @@ leur profil : neutres attendus (`d3inter` +4 instructions par dessin).
   dont le verdict aurait été repris, recalculés et comparés, **0 écart** (6 refaits, clé
   changée) ; 126 comparaisons de lumière faites, 410 sautées, **0 changement non signalé** ;
   séries d'unités contrôlées 2 867 (`chk`) et 2 471 (`bvsu`), **0 écart** ; matrices
-  (`MTXDIRTY`) 0 écart. (`arbvp`…`glsldp` rendent 1 dans tous les modes, comme au §10.3.)
+  (`MTXDIRTY`) 0 écart. (`arbvp`…`glsldp` rendent 1 dans tous les modes, comme au §10.3 de
+  `d3-plugin-x86.md`.)
 - Job `gpu` : défaut **56 OK, 0 échec** (`qgpu_test` 0) ; les deux variables allumées
   **56 OK, 0 échec**. `mbimm` et `litdirty` comparées au rendu d'Apple (job `gpu`,
   `SCENES="mbimm litdirty"`, leviers allumés) : écart hors arêtes 0 et 1 (32 bits), 17 et
@@ -647,13 +648,13 @@ noté `UVWIDE écart`.
 
 ### 7.6 A/B à jouer sur la VM quotidienne
 
-(01/11 : joué le 23/10, et levier allumé, voir §7.7. Le worktree cité ci-dessous n'existe plus :
-le bundle est dans `bench/uvwide-2310/`.)
+(01/11 : joué le 23/10, et levier allumé, voir §7.7. Le worktree cité à l'origine n'existe plus :
+le bundle est dans `bench/uvwide-2310/`, chemin corrigé ci-dessous.)
 
 Installer le bundle (VM quotidienne démarrée) :
 
 ```
-cat /home/gistarcade/src/pomppc/.claude/worktrees/agent-a245ab1fae021e4d6/bench/uvwide-2310/GLDriver-POMPPC-20261023-uvw.bundle.tar | tools/guest/tssh.sh \
+cat bench/uvwide-2310/GLDriver-POMPPC-20261023-uvw.bundle.tar | tools/guest/tssh.sh \
   "cat > /tmp/uvw.tar && cd /tmp && rm -rf GLDriver-POMPPC.bundle && tar xf uvw.tar && \
    echo tiger974 | sudo -S sh -c 'rm -rf /System/Library/Extensions/GLDriver-POMPPC.bundle && \
    cp -R /tmp/GLDriver-POMPPC.bundle /System/Library/Extensions/ && \

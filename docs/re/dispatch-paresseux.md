@@ -5,6 +5,10 @@
 mesure avec n'a pas été faite** : le travail a été arrêté pour laisser la place à
 un correctif prioritaire. Rien n'a été validé dans un jeu avec la variable allumée.
 
+> (01/11 : dépassé. **Allumée par défaut depuis le 24/09/2026 au soir**, `bef1449` :
+> `LAZY_DEFAULT 1` dans `guest/gldriver/pomppc_accel.c`, `POMPPC_GL_LAZYAPPLE=0` l'éteint.
+> Les « éteint par défaut » ci-dessous (§4, fin de la mesure) sont l'état d'avant.)
+
 ## 1. Ce qui coûte (mesure de référence, sans transmission paresseuse)
 
 DOOM 3, carte `demo_mars_city1`, fenêtre 640×480, révision `20260924-lazyapple`

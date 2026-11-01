@@ -99,7 +99,7 @@ pomppc_fast_ok() {
       return 1
     fi
   done
-  # Capacités, sondées sur le binaire qui sera LANCÉ (ppc64 en SMP) : celles sans
+  # Capacités, sondées sur le binaire qui sera LANCÉ (ppc64 en SMP sans PPC32MT) : celles sans
   # lesquelles le lanceur dégraderait (son, GPU, SMP). Mieux vaut la référence
   # complète qu'un binaire rapide amputé.
   qemu_machine_has "$run" "$m" screamer >/dev/null 2>&1 ||

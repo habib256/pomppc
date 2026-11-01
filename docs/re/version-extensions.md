@@ -101,7 +101,8 @@ c'est ce qui est annoncé (§3).
 
 → **1.4 n'était pas tenu au 18/09/2026. Il l'est depuis le 19/09/2026** sous le plugin avec un
 device v12 : c'est ce qui est annoncé (§3). Reste ouvert, antérieur et hors 1.4 : `glMaterial`
-entre `glBegin` et `glEnd` au chemin brut (`docs/re/opengl-1.4.md` §3.3).
+entre `glBegin` et `glEnd` au chemin brut (`docs/re/opengl-1.4.md` §3.3 ; 01/11 : corrigé le
+07/10).
 
 ### OpenGL 1.5
 
@@ -119,13 +120,20 @@ device v12 : c'est ce qui est annoncé (§3).
 
 ## 3. Ce qui est annoncé, et pourquoi
 
+> (01/11 : en partie dépassé. `GL_VERSION` plafonne toujours à « 1.5 POMPPC-1.0 »
+> (`pomppc_override_string`), mais la liste a grandi depuis : S3TC (23/09), vertex array range
+> (26/09, bit 47), rectangles (27/09, bit 25), programmes de fragments ARB (v16), GLSL (v21),
+> et 8 unités accélérées (v17, `QGPU_MAX_UNITS`). Les listes « ajoutées », « non annoncées » et
+> les limites ci-dessous sont celles du 18-19/09 ; l'état courant se lit dans
+> `guest/gldriver/pomppc_accel.c`, à l'annonce des extensions.)
+
 ### `GL_VERSION` = « 1.5 POMPPC-1.0 » (depuis le 19/09/2026, device v12)
 
 Tout 1.4, plus ce que 1.5 ajoute : objets tampon (GLEngine, vérifiés jusqu'à `glMapBuffer` et
 `glGetBufferSubData`), requêtes d'occlusion (v8, tenues par nous), les huit fonctions d'ombre
 (hôte v10). Une extension de plus : `GL_EXT_shadow_funcs` (bit 40) — soit **55**. C'est la
 version visée par la feuille de route (`docs/todo-gpu-3d.md`) ; réserves : `docs/re/opengl-1.4.md`
-§3.3 (`glMaterial` entre `glBegin` et `glEnd`, chemin brut) et
+§3.3 (`glMaterial` entre `glBegin` et `glEnd`, chemin brut ; corrigé le 07/10) et
 `docs/re/bordure-et-compression.md` §2.4 (requêtes de niveau compressé, côté GLEngine).
 
 ### (19/09/2026) `GL_VERSION` = « 1.4 POMPPC-1.0 » (device v12)

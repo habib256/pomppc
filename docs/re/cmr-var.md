@@ -1,6 +1,6 @@
 # Colin McRae : la géométrie éclatée résolue — `GL_APPLE_vertex_array_range` (26/09/2026)
 
-Mystère ouvert depuis le 23/09 (`programmes-arb.md` §3 bis/ter, TODO §6) : en course, la
+Mystère ouvert depuis le 23/09 (`programmes-arb.md` §3 bis/ter, TODO §6 de l'époque) : en course, la
 géométrie du monde sort en éclats (pointes, nappes) ou disparaît, le HUD est juste. L'hypothèse
 du 23/09 (« GLEngine déroule des tableaux déjà libérés par IndirectX ») était **fausse** : les
 tableaux sont vides **avant** que le jeu appelle `glDrawElements`. La cause est une extension

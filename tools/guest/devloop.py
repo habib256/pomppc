@@ -44,6 +44,9 @@ Variables d'environnement :
     TCG_OPTS    propriétés de l'accélérateur TCG (p. ex. x-jit-near=on, docs/tcg-g4.md §14)
     QEMU_EXTRA  arguments ajoutés tels quels en fin de ligne de commande
                (p. ex. le greffon TCG : QEMU_EXTRA="-plugin tools/tcg/libppcmix.dylib,out=…")
+    SSH_PORT    redirection ssh hôte → invité:22 (défaut 2222 ; 0 pour rien)
+    PPC32MT     1 : SMP sur qemu-system-ppc en MTTCG (vide par défaut ici,
+               contrairement à run_tiger.sh qui l'allume)
     DEVDISK, CDROM, SMP, SND, RES, NET, GPU_BACKEND, GPU_TRACE, GUI_USER
 
 `run` REND LE CODE DE SORTIE DU JOB (en-tête « OUT <id> <m> <rc> » écrit par

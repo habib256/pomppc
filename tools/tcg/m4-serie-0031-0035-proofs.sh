@@ -105,7 +105,8 @@ do_host() {
 DL="$ROOT/tools/guest/devloop.py"
 # Options de production du M4 (run_tiger.sh, Darwin:arm64, 06/10) : x-fast-fp et
 # compagnie, x-vfp-native, x-lmw-vector ; accélérateur : x-jit-near, x-jc-bits=14,
-# x-jc-word. Rien de 0031-0039 n'est allumé par défaut sur le M4.
+# x-jc-word. Rien de 0031-0039 n'est allumé par défaut sur le M4. (01/11 : la série est
+# allumée sur le M4 depuis le 26/10, docs/parite-m4-2510.md ; cette base reste celle du 06/10.)
 BASE="x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-fp-inline=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on,x-fp-native=on,x-fp-native64=on,x-tb-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on"
 TCGB="x-jit-near=on,x-jc-bits=14,x-jc-word=on"
 NAT="x-fp-native-cmp=on,x-vfp-native-cmp=on,x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on"

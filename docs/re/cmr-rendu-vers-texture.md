@@ -166,3 +166,5 @@ tous sur la carrosserie) ; les références validées du PC rejouées avec le c�
 d3-pe, mb-fen, mb-pe, ut-fen, ut-pe, zen-fen **0,00 %** ; cmr-pe 5,00 / 7,53 % (le faux reflet).
 Ancienne référence gardée dans `bench/matrice/ref-linux/cmr-pe.faux-reflet-2810/`, nouvelle
 référence prise le 31/10 (à valider à l'œil). Le M4 : même `qgpu-core.c`, à reconstruire.
+(01/11 : référence cmr-pe du PC validée à l'œil le 01/11 ; la cellule cmr se mesure en course
+depuis `6054367`. Le M4 reste à reconstruire : `docs/etat-des-hotes.md` §4.)

@@ -184,7 +184,7 @@ Profils agrégés (quatre `sample` de 10 s par mode, ~3 400 échantillons chacun
 10 automatisées** — Marble Blast plein écran, Zenerchi, DOOM 3 et Prey (fenêtre et
 plein écran), UT2004 (les deux), Warcraft III plein écran ; images justes à
 0,00 % partout (rejeu = VM et référence). Seule rouge : Marble Blast en fenêtre
-(défaut connu, deux replis par image, TODO §6). Vitesses de ce tour (DOOM 3 68,4 /
+(défaut connu, deux replis par image, TODO §6 de l'époque). Vitesses de ce tour (DOOM 3 68,4 /
 66,5, Marble Blast 11,2, Zenerchi 5,6, contre 63,8 / 63,6, 9,9, 4,1 au tour
 `20260926-1527`) : hôte chargé toute la soirée (charge 2,1-3,9) et, à partir de
 18 h 17, la copie de QEMU de l'agent TCG (`qret1564`, 97 % d'un cœur) — que

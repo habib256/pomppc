@@ -1,4 +1,4 @@
-# Le G4 sur la cible 32 bits en MTTCG (`tcg/0049`, `tcg/0050`, 23/10/2026)
+# Le G4 sur la cible 32 bits en MTTCG (`tcg/0049`, `tcg/0050-ppc-mttcg-32`, 23/10/2026)
 
 PC Linux x86-64 (i7-10700F), QEMU 11.1.2. Objectif de fond : DOOM 3 à 50 ms/image (~92
 aujourd'hui), où le code généré fait 84 % du temps vCPU (`docs/vitesse-doom3-x86.md` §14). Ce
@@ -106,7 +106,7 @@ n'émet plus rien.
   blocs** ; **avec**, 0 (les 85 blocs restants portent d'autres compteurs de l'invité, les
   mêmes que sur ppc). Code statique : −3,3 %.
 
-### 3.2 `tcg/0050` : MTTCG pour la cible 32 bits
+### 3.2 `tcg/0050-ppc-mttcg-32` : MTTCG pour la cible 32 bits
 
 QEMU 11.1.2 déclare MTTCG par cible dans `TCGCPUOps.mttcg_supported`
 (`accel/tcg/tcg-all.c`, `tcg_init_machine`) ; le PowerPC y mettait
@@ -186,12 +186,12 @@ qui supposait ppc64 :
 | `x-ret-verify` | 3,06 G en ligne + 46 M en boucle + 79 M par le helper ; **14 « sans traduction », 0 autre** ; 149 courses (`smctest`) | 3,12 G + 47 M + 44 M ; **les mêmes 14** ; 123 courses |
 | `x-tb-verify` | 799 831 939 lectures, 0 positif | 983 702 123, 0 positif |
 
-Empreintes = celles du §30.5 (et du M4). Les 14 « sans traduction » sont tous au démarrage, sur
-cpu 0, `mmu_idx` 1, `pc` dans BootX (`0x5601cb0`, `0x5610664`, `0x561171c`) ou OpenBIOS
-(`0xfff0d044`, `0xfff16f0c`, `0xfff1ccb4`) : la classe expliquée au `docs/tcg-g4.md` §35
-(OpenBIOS évince une PTE sans `tlbie` de sa page, `x-tlb-precise` garde l'entrée du cache de
-sauts), règle de lecture du §35.2. **Le témoin ppc64 donne exactement les mêmes 14 cas aux
-mêmes `pc`** : rien n'est propre à la cible 32 bits.
+Empreintes = celles de `tcg-g4.md` §30.5 (et du M4). Les 14 « sans traduction » sont tous au
+démarrage, sur cpu 0, `mmu_idx` 1, `pc` dans BootX (`0x5601cb0`, `0x5610664`, `0x561171c`) ou
+OpenBIOS (`0xfff0d044`, `0xfff16f0c`, `0xfff1ccb4`) : la classe expliquée au `docs/tcg-g4.md` §35
+(OpenBIOS évince une PTE sans `tlbie` de sa page, `x-tlb-precise` garde l'entrée du cache de sauts),
+règle de lecture du §35.2. **Le témoin ppc64 donne exactement les mêmes 14 cas aux mêmes `pc`** :
+rien n'est propre à la cible 32 bits.
 
 ### 4.2 Contention `lwarx`/`stwcx.` (`atomtest`)
 
@@ -628,7 +628,7 @@ temps, **0 divergence** ; `x-ret-verify` : 8,1 G blocs en ligne, 0 divergence, e
 écran.** Fusionné éteint (`PPC32MT=1`). Pour le défaut sur Linux x86-64 : reconstruire la
 référence `~/src/qemu` avec 0049-0050 (VM quotidienne arrêtée), entraîner `build-fast` sur les
 jeux (`pgo-train.sh --banc matrice --cible ppc32mt`), puis `PPC32MT` à 1 par défaut ; parité
-arm64 sur le M4 (construction, `atomtest`, preuves du §30.5) avant de l'allumer là-bas.
+arm64 sur le M4 (construction, `atomtest`, preuves de `tcg-g4.md` §30.5) avant de l'allumer là-bas.
 
 ## 14. A/B du binaire rapide final (24/10, `bench/ppc32mt-2310/chaine-final.sh`)
 

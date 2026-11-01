@@ -140,7 +140,8 @@ repos pendant toute la campagne (7 % d'un cœur).
 vCPU aussi occupés que dans c2 (101 % d'un cœur au total), mais tout est plus lent —
 dès le premier tour de `regbench` (`call` 761 ms contre 620-630 dans les autres
 démarrages, `mem` 712 contre 469) : le micro-banc, inutile pour les deux régimes du JIT
-(§14.1), l'a signalé ici avant le jeu (un seul cas : à confirmer comme détecteur). 1 démarrage sur 12 ici, 1 sur 8 sur DOOM 3.
+(`tcg-g4.md` §14.1), l'a signalé ici avant le jeu (un seul cas : à confirmer comme détecteur). 1
+démarrage sur 12 ici, 1 sur 8 sur DOOM 3.
 
 **1, 2, 3 et 4 vCPU donnent le même temps d'image** : l'écart entre modes (≤ 1,8 %) est
 de l'ordre de l'écart entre démarrages d'un même mode (2-3 %). Si une tendance existe, elle
@@ -227,8 +228,9 @@ Classés par gain attendu :
 allumé par défaut, `docs/tcg-g4.md` §19. L5 est arrêté le 22/10 (régions LLVM +17,6 % sur
 DOOM 3, `docs/plan-traducteur-rapide.md`, en tête). L1 a donné la série `patches/tcg/`
 (`docs/tcg-g4.md`, en tête). Les renvois à « `TODO.md` §3/§4 » visent l'ancien plan du TODO,
-réorganisé depuis. Le SMP=2 tourne depuis le 23/10 sur `qemu-system-ppc` en MTTCG et non plus
-sur `ppc64`, `docs/ppc32-mttcg.md`.)
+réorganisé depuis et archivé dans `docs/archive/todo-par-domaines-2026-09-27.md` (même
+numérotation). Le SMP=2 tourne depuis le 23/10 sur `qemu-system-ppc` en MTTCG et non plus sur
+`ppc64`, `docs/ppc32-mttcg.md`.)
 
 Ce qui **ne sert à rien** : plus de cœurs hôte au-delà de ~2 pour la VM telle qu'elle est —
 6, 8 ou plus de cœurs de M4 ne changent pas le temps d'image, puisque ~1,3 cœur est tout ce
@@ -276,7 +278,7 @@ depuis le worktree de cette branche :
 
 Attendu si le §2 vaut pour DOOM 3 : les deux modes à ~74 ms/image, écart < 2 % ; chaque
 `info.txt` dit « même fenêtre ». Écarter une partie dont la cinématique est lente (témoin du
-troisième facteur, §14.7) et la rejouer. Si SMP=1 ≤ SMP=2 : lanceurs de jeux en SMP=1.
+troisième facteur, `tcg-g4.md` §14.7) et la rejouer. Si SMP=1 ≤ SMP=2 : lanceurs de jeux en SMP=1.
 
 ### 4.2 DOOM 3 joué (26/09/2026, 1 h) — deux cœurs gagnent
 

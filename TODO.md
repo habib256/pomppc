@@ -26,7 +26,7 @@ Cible du PC : DOOM 3 à 50 ms/image (`docs/vitesse-doom3-x86.md`, départ 111,5 
   40 %, 100 octets de x86 par instruction PowerPC) et la latence mémoire, pas le nombre
   d'instructions : retirer des tests hors du chemin critique ne rapporte plus rien (plafond
   mesuré 3,5 %). Les leviers restants du JIT x86 sont petits et génériques : recherche de
-  blocs (mb 10 %, zen 14 %, cmr 7 % du vCPU), base de temps (ut 14 %), PGO.
+  blocs (mb 10 %, zen 14 %, cmr 6 % du vCPU), base de temps (ut 14 %), PGO.
 - **Le plugin GL de l'invité est le levier commun aux deux hôtes** : 28 % du vCPU de cmr,
   22 % de d3, 16 % de mb, 12 % de zen, 11 % d'ut sur le PC. Chaque pourcent gagné là vaut sur
   x86 et sur arm64 sans portage, et c'est le seul levier qui agit sur cmr (PACKBITS −3,5 %
@@ -102,13 +102,14 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
 
 - [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
   de profil croisé depuis la parité du 25/10. Dans l'ordre :
-  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10), reconstruire **kext,
-     plugin et GA** dans la VM de dev (kext du 01/11 : méthode 6 ; plugin `20261101-ombre` :
-     PACKBITS + avis d'ombre), les installer puis **redémarrer l'invité**, vérifier la bande sous
-     l'ombre (même code que le PC, même défaut), rejouer cmr-pe avec la fenêtre en course
+  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10, `tcg/0059`),
+     reconstruire **kext, plugin et GA** dans la VM de dev (kext du 01/11 : méthode 6 ; plugin
+     `20261101-ombre` : PACKBITS + avis d'ombre), les installer puis **redémarrer l'invité**,
+     vérifier la bande sous l'ombre (même code que le PC, même défaut), rejouer cmr-pe avec la
+     fenêtre en course
      (`6054367`, le M4 mesurait peut-être déjà la course : à vérifier sur ses `frames.csv`),
-     référence cmr à reprendre (faux reflet). Liste détaillée : `docs/etat-des-hotes.md` §4,
-     « Venu du PC le 01/11 ».
+     référence cmr à reprendre si elle porte le faux reflet. Liste détaillée et ordre :
+     `docs/etat-des-hotes.md` §4, « Venu du PC le 01/11 » (qui fait foi).
   2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
      comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
      helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
@@ -144,7 +145,7 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      `exit 138`). **Ancien binaire remis**, nouveau gardé dans `~/src/qemu/build-fast-pgo0111cmr/` :
      recontrôle cmr 3 parties au repos strict, et entraînement de cmr sur un binaire qui
      atteint la course (l'instrumenté n'y arrive pas en 901 s).
-  2. **Recherche de blocs** (mb 10 %, zen 14 %, cmr 7 %) : `tcg/0060` x8 (effacement exact, 256
+  2. **Recherche de blocs** (mb 10 %, zen 14 %, cmr 6 %) : `tcg/0060` x8 (effacement exact, 256
      cases) gagne mb −8,7 % et ut −1,9 % mais **cmr +4,2 %** en course, seule perte propre à
      cmr qui reste inexpliquée. À instruire : compter ce que coûte le parcours exact sous les
      ~2 000 écritures de BAT par seconde de cmr (32 pages chacune), puis essayer **x8 +
@@ -225,9 +226,10 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   réglages utilisateur préservés.
 - [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste
   blanc) ; menu principal juste au 26/09, à revoir en partie.
-- [ ] **[Jeux] UT2004 : armes noires dans la démo de test — reste le M4** (PC corrigé le
-  07/10, `docs/re/ut2004-arme-noire.md`). Revider la démo sur le M4 (`@1`, 450 images), rejouer
-  les images ~166-195. Fermeture : image juste dans la démo sur le M4.
+- [x] **[Jeux] UT2004 : armes noires dans la démo de test : clos sur les deux hôtes** (PC le
+  07/10 ; M4 le 26/10, `5f25498`, défaut propre au GL d'Apple : éclairage à spot calculé par le
+  device ; démo revidée sur le M4, images ~166-195 justes ; `docs/re/ut2004-arme-noire.md`).
+  Entrée fermée le 01/11 à la relecture.
 - [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre.
 - [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée** — corrigé le 07/10 sur le
   PC ; à confirmer sur le tour `20260926-2156` du M4.
@@ -263,8 +265,9 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
   soumettre par tranches pendant les dessins, ou résultats écrits par l'hôte.
 - [ ] **[Plugin] Transmission paresseuse** : mesure honnête et décision du défaut.
 - [ ] **[Plugin] Verdict GLSL : mémoire par texture et par époque** (suite de `WLUNIF`).
-- [ ] **[Plugin] Indices en VBO** (`docs/vitesse-doom3-x86.md` §10.4) : `r_useIndexBuffers 1`
-  retombe sur l'empaquetage ; comprendre le refus de `raw_ensure` pour le tampon d'éléments.
+- [ ] **[Plugin] Indices en VBO** (`docs/vitesse-doom3-x86.md` §10, point 4, et §5.6) :
+  `r_useIndexBuffers 1` retombe sur l'empaquetage ; comprendre le refus de `raw_ensure` pour le
+  tampon d'éléments.
 - [ ] **[TCG] Flottant natif, angles non vérifiés** : exception FP levée depuis le chemin
   natif, formes Rc=1, cible 32 bits en VM (`docs/tcg-g4.md` §22).
 - [ ] **[TCG] `vperm` en ligne sur arm64** (TBL/TBX, pendant de `tcg/0059`) : gain plafonné
@@ -315,7 +318,7 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
 | piste | mesure | doc |
 |---|---|---|
 | Traducteur de second niveau par traces (`x-tier2`, `0048`, `0055`) | DOOM 3 +2,7 % (PC), +5,7 % (M4) | `plan-traducteur-rapide.md` §9 |
-| Régions chaudes recompilées par LLVM | +17,6 % sur DOOM 3 | idem §9 ; 6-10 mois de travail, mis de côté le 25/09 |
+| Régions chaudes recompilées par LLVM | +17,6 % sur DOOM 3 | idem, en-tête (§10 sous `archive/tier3-llvm`) ; arrêté le 22/10 |
 | Mémoire directe (« fastmem ») | net ≤ 5 % pour un chantier entier | `vitesse-doom3-x86.md` §21 |
 | Vérification TLB compacte | extrapolé de la zone froide : 0-4 % | §21 |
 | « Opérande flottant connu partout » | plafond 3,5 %, même sans aucun test | §18.1 |
@@ -326,7 +329,7 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
 | `tcg/0060` x8 tel quel | cmr +4,2 % en course | §46 (voir « Maintenant » pour x8 + 0063) |
 | `tcg/0061` `x-bat-skip` | neutre partout en course, rafale non expliquée | §46 |
 | `tcg/0063` `x-dbat-lite` tel quel | cmr neutre, ut +3,7 % | §47 (témoin à jouer) |
-| Appel MMIO synchrone « plugin vers l'hôte » | natif ×0,6-1,5 sur le travail réel | `pomppc-plugin-hote` (branche non fusionnée) |
+| Appel MMIO synchrone « plugin vers l'hôte » | natif ×0,6-1,5 sur le travail réel | `plan-plugin-hote.md` (code sous `archive/plugin-hote-phase0`) |
 | 3-4 vCPU | 0 gain sur les jeux | Bloqué |
 
 ## Bloqué
@@ -337,7 +340,8 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
       `patches/smp-mac99/essais/qemu-mac99-4cpus.patch` ; 0 gain sur les jeux.
       **Reprise :** demande explicite d'un mode 3–4 vCPU.
 - [ ] **[TCG] Traducteur de second niveau** (`docs/plan-traducteur-rapide.md`, mis de côté par
-      l'utilisateur le 25/09). **Reprise :** décision explicite de rouvrir ce chantier.
+      l'utilisateur le 25/09, relancé le 21/10, arrêté sur chiffres le 22/10 : « Écarté sur
+      chiffres »). **Reprise :** décision explicite de rouvrir ce chantier.
 
 ## Référence validée
 
@@ -348,7 +352,7 @@ L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
 | QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10 et `tcg/0059`) |
-| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059` compilés, éteints ; `0060`-`0063` éteints, non nommés |
+| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059` compilés, éteints (M4 : `0059` absent de son binaire jusqu'à la reconstruction) ; `0060`-`0063` éteints, non nommés |
 | Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : kext du 29/10 (`71f9f76`), plugin `20261023-uvwon` avec `tex_bind_id` (`9b5431a`, 30/10), à mettre à niveau (kext → redémarrage) |
 | Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 |
 | Tests natifs | PC 240 OK / 0 échec (07/10), M4 287 OK / 0 échec (27/10) |
@@ -371,7 +375,7 @@ corrigé du 31/10 reste à faire.
 | Zenerchi | vert | non automatisé | 4,0 / — | automatiser plein écran |
 | DOOM 3 | vert | vert | 56,1 / 56,2 | changements de mode, combat |
 | Prey | vert | vert | 50,5 / 49,5 | changements de mode, combat |
-| UT2004 | vert | vert | 25,0 / 25,4 | armes noires (M4) |
+| UT2004 | vert | vert | 25,0 / 25,4 | — |
 | Warcraft III | non automatisé | vert | — / 15,4 | fenêtre, texte des menus |
 | Colin McRae | non applicable | vert | — / 48,1 | mesure **en course** sur les deux hôtes ; 1920×1080 |
 | Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | tableaux clients déroulés (suites A4) |
