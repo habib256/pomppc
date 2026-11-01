@@ -14,9 +14,11 @@ protocole qgpu v22 (`docs/protocole.md`). Plusieurs paragraphes ci-dessous daten
 
 - **Mandataire du rendu logiciel d'Apple.** Le plugin charge en module privé
   `GLDriver.bundle` (le rendu « Generic » de Tiger) et lui transmet les 63
-  points d'entrée `gld*`, par des trampolines assembleur (`gld_tramp.s`,
-  généré par `tools/gld/gen_tramp.py`) qui ne touchent à aucun argument. Tout
-  ce que le plugin n'accélère pas reste donc exact.
+  points d'entrée `gld*` : 42 par des trampolines assembleur (`gld_tramp.s`,
+  généré par `tools/gld/gen_tramp.py`) qui ne touchent à aucun argument, les 21
+  autres (liste `C_OVERRIDES` du générateur) écrits en C dans `pomppc_gld.c`,
+  qui appellent à leur tour ceux d'Apple. Tout ce que le plugin n'accélère pas
+  reste donc exact.
 - **Accélération au niveau de la rastérisation.** GLEngine transforme, éclaire,
   découpe et élimine les faces, puis appelle les procédures installées par
   `gldInitDispatch` avec des sommets en coordonnées fenêtre. Le plugin remplace
@@ -97,7 +99,8 @@ protocole qgpu v22 (`docs/protocole.md`). Plusieurs paragraphes ci-dessous daten
 - **Présentation directe.** Une application au premier plan reçoit son image
   directement dans la mémoire vidéo, sans passer par le WindowServer : en plein
   écran, et en fenêtre tant que rien ne recouvre la surface et que le curseur
-  n'y bouge pas (`docs/gpu-3d-tiger.md` §4.4).
+  n'y bouge pas (`docs/gpu-3d-tiger.md` §4.4). (01/11 : sous Quartz Extreme, plein
+  écran seulement ; une fenêtre passe par la voie QE, `docs/quartz-extreme.md`.)
 - **Soumission asynchrone (protocole v9).** Le plugin ne frappe plus le doorbell
   synchrone : il dépose et repart, l'hôte dessine pendant que l'invité prépare
   l'image suivante. La tranche du client est coupée en **deux moitiés**
@@ -163,7 +166,7 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 | `POMPPC_GL_ARRAY_STUB_SYNC=1` | témoin A/B : rétablit les synchronisations couleur/profondeur avant le refus vide de `RenderVertexArray` d'Apple. Par défaut, le plugin évite ces transferts seulement si les instructions de la fonction sont exactement `li r3,0; blr`. Toute valeur définie active ce témoin ; retirer la variable pour le chemin corrigé. |
 | `POMPPC_GL_FRAMES=/chemin.csv` | trace optionnelle par échange : contexte, temps monotone en ms depuis le premier échange, compteurs cumulés de géométrie/replis/relectures et temps cumulés de soumission/attente/copie. Fichier remplacé au lancement, écrit avec tampon, vidé au moins toutes les 5 s pendant le rendu ; un arrêt brutal peut perdre la fin. Mesure les appels d'échange, pas la fin GPU. Analyse : `python3 tools/guest/frame_report.py trace.csv --start 30 --duration 60` (fenêtre à choisir après vérification du chargement et de la scène). |
 | `POMPPC_GL_STATS=/chemin` | bilan ajouté au fichier toutes les 5 s : images/s, relectures, replis logiciels, temps de soumission, sommets bruts / `DRAW_RAW` / commandes d'état / **dessins fusionnés** / **sommets par dessin** par image, **barrières attendues et temps d'attente par image, profondeur de file, `QUEUE_FULL`, replis synchrones**, et motifs de refus de l'accélération avec le premier cas |
-| `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) ; `=f` : plein écran seulement ; `=c` : même avec un curseur en mouvement dans la surface |
+| `POMPPC_GL_DIRECT=0` | pas de présentation directe (voir ci-dessous) ; `=f` : plein écran seulement ; `=c` : même avec un curseur en mouvement dans la surface. Sous Quartz Extreme, plein écran seulement quel que soit le réglage ; non lue dans le WindowServer |
 | `POMPPC_GL_PRESENT=0` | pas de `SURF_PRESENT` (relecture + copie G4, pour A/B) ; défaut : hôte → VRAM si device v13 |
 | `POMPPC_GL_PIXEL=0` | pas de `COPY_TEX` / `ReadPixels` hôte (relecture complète + Apple, pour A/B) ; défaut : device v13 |
 | `POMPPC_GL_VBO=0` | pas de tampons hôte v14 (`DRAW_RAW` retraverse BAR0 à chaque dessin, pour A/B) ; défaut : device v14 |
@@ -183,7 +186,8 @@ dans `Resources` d'OpenGL.framework : `install.sh` l'en retire.
 | `POMPPC_GL_GEOM_SLOTS=n` | plafonne le nombre de sommets offerts à un `BeginPrimitiveBuffer` (mesure : c'est ainsi qu'on a établi comment GLEngine coupe une longue primitive) |
 | `POMPPC_GL_NOTE=/chemin` | journal d'appoint (chargement du plugin, attachements de drawable). **Sans cette variable, rien n'est écrit** : le plugin tourne aussi dans le WindowServer et `loginwindow`, donc en root, et le fichier d'avant (`/tmp/pomppc-gl.log`, sans interrupteur) était une cible de lien symbolique. Le fichier est ouvert une seule fois, en `O_EXCL | O_NOFOLLOW` : un chemin **déjà pris** est un refus, jamais une écriture ailleurs — choisir un nom neuf à chaque essai |
 | `POMPPC_GLTRACE=dossier` | trace de chaque appel `gld*` et de chaque procédure, avec vidages binaires |
-| `POMPPC_GLTRACE_STATE=1` | en trace, vide l'état GL complet à chaque effacement |
+| `POMPPC_GLTRACE_STATE=1` | en trace, vide l'état GL complet à chaque effacement (sans elle, au premier seulement) |
+| `POMPPC_GLTRACE_VERTS=1` | en trace, vide aussi en binaire les sommets des procédures de rastérisation |
 | `POMPPC_GL_ANNOUNCE=0` | n'ajoute rien à l'annonce d'Apple : `GL_VERSION` et la liste d'extensions redeviennent les siennes (comparaison) |
 | `POMPPC_GL_ALLEXT=1` | **sonde** : allume les 79 bits du tableau d'extensions, pour lire la table bit → nom (expérience V3 de `docs/re/capacites-glengine.md`) |
 | `POMPPC_GL_TRY3D=n` | **sonde** : déclare une taille maximale de texture 3D, pour vérifier par l'expérience que le repli logiciel ne sait pas les échantillonner |
