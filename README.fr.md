@@ -232,7 +232,7 @@ réellement actif (le Screamer exige moins de 1 Go), réseau actif si slirp.
 
 ```bash
 ./tests/run-all.sh          # syntaxe, shellcheck, doc ↔ binaire, registres QFB, qgpu natif
-./tests/run-all.sh --slow   # + qfb_smoke.py, qgpu_smoke.py, bridge_probe (bootent réellement)
+./tests/run-all.sh --slow   # + qfb_smoke.py, qgpu_smoke.py (QEMU jusqu'à Open Firmware), bridge_probe (run_tiger.sh)
 ```
 
 Le harnais interroge le **binaire** QEMU (Screamer, qfb-pci, qgpu-pci, slirp, SMP, audio,

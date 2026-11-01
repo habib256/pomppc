@@ -9,6 +9,7 @@
 #
 #   POMPPCGPU.kext          → /System/Library/Extensions  (transport of the qgpu-pci device)
 #   GLDriver-POMPPC.bundle  → /System/Library/Extensions  (OpenGL plugin, renders on the host GPU)
+#   POMPPCGA.plugin         → /System/Library/Extensions  (Quartz Extreme 2D plugin, if on the CD)
 #   POMPPCFsqrt.kext        → /System/Library/Extensions  (advertises fsqrt: faster libm sqrt)
 #   StartupItems/POMPPCFsqrt → /Library/StartupItems      (loads POMPPCFsqrt at boot)
 #   StartupItems/POMPPCSshGarde → /Library/StartupItems   (reloads ssh.plist when launchd
@@ -31,7 +32,8 @@ fi
 if [ "$1" = "--remove" ]; then
   kextunload -b net.pomppc.POMPPCGPU 2>/dev/null || true
   kextunload -b net.pomppc.POMPPCFsqrt 2>/dev/null || true
-  rm -rf "$EXT/POMPPCGPU.kext" "$EXT/GLDriver-POMPPC.bundle" "$EXT/POMPPCFsqrt.kext" "$SI" "$SG" \
+  rm -rf "$EXT/POMPPCGPU.kext" "$EXT/GLDriver-POMPPC.bundle" "$EXT/POMPPCGA.plugin" \
+         "$EXT/POMPPCFsqrt.kext" "$SI" "$SG" \
          "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
   rm -f /System/Library/Extensions.mkext /System/Library/Extensions.kextcache
   touch "$EXT"
@@ -55,6 +57,9 @@ put "$HERE/POMPPCGPU.kext" "$EXT/POMPPCGPU.kext"
 # older POMPPC layouts put the plugin in OpenGL.framework's Resources: GLEngine would load it twice
 rm -rf "$RES/GLDriver-POMPPC.bundle" "$RES/GLDriverPOMPPC.bundle"
 put "$HERE/GLDriver-POMPPC.bundle" "$EXT/GLDriver-POMPPC.bundle"
+# Quartz Extreme: loaded by IOPSAllocateBlitEngine only when the kext names it (personality
+# "auto" follows the host); harmless otherwise. Older CDs do not carry it.
+[ -d "$HERE/POMPPCGA.plugin" ] && put "$HERE/POMPPCGA.plugin" "$EXT/POMPPCGA.plugin"
 put "$HERE/POMPPCFsqrt.kext" "$EXT/POMPPCFsqrt.kext"
 # POMPPCFsqrt links against com.apple.kernel (non-KPI symbols): its dependency must name the
 # running kernel's exact version (8.6.0 on 10.4.6, 8.11.0 on 10.4.11).

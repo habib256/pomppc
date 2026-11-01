@@ -1260,7 +1260,10 @@ if [ "$GLISO_WANT" = 1 ] && [ -f "$ROOT/pomppc-guest.iso" ]; then
 elif [ "$GLISO_WANT" = 1 ]; then
   GL_ISO="$ROOT/disks/pomppc-src.iso"
   GL_SRCS=("$ROOT/kext/POMPPCGPU" "$ROOT/kext/POMPPCQFB" "$ROOT/guest/gldriver"
-           "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test" "$ROOT/guest/net")
+           "$ROOT/guest/gltest" "$ROOT/guest/qgpu-test" "$ROOT/guest/net" "$ROOT/guest/ga"
+           "$ROOT/patches/qgpu/qgpu_proto.h" "$ROOT/patches/qgpu/qgpu_abi.h")
+  # (01/11 : tout ce que make_kext_iso.sh grave ; avant, ni guest/ga ni les deux en-têtes
+  # du contrat ne faisaient regraver le CD.)
   if [ ! -f "$GL_ISO" ] || [ -n "$(find "${GL_SRCS[@]}" -type f -newer "$GL_ISO" 2>/dev/null | head -1)" ]; then
     echo "  💿 (re)génération de $(basename "$GL_ISO")…"
     "$ROOT/scripts/make_kext_iso.sh" "$GL_ISO" >/dev/null || {

@@ -11,9 +11,9 @@
 # Le dossier des binaires vient de l'invité (gcc-4.0, SDK 10.4u) : job tools/guest/jobs/prebuilt
 # (+ make dans kext/POMPPCFsqrt). Refusé s'il est plus vieux que les sources qu'il compile.
 # Exigés : POMPPCGPU.kext, GLDriver-POMPPC.bundle, POMPPCFsqrt.kext, VERSION ; gltest, glwin
-# et accelprobe pris s'ils y sont. (01/11 : le plugin GA POMPPCGA.plugin de Quartz Extreme,
-# que le job prebuilt produit depuis le 30/10, n'est ni gravé ici ni installé par
-# guest/package/install.sh : le paquet de l'invité n'apporte pas encore Quartz Extreme.)
+# et accelprobe pris s'ils y sont. Le plugin GA POMPPCGA.plugin de Quartz Extreme (job prebuilt
+# depuis le 30/10) est gravé s'il y est, avec un avertissement sinon (depuis le 01/11 ; avant,
+# le paquet ne l'apportait pas, alors que le kext « auto » suit l'hôte qui recommande QE).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${1:-$ROOT/pomppc-guest.iso}"
@@ -39,6 +39,11 @@ cp "$ROOT/kext/POMPPCFsqrt/StartupItem/POMPPCFsqrt" \
    "$ROOT/kext/POMPPCFsqrt/StartupItem/StartupParameters.plist" "$STAGE/StartupItems/POMPPCFsqrt/"
 cp -R "$ROOT/guest/package/StartupItems/POMPPCSshGarde" "$STAGE/StartupItems/"
 for t in gltest glwin accelprobe; do [ -f "$PRE/$t" ] && cp "$PRE/$t" "$STAGE/tools/"; done
+if [ -d "$PRE/POMPPCGA.plugin" ]; then
+  cp -R "$PRE/POMPPCGA.plugin" "$STAGE/"
+else
+  echo "⚠  $PRE/POMPPCGA.plugin absent : paquet sans Quartz Extreme (relancer le job prebuilt)" >&2
+fi
 cat > "$STAGE/README.txt" <<EOF
 POMPPC guest package $(head -1 "$PRE/VERSION") — Mac OS X 10.4 Tiger (PowerPC)
 

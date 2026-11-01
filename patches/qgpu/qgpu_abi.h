@@ -73,7 +73,7 @@
 
 #define QGPU_REG_MAGIC          0x00  /* r  : QGPU_MAGIC ; w : reset complet */
 #define QGPU_REG_VERSION        0x04  /* r  : QGPU_PROTO_VERSION (qgpu_proto.h) */
-#define QGPU_REG_CAPS           0x08  /* r  : QGPU_CAP_* du backend actif */
+#define QGPU_REG_CAPS           0x08  /* r  : QGPU_CAP_* du backend actif, plus ceux du device */
 #define QGPU_REG_SHMEM_SIZE     0x0C  /* r  : taille de BAR0 en octets */
 #define QGPU_REG_SUBMIT_OFF     0x10  /* rw : offset du flux dans BAR0 (mult. de 4) */
 #define QGPU_REG_SUBMIT_LEN     0x14  /* rw : longueur du flux en octets (mult. de 4) */
@@ -190,8 +190,8 @@
  * SYNCHRONE ne le rend jamais : il attend une place. */
 #define QGPU_ST_QUEUE_FULL      10
 /* Reste du 29/09 : plafond de mémoire hôte atteint (QGPU_MEM_MB). Statut de
- * FLUX, NON FATAL : la commande d'allocation (SURF_CREATE, TEX_IMAGE3,
- * SURF_TEX, génération de mipmaps, BUF_CREATE, PROG_CREATE, PROG_STRING,
+ * FLUX, NON FATAL : la commande d'allocation (SURF_CREATE, TEX_IMAGE,
+ * TEX_IMAGE3, SURF_TEX, génération de mipmaps, BUF_CREATE, PROG_CREATE, PROG_STRING,
  * GLSL_SOURCE) n'a rien alloué — l'objet n'existe pas, ou le niveau garde
  * son ancienne taille — et la soumission CONTINUE. Comme un dessin refusé,
  * c'est la première faute qui est rendue dans STATUS/STATUS_PC. */

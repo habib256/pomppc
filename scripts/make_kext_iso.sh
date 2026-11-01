@@ -5,10 +5,11 @@
 # programme de test invité (guest/qgpu-test) sur un CD ISO, à monter dans
 # l'invité Tiger pour les y compiler (l'hôte n'a pas de toolchain
 # ppc-apple-darwin8). Arborescence du CD : kext/{POMPPCQFB,POMPPCGPU},
-# patches/qgpu/{qgpu_proto.h,qgpu_abi.h}, guest/{qgpu-test,gldriver,gltest,net},
+# patches/qgpu/{qgpu_proto.h,qgpu_abi.h}, guest/{qgpu-test,gldriver,gltest,net,ga},
 # et prebuilt/ (kext, plugin OpenGL, plugin GA, gltest, glwin, accelprobe déjà
-# compilés) si disks/prebuilt existe. Ni guest/ga ni kext/POMPPCFsqrt : sur ce CD,
-# install.sh prend le plugin GA dans prebuilt/.
+# compilés) si disks/prebuilt existe. Pas kext/POMPPCFsqrt. Depuis le 01/11, guest/ga
+# y est : install.sh compile le plugin GA de Quartz Extreme avec gcc-4.0 (avant, il
+# ne le trouvait que dans prebuilt/, absent d'un prebuilt d'avant le 30/10).
 #
 #   ./scripts/make_kext_iso.sh
 #   GPU=1 ./run_tiger.sh     # (re)grave l'ISO si besoin et l'insère lui-même
@@ -25,7 +26,7 @@ cp -R "$ROOT/kext/POMPPCQFB" "$ROOT/kext/POMPPCGPU" "$STAGE/kext/"
 # v19 : le contrat du plugin et de qgpu_test (le kext n'a que qgpu_abi.h)
 cp "$ROOT/patches/qgpu/qgpu_proto.h" "$ROOT/patches/qgpu/qgpu_abi.h" "$STAGE/patches/qgpu/"
 cp -R "$ROOT/guest/qgpu-test" "$ROOT/guest/gldriver" "$ROOT/guest/gltest" \
-      "$ROOT/guest/net" "$STAGE/guest/"
+      "$ROOT/guest/net" "$ROOT/guest/ga" "$STAGE/guest/"
 # Binaires déjà compilés (job tools/guest/jobs/prebuilt, rangés dans
 # disks/prebuilt, hors git) : install.sh s'en sert quand l'invité n'a pas les
 # Xcode Tools. Signalés s'ils sont plus vieux que les sources.

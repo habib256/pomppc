@@ -134,7 +134,7 @@ nothing is fetched from third-party forks.
 ./scripts/build_qemu_qfb.sh        # clones QEMU v11.1.2 into ~/src/qemu, applies patches/,
                                    # builds, then probes the binary for each capability
 cd frontend && ./setup.sh && cmake -S . -B build && cmake --build build -j   # front end
-./tests/run-all.sh                 # test harness (add --slow for boot tests)
+./tests/run-all.sh                 # test harness (--slow adds QEMU smoke tests up to Open Firmware)
 ```
 
 QEMU's `configure` needs Python ≥ 3.9 with `tomli` (built in as `tomllib` from 3.11) and

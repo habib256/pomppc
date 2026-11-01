@@ -310,7 +310,8 @@ fi
 
 # --- 4 bis. GPU paravirtuel qgpu-pci : device + cœur + backends soft/GL ---
 # Le backend GL se compile toujours ; sans OpenGL.framework (macOS) ni EGL+GL
-# (Linux) il devient un stub et le device retombe sur le backend logiciel.
+# (Linux) il devient un stub : avec backend=auto (défaut) le device retombe sur le backend
+# logiciel ; avec backend=gl, le realize échoue (« aucun backend 'gl' disponible »).
 echo "▶ installation de hw/display/qgpu-*.c"
 cp "$ROOT"/patches/qgpu/qgpu-pci.c "$ROOT"/patches/qgpu/qgpu-core.c \
    "$ROOT"/patches/qgpu/qgpu-core.h "$ROOT"/patches/qgpu/qgpu-soft.c \
