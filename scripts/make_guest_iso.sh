@@ -44,7 +44,7 @@ In Tiger, open Terminal and type:
     sudo sh /Volumes/POMPPC_GUEST/install.sh
 
 then reboot. "sudo sh /Volumes/POMPPC_GUEST/install.sh --remove" uninstalls.
-tools/gltest and tools/glwin are small OpenGL test programs.
+tools/gltest, tools/glwin and tools/accelprobe are small OpenGL test programs.
 Source code and documentation: https://github.com/habib256/pomppc (GPL-3.0-or-later).
 EOF
 rm -f "$OUT"

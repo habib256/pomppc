@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 # Sourced after hostcompat.sh. Keep OS 9 and Linux's existing audio defaults.
+# POMPPC_AUDIO_PROFILE: stable (default; steadier CoreAudio buffers on macOS), default
+# (QEMU's own settings) or muet (no host audio, the Screamer stays in the machine).
 tiger_audio_device() {
   local profile="${POMPPC_AUDIO_PROFILE:-stable}"
   case "$profile" in

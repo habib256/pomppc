@@ -3,13 +3,14 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 """Une partie de DOOM 3 (ou Prey, ou Marble Blast) pour le relevé du son.
 usage : partie.py <étiquette> <durée_s> [fs] [d3|prey|mb] [proc=<nom du processus>]
-(mots nus : d3 par défaut ; chemins du dépôt écrits en dur, ceux du M4)
+(mots nus : d3 par défaut ; chemins pris depuis le dépôt de ce script)
 Lance ~/son/<jeu>.command dans l'invité, remet le jeu au premier plan tant
 qu'il se replie, le laisse tourner <durée_s> secondes après le lancement, le
 tue, rapatrie frames.csv / stdout.txt / log.txt dans .run/son/<étiquette>/."""
 import os, subprocess, sys, time
 
-T = "/Users/mercure/src/pomppc/tools/guest/tssh.sh"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+T = os.path.join(ROOT, "tools/guest/tssh.sh")
 et, duree = sys.argv[1], int(sys.argv[2])
 fs = "fs" in sys.argv[3:]
 jeu = "prey" if "prey" in sys.argv[3:] else ("mb" if "mb" in sys.argv[3:] else "d3")
@@ -17,7 +18,7 @@ proc = {"d3": "Doom 3 Demo", "prey": "Prey", "mb": "MarbleBlast Gold"}[jeu]
 for a in sys.argv[3:]:
     if a.startswith("proc="):
         proc = a[5:]
-out = "/Users/mercure/src/pomppc/.run/son/" + et
+out = os.path.join(ROOT, ".run/son", et)
 os.makedirs(out, exist_ok=True)
 
 

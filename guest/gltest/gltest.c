@@ -4538,7 +4538,7 @@ int main(int argc, char **argv)
         glFinish();
     } else if (!strcmp(scene, "arbvp0cmr")) {
         /* v16 : le lot de Colin McRae EN COURSE, tel que la sonde le relève
-           (docs/re/programmes-arb.md §5) : génériques 0 (pos 3f), 1 (3f),
+           (docs/re/programmes-arb.md §4) : génériques 0 (pos 3f), 1 (3f),
            2 (4ub normalisé), 3 (2f), pas 36, mémoire cliente ; unités 0 et 2
            texturées (MODULATE, texels blancs), GL_COLOR_SUM allumé sans
            éclairage — format 0x3b5a côté plugin. Le programme lit les quatre

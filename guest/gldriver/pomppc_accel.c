@@ -2988,7 +2988,7 @@ void pomppc_backend_init(void)
                 /* Lot 4 : compute_state sauté quand le bloc de changements ne
                    porte, depuis le dernier calcul, que des bits d'état qu'il
                    ne lit pas (st_neutral, relevé R5 :
-                   docs/re/etude-court-circuit-glengine.md §6). STATECHECK=1
+                   docs/re/verdict-lots-4-5.md §3). STATECHECK=1
                    calcule quand même et note les écarts (lignes STATE). */
                 e = getenv("POMPPC_GL_STSKIP");
                 G.stskip = e && e[0] ? e[0] != '0' : STSKIP_DEFAULT;
@@ -15148,7 +15148,7 @@ static const unsigned long wl_mask[CNT_BLOCK] = {
 #define WL_UNIF      0x04000000UL
 
 /* Lot 4 : bits du bloc dont compute_state ne lit PAS l'état (relevés R4 et R5,
- * docs/re/etude-court-circuit-glengine.md §6). Tout bit absent d'ici fait
+ * docs/re/bloc-changements-r4.md, docs/re/verdict-lots-4-5.md §3). Tout bit absent d'ici fait
  * recalculer ; un bit inconnu aussi. */
 static const unsigned long st_mask[CNT_BLOCK] = {
     0x00202018UL,   /* +0x00 : glClearColor 0x8, glClearDepth 0x10, glHint 0x2000,

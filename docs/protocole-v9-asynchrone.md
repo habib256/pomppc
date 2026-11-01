@@ -3,7 +3,8 @@
 *Tâche 2.2 de `docs/archive/todo-gpu-3d-2026-09-24.md` (axe 2). Ce document décrit ce que le
 **device** fait désormais, et ce que le **kext** et le **plugin** devront faire pour en tirer le
 gain. Le contrat lui-même, qui fait foi, est dans `patches/qgpu/qgpu_proto.h` (section « v9 »),
-recopié à l'identique dans `kext/POMPPCGPU/qgpu_proto.h`.*
+recopié à l'identique dans `kext/POMPPCGPU/qgpu_proto.h`.* (01/11 : depuis la v19, le kext n'a plus
+que `qgpu_abi.h` ; `qgpu_proto.h` n'existe que sous `patches/qgpu/`.)
 
 ## 1. Pourquoi
 
