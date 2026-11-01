@@ -168,3 +168,16 @@ Ancienne référence gardée dans `bench/matrice/ref-linux/cmr-pe.faux-reflet-28
 référence prise le 31/10 (à valider à l'œil). Le M4 : même `qgpu-core.c`, à reconstruire.
 (01/11 : référence cmr-pe du PC validée à l'œil le 01/11 ; la cellule cmr se mesure en course
 depuis `6054367`. Le M4 reste à reconstruire : `docs/etat-des-hotes.md` §4.)
+
+**Le M4, 01/11** (QEMU reconstruit avec ce `qgpu-core.c`) : le rejeu de sa référence cmr-pe du
+27/09 donne 4,53 / 7,63 %, écart confiné à la carrosserie (rectangle 292..508 × 294..514 de
+l'image 800×600) : le même blanc. Question de l'utilisateur : le PC, plus lent, bascule cmr en
+« machine lente » sans reflets, le M4 non ? Relevé dans l'invité du M4 (`Preferences Data` de
+Codemasters, réécrit à chaque lancement, ici à 17 h 13 pendant la matrice) : **`ValLowMachine` 1,
+`ValLowConfig` 1**, comme sur le PC. Le disque et le G4 émulé sont les mêmes ; le critère du jeu
+semble matériel, pas la vitesse de l'hôte. Le blanc du M4 est donc le même faux reflet. Ancienne
+référence rangée dans `bench/matrice/ref/cmr-pe.faux-reflet-2709/`, nouvelle prise par le tour
+`cmr-nouvref-m4-0111` (1920×1080, Subaru au départ, carrosserie sans reflet), à valider à l'œil.
+Si un jour le jeu tourne en machine rapide (clé à 0), la carte de reflet 105 serait peut-être
+remplie : à revérifier alors avec `POMPPC_GL_UNITPROBE=1`. Le M4 mesurait déjà la course avant
+`6054367` (tour `20261028-1854` : fenêtre 38695..39295, ~6 400 sommets bruts par échange).

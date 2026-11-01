@@ -171,6 +171,13 @@ nomme (`"$ROOT"/patches/…`) : `753fa973f5eb57ba`, identique sur `9e67226` et s
 (`QEMU_FAST=1 ./scripts/build_qemu_qfb.sh`, profil `pgo-fast/` réutilisé) : jusque-là le
 lanceur l'écarte encore, et le dit dans sa bannière.
 
+**Même piège le 01/11** : un **commentaire** retouché dans `patches/qgpu/qgpu_proto.h` (fichier
+nommé par `build_qemu_qfb.sh`, donc haché, commentaires compris) a fait refuser le binaire
+rapide ; l'A/B PRESENTQ lancé ensuite a perdu toutes ses parties (« pas de ssh »). Règle : ne
+toucher **aucun** fichier de `patches/` nommé par le constructeur, même un commentaire, tant
+que le binaire rapide n'est pas reconstruit ; avant une campagne, vérifier que la bannière de
+`run_tiger.sh` annonce bien le binaire rapide (`etat-des-hotes.md` §2, 01/11).
+
 **Reconstruction du 07/10 au matin** (`QEMU_FAST=1`, sous `systemd-run … MemoryMax=20G`,
 `build/` 07:00, `build-fast/` 07:03, anciens binaires en `*.avant-0707`) : relevé
 `serie=3d7534b0f2217d54`, `pomppc=4c3ce1f`, `complet=oui`, `march=skylake` — et non

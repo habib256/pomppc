@@ -473,6 +473,9 @@ sur le binaire rapide reconstruit (`QEMU_FAST=1`), le profil PGO repris avec `TB
   et `build-fast/`, VM quotidienne arrêtée), comme pour 0049-0050. Le patch s'applique sur
   l'état 0001-0050 (`patch --dry-run` sur une copie de `~/src/qemu-ppc32mt`) ; la chaîne
   complète `scripts/build_qemu_qfb.sh` sur un arbre neuf n'a pas été rejouée.
+  (01/11 : fusionné sous `tcg/0064` ; la chaîne complète passe sur le PC, essai à blanc, et
+  sur le M4, construction de `~/src/qemu/build` sur arm64 avec `✔ x-tb-head` ; preuves arm64
+  de la parité ci-dessus toujours à faire.)
 - **Défaut** : seulement si les jeux confirment (§7) ; `TBHEAD=3` d'abord en option.
 - **Pistes suivantes, par ordre de gain** :
   1. *E/S au milieu d'un bloc* : ~13-14 millions par démarrage de la VM de dev (démarrage +

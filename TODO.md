@@ -17,7 +17,7 @@ reste trop lente pour être publiée (règle du 20/10). Vitesse au 01/11, ms/ima
 | UT2004, fenêtre | 40 | 19,6 | ×2,0 |
 | Marble Blast, fenêtre | 8,3 | 6,1 | ×1,4 |
 | Zenerchi, fenêtre | 4,6 | 2,8 | ×1,6 |
-| Colin McRae, plein écran, **en course** | 82 | à remesurer (`6054367`) | — |
+| Colin McRae, plein écran, **en course** | 82 | 42 (01/11, 1920×1080, mesuré sous Time Machine) | — |
 
 Cible du PC : DOOM 3 à 50 ms/image (`docs/vitesse-doom3-x86.md`, départ 111,5 le 02/10).
 
@@ -102,14 +102,11 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
 
 - [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Le M4 n'a pas
   de profil croisé depuis la parité du 25/10. Dans l'ordre :
-  1. **Rattrapage** : reconstruire `~/src/qemu` (`qgpu-core.c` du 31/10, `tcg/0059`),
-     reconstruire **kext, plugin et GA** dans la VM de dev (kext du 01/11 : méthode 6 ; plugin
-     `20261101-ombre` : PACKBITS + avis d'ombre), les installer puis **redémarrer l'invité**,
-     vérifier la bande sous l'ombre (même code que le PC, même défaut), rejouer cmr-pe avec la
-     fenêtre en course
-     (`6054367`, le M4 mesurait peut-être déjà la course : à vérifier sur ses `frames.csv`),
-     référence cmr à reprendre si elle porte le faux reflet. Liste détaillée et ordre :
-     `docs/etat-des-hotes.md` §4, « Venu du PC le 01/11 » (qui fait foi).
+  1. **Rattrapage** (01/11, en partie fait) : `~/src/qemu` reconstruit ; kext, plugin et GA
+     compilés et installés dans la VM quotidienne, invité redémarré ; mb et d3 fen/pe vertes ;
+     cmr-pe : le M4 mesurait déjà la course, référence reprise (faux reflet), **à valider à
+     l'œil**. Restent : la bande sous l'ombre à l'œil, l'A/B `m4-bundle-0111` (PACKBITS et avis
+     d'ombre, en attente de la fin de Time Machine). Détail : `docs/etat-des-hotes.md` §3-§4.
   2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
      comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
      helpers, et **part du fil de rendu hôte** ; sur d3, si `qgpu-render` approche les 29 ms
@@ -129,8 +126,8 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   `prog_params_arena`/`prog_state` 1,4 ; dans libSystem, le bloc `0x90131200` fait 1,8 % sur
   cmr et 0,7 % sur d3/mb (à identifier : `memcpy`, verrou ?). Méthode du §2 : un levier par
   variable `POMPPC_GL_*`, mode `=2` de contrôle, `plugmd5` 0 écart, A/B des cinq jeux sur le
-  PC ; le M4 reçoit le bundle (à reconstruire dans sa VM de dev, puis A/B PACKBITS là-bas,
-  gain attendu 1-4 %). S'y rattache l'**avis borné** des surfaces non simples (QE, 01/11) : le
+  PC ; le M4 a le bundle depuis le 01/11 (VM quotidienne), A/B PACKBITS `m4-bundle-0111` lancé
+  (gain attendu 1-4 %). S'y rattache l'**avis borné** des surfaces non simples (QE, 01/11) : le
   coût de l'avis d'ombre (mb-fen +6 % quand une fenêtre est posée sur le jeu, la matrice y pose
   toujours son Terminal) vient d'un avis sur toute la surface ; le kext connaît le rectangle
   englobant de la partie non visible : le renvoyer par la méthode 6 et n'aviser que lui, puis
@@ -205,7 +202,11 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   en file avant d'attendre la n−1 quand l'hôte présente (`SURF_PRESENT`) ; « non tranché » depuis
   le 22/10 (neutre en VM de dev, mb −0,2 ms). Sous QE, les jeux en fenêtre présentent par le
   kext (`present_qe`) : le levier n'agit qu'en **plein écran** (`present_direct`). A/B au repos
-  lancé le 01/11 à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras, pe).
+  lancé le 01/11 à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras, pe) :
+  **raté**, toutes les parties « pas de ssh » (binaire rapide refusé, empreinte de la série
+  changée par un commentaire de `qgpu_proto.h`, remis à l'identique) ; à rejouer entièrement
+  au retour sur le PC par `bench/tcg/ab/presentq-0111-chaine.sh`, **après** la reconstruction
+  de `build/` et `build-fast/` qu'impose `tcg/0064` (`etat-des-hotes.md` §2).
   **Fermeture :** allumé si aucune cellule pe ne perd et qu'une gagne, sinon classé « écarté sur
   chiffres » ; variante pour le chemin QE (ne pas attendre la n−1 avant la présentation par le
   kext) à instruire si le gain en plein écran est net.
@@ -355,10 +356,10 @@ L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
-| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (à reconstruire avec `qgpu-core.c` du 31/10 et `tcg/0059`) |
-| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059` compilés, éteints (M4 : `0059` absent de son binaire jusqu'à la reconstruction) ; `0060`-`0063` éteints, non nommés |
-| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : kext du 29/10 (`71f9f76`), plugin `20261023-uvwon` avec `tex_bind_id` (`9b5431a`, 30/10), à mettre à niveau (kext → redémarrage) |
-| Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit le 01/11 sur `a0e028e` : `qgpu-core.c` du 31/10, `tcg/0059`, `tcg/0064`) |
+| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059` et `0064` compilés, éteints sur les deux hôtes (PC : `0064` à reconstruire) ; `0060`-`0063` éteints, non nommés |
+| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : les mêmes depuis le 01/11 à 16 h 57 (VM quotidienne, compilés dans l'invité, redémarrée ; anciens dans `/var/tmp/avant-0111/` de l'invité) |
+| Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 ; le 01/11, mb et d3 fen/pe vertes avec le nouveau bundle, cmr-pe reprise (faux reflet, `docs/re/cmr-rendu-vers-texture.md` §7), nouvelle référence à valider à l'œil |
 | Tests natifs | PC 240 OK / 0 échec (07/10), M4 287 OK / 0 échec (27/10) |
 
 ## Matrice de jeux

@@ -10,8 +10,9 @@ Préalables déjà relevés : `docs/re/accelerateur-iokit.md` §1, §6 et §9.
 **État au 01/11** : Quartz Extreme est allumé par défaut sur les deux hôtes (M4 le 29/10, PC
 x86-64 le 30/10 ; `QE=0` l'éteint). Les défauts d'ombre sur une fenêtre GL sont corrigés : la
 liaison le 30/10 (`tex_bind_id`, plugin), l'image figée sous l'ombre le 01/11 (kext méthode 6
-`POMPPC_GA_PRESENT2`, plugin `20261101-ombre`). Le PC a ce kext et ce plugin ; le M4 a encore le
-kext du 30/10 et doit réinstaller kext et bundle, puis redémarrer. Reste : un avis borné au
+`POMPPC_GA_PRESENT2`, plugin `20261101-ombre`). Les deux hôtes ont ce kext et ce plugin (M4 :
+VM quotidienne le 01/11 à 16 h 57, redémarrée, `QGPUVersion` 22 ; bande sous l'ombre encore à
+voir à l'œil sur le M4, et son coût à mesurer par l'A/B `m4-bundle-0111`). Reste : un avis borné au
 rectangle non visible, pour rendre l'avis des surfaces non simples moins cher (TODO).
 
 ## 1. Ce que fait le WindowServer (CoreGraphics 10.4.11, relevé statique du 28/10)
@@ -206,7 +207,8 @@ jeu, et la file unique ordonne les soumissions. **P2 se fait sans changer le pro
   5. **Le M4** a le même code (chemin direct, kext, plugin) : il montre la même bande figée,
      mais seulement quand l'image change beaucoup après le dernier dommage du WindowServer.
      La vérification du 30/10 était faite sur une image stable. Il reçoit le correctif avec
-     le kext et le bundle (installation, puis **redémarrage** pour le kext).
+     le kext et le bundle (installation, puis **redémarrage** pour le kext ; fait le 01/11 à
+     16 h 57).
   Éliminés par la lecture du code : `QGPU_CAP_FIXED4` (`state_unit_one` couvre toutes les
   unités ; le compositeur n'utilise que 0 et 1) ; `928a5f0` (ne touche que les programmes de
   fragments, que le compositeur n'emploie pas) ; `packbits` (géométrie seulement, et la

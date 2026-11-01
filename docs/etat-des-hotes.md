@@ -44,8 +44,8 @@ cette liste ; la séance suivante se fait sur le M4)
   `20261101-ombre` (avis cadencé 20 Hz). Prouvé avant/après sur mb et DOOM 3 au chargement ;
   plugmd5 69 scènes 0 écart. Coût seulement sous une fenêtre posée : mb-fen +6,2 %, d3 +0,9 %.
   Installés dans la VM quotidienne (anciens dans `/var/tmp/avant-ombre/` de l'invité) et dans
-  `disks/prebuilt` (anciens dans `bench/ombre-0111/prebuilt-avant-ombre-3010.tar`). **Le M4 doit
-  réinstaller kext et bundle puis redémarrer.** Suite : avis borné au rectangle non visible (TODO).
+  `disks/prebuilt` (anciens dans `bench/ombre-0111/prebuilt-avant-ombre-3010.tar`). Le M4 les a
+  depuis le 01/11 à 16 h 57 (§3). Suite : avis borné au rectangle non visible (TODO).
 - **Frontal ImGuiDock : double curseur corrigé** (`50a9801`, agent Opus) : curseur de l'hôte
   masqué au-dessus de l'image en souris absolue. Reconstruit, tests OK ; **à voir à l'œil au
   prochain `run_tiger.sh`** (un seul curseur sur l'image, flèche de retour sur les menus).
@@ -186,10 +186,29 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 30/10/2026, 11 h 30 (dernière séance M4)
+## 3. Mac M4 : état au 01/11/2026, 17 h 45 (séance en cours ; A/B `m4-bundle-0111` en attente)
 
-Fusionné le 01/11 avec l'ancienne « 3 bis » (29/10, 21 h 30). Le M4 a du retard sur le PC :
-voir §4, « Venu du PC le 01/11 ».
+**Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
+- **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
+  et `tcg/0064` compilent sur arm64 (`✔ x-tb-head`), rien d'allumé de plus.
+- **Kext, plugin `20261101-ombre` et GA** compilés **dans la VM quotidienne** (elle a gcc-4.0 ;
+  sources par ssh dans `~/pomppc-build`, `install.sh` sans `QE`), invité redémarré :
+  `QGPUVersion` 22, 4 clients. Anciens binaires dans `/var/tmp/avant-0111/` de l'invité.
+  `disks/prebuilt` n'est pas refait sur le M4 (`run_tiger.sh` le dit plus ancien que les
+  sources : job `tools/guest/jobs/prebuilt` à repasser).
+- **Matrice de preuve** `bench/matrice/preuve-0111-m4` : mb-fen 6,3, mb-pe 6,5, d3-fen 29,7,
+  d3-pe 30,1 ms/image, **vertes** (temps pris sous Time Machine). cmr-pe rouge : sa référence
+  du 27/09 portait le **faux reflet** (même cause que le PC ; le jeu se range aussi en
+  « machine lente » sur le M4 : `ValLowMachine` 1, `docs/re/cmr-rendu-vers-texture.md` §7).
+  Ancienne référence dans `bench/matrice/ref/cmr-pe.faux-reflet-2709/`, nouvelle prise par
+  `bench/matrice/cmr-nouvref-m4-0111` (41,8-42,6 ms/image en course), **à valider à l'œil**
+  (`matrice.py --valider cmr-pe`). Le M4 mesurait déjà la course avant `6054367`.
+- **A/B `m4-bundle-0111`** (`bench/tcg/ab/m4-bundle-0111-chaine.sh`) : comportement d'avant
+  (`POMPPC_GL_PACKBITS=0 POMPPC_GL_QE_NONSIMPLE=0`) contre défaut, mb/d3 fen et mb/cmr pe,
+  3 parties par bras ; barrière : fin de Time Machine puis hôte au repos ; finit par
+  `matab.sh --restore`. Bilans : `bench/tcg/ab/m4-bundle-0111-{fen,pe}/bilan.txt`.
+
+Ci-dessous, l'état du 30/10 (fusionné le 01/11 avec l'ancienne « 3 bis » du 29/10).
 
 **Défauts sur Darwin:arm64** : depuis le 26/10 (`550b2a8`), la série du PC est allumée et
 prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIRTYSKIP PTEGMAP
@@ -199,11 +218,8 @@ allumé depuis le 29/10 (`c792464` : `run_tiger.sh` pose `qe=on`, `QE=0` l'étei
 personnalité « auto » le suit). `tcg/0057`, `0058` compilés, éteints ; `x-tcg-cold` (`0056`)
 compilé, sans effet sur arm64.
 
-**Binaire et VM quotidienne** : `~/src/qemu` reconstruit le 29/10 (19 h), puis le 30/10 avec
-`0057`-`0058` ; il n'a ni `tcg/0059` ni le `qgpu-core.c` du 31/10. Dans la VM quotidienne :
-kext et plugin de `71f9f76` (29/10, curseur, personnalité « auto », installés à 21 h 25), puis
-le plugin avec `tex_bind_id` (`9b5431a`, 30/10 ; révision `20261023-uvwon`). Ni le kext du
-30/10 (`805f504`) ni celui du 01/11, ni les plugins `f01d2d7`, PACKBITS ou `20261101-ombre`.
+**Binaire et VM quotidienne** : depuis le 01/11, `~/src/qemu/build` sur `a0e028e` (série
+jusqu'à `0059` et `0064`), kext du 01/11 et plugin `20261101-ombre` (voir ci-dessus).
 
 **Fait le 30/10**
 - **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
@@ -264,6 +280,8 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 
 - **Venu du PC le 01/11 (pour le M4), dans l'ordre** — reprend les entrées du 30/10 et du
   31/10, réduites le 01/11 à ce qui n'y figure pas :
+  (01/11 : points 1 et 2 faits, la VM **quotidienne** servant de VM de dev ; points 3-4 en
+  cours, §3.)
   1. `git pull` ; **reconstruire QEMU** (`qgpu-core.c` du 31/10 : reflets de cmr ; `tcg/0059`
      nommé depuis le 30/10) ; ni le protocole ni l'ABI n'ont changé. Vérifier que la série se
      compile sur arm64 avec `tcg/0059` (l'opcode générique n'y est jamais émis ; rien ne change

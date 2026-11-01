@@ -14,11 +14,12 @@ ci-dessous et §5.8.)
 (§5.8), 0054 et 0055 (outils de preuve, §5.9, §5.12) construits et éteints. Les deux hôtes ont
 les mêmes défauts, sauf `JITREL32` (propre à x86-64) et la zone froide `TCGCOLD` (`tcg/0056`,
 allumée sur le PC le 31/10, sans effet sur arm64 tant que le chemin lent n'a pas de saut long :
-parité à écrire). `tcg/0057`-`0058` (macOS) et `0059` sont éteints ;
+parité à écrire). `tcg/0057`-`0058` (macOS), `0059` et `0064` (`x-tb-head`, fusionné le 01/11 ;
+preuves arm64 à faire, `docs/anatomie-ppc32.md`) sont compilés et éteints ;
 `0060`-`0063` ne sont pas nommés dans `build_qemu_qfb.sh`. Le M4 tourne toujours sur le binaire
-de référence (pas de `build-fast`). Ce qui reste à faire sur le M4 : `docs/etat-des-hotes.md` §3
-et §4 (reconstruire QEMU pour `qgpu-core.c` du 31/10, kext et plugin du 01/11, profil croisé),
-non le plan des §1-§2.
+de référence (pas de `build-fast`), reconstruit le 01/11 sur `a0e028e`. Ce qui reste à faire
+sur le M4 : `docs/etat-des-hotes.md` §3 et §4 (A/B du bundle du 01/11, profil croisé), non le
+plan des §1-§2.
 
 ## 1. Le retard, patch par patch
 
