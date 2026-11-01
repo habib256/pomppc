@@ -11,6 +11,8 @@
                              `nm -n` d'Apple (T/t : __TEXT,__text ; D/d :
                              __DATA,__data ; B/b : bss/common ; S/s : autre
                              section ; A : absolu)
+    machonm.py --stubs BINAIRE  « adresse taille symbole importé » des stubs,
+                               depuis LC_DYSYMTAB (comme `otool -Iv`)
 
 Pour les listes de tools/re/partfil.py quand ni l'invité (VM quotidienne, sans
 outils de développement) ni l'hôte Linux (pas de llvm-nm) n'ont `nm` ; et,
@@ -68,13 +70,16 @@ class MachO:
     octets à une adresse virtuelle."""
 
     def __init__(self, chemin):
-        b = tranche(open(chemin, "rb").read())
+        with open(chemin, "rb") as f:
+            b = tranche(f.read())
         if b is None:
             raise ValueError("%s : pas un Mach-O ppc 32 bits" % chemin)
         self.b = b
         self.sections = [None]                    # n_sect commence à 1
         self.segments = []                        # (nom, vmaddr, vmsize, fileoff, filesize)
         self.symtab = None
+        self.indirect = None
+        self.stub_sections = []
         for cmd, p in _commandes(b):
             if cmd == 1:                          # LC_SEGMENT
                 seg = b[p + 8:p + 24].split(b"\0", 1)[0].decode()
@@ -86,9 +91,44 @@ class MachO:
                     sn = b[q:q + 16].split(b"\0", 1)[0].decode()
                     sg = b[q + 16:q + 32].split(b"\0", 1)[0].decode()
                     self.sections.append((sg, sn))
+                    flags, first, stride = struct.unpack(">III", b[q + 56:q + 68])
+                    if flags & 0xff == 8 and stride:  # S_SYMBOL_STUBS
+                        address, size = struct.unpack(">II", b[q + 32:q + 40])
+                        self.stub_sections.append((address, size, first, stride))
                     q += 68
             elif cmd == 2:
                 self.symtab = struct.unpack(">IIII", b[p + 8:p + 24])
+            elif cmd == 0xb:                      # LC_DYSYMTAB
+                self.indirect = struct.unpack(">II", b[p + 56:p + 64])
+
+    def stubs(self):
+        """[(adresse, taille, nom importé)] ; ne modifie pas les symboles définis.
+
+        Source : mach-o/loader.h, struct section (reserved1/2), dysymtab_command,
+        INDIRECT_SYMBOL_LOCAL/ABS. Les entrées locales/absolues ne sont pas des
+        index de symboles ; les sections de pointeurs ne sont pas du code.
+        """
+        if self.symtab is None or self.indirect is None:
+            return []
+        symoff, nsyms, stroff, strsize = self.symtab
+        indirectoff, nindirect = self.indirect
+        b, out = self.b, []
+        for address, size, first, stride in self.stub_sections:
+            for i in range(size // stride):
+                if first + i >= nindirect:
+                    raise ValueError("stub hors de la table des symboles indirects")
+                index, = struct.unpack_from(">I", b, indirectoff + 4 * (first + i))
+                if index & 0xc0000000:             # LOCAL / ABS
+                    continue
+                if index >= nsyms:
+                    raise ValueError("index de symbole du stub hors table")
+                strx, = struct.unpack_from(">I", b, symoff + 12 * index)
+                if strx >= strsize:
+                    raise ValueError("nom du stub hors table des chaînes")
+                end = b.index(b"\0", stroff + strx, stroff + strsize)
+                name = b[stroff + strx:end].decode("latin-1")
+                out.append((address + i * stride, stride, name))
+        return sorted(out)
 
     def symboles(self):
         """[(adresse, lettre, nom)] des symboles définis, triés par adresse."""
@@ -149,6 +189,10 @@ if __name__ == "__main__":
         for f in a[1:]:
             for v, l, s in nm(f):
                 print("%08x %s %s" % (v, l, s))
+    elif a and a[0] == "--stubs":
+        for f in a[1:]:
+            for address, size, name in MachO(f).stubs():
+                print("%08x 0x%x %s" % (address, size, name))
     else:
         for f in a:
             for s in noms(open(f, "rb").read()):

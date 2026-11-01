@@ -9,6 +9,11 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Profils du plugin : symboles indirects Mach-O, 01/11.** `machonm.py --stubs` lit les
+  importations du bundle ppc (82 correspondances avec `otool -Iv`, trois tests hors VM).
+  Relevé du M4 : `___stub_getrealaddr` est un résolveur du stub de `fprintf`, suivi des stubs
+  d'importation ; le bloc libSystem `0x90131200` est dans `memcmp`/`bcmp`. Les appelants et
+  les adresses du profil PC restent à qualifier (`docs/re/plugin-symboles-tiger.md`).
 - **Profils M4 : coûts propres par fil, 01/11.** `threadbusy.py --fonctions N` sépare les
   fonctions actives des attentes noyau, notamment sur `qgpu-render`. Corrige aussi le
   dénominateur lorsqu'un fil apparaît dans plusieurs blocs et la dernière pile sans pied de

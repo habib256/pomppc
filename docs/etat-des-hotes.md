@@ -124,7 +124,9 @@ cette liste ; la séance suivante se fait sur le M4)
 2. Plugin sur cmr, suite de PACKBITS : profil de la course refait avec packbits
    (`xprof-0111-cmr-pb`, plugin-allegement §8) : plugin 28,2 % du vCPU, coût étalé
    (`geom_draw_client` 3,7 %, `geom_draw_native`, `send_state`, `prog_sync`, `__stub_getrealaddr`
-   1-1,5 % chacun). Piste : appels par pointeur (`__stub_getrealaddr`) et `texture_unit_ok`.
+   1-1,5 % chacun). Piste : `texture_unit_ok` ; qualifier d'abord les adresses de
+   `__stub_getrealaddr` avant d'en déduire un coût d'appels par pointeur (relevé M4 du 01/11,
+   `docs/re/plugin-symboles-tiger.md`).
 3. `tcg/0063` : témoin sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063 sur cmr. La panique de
    délai de verrou vient-elle des vérificateurs ? A/B en fenêtre mitigé (d3 −3,0 %, mb −2,2 %,
    ut +3,7 %, 2 parties) : à rejouer à 3 parties si le témoin innocente 0063.
@@ -189,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, 22 h 45 (preuves en cours, A/B en attente de repos ; arrêt prévu le 02/11 à 6 h 40)
+## 3. Mac M4 : état au 01/11/2026, 22 h 50 (preuves en cours, A/B en attente de repos ; arrêt prévu le 02/11 à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -222,6 +224,13 @@ des anciennes références**.
   coûts propres par fil et attentes séparées, quatre tests hors VM réussis.
 - Tests de départ : 397 OK, 49 signalements ShellCheck préexistants, 5 ignorés. Les campagnes
   de vitesse sans vidage restent rouges par construction ; elles ne prouvent pas les images.
+- Symboles du plugin et de libSystem identifiés par les binaires de cette VM
+  (`docs/re/plugin-symboles-tiger.md`, empreintes et adresses exactes). Le coût attribué à
+  `___stub_getrealaddr` n'établit pas à lui seul un coût d'appels par pointeur : distinguer
+  le résolveur des stubs voisins sur les prochains profils. `0x90131200` appartient ici à
+  `memcmp`/`bcmp` ; appelants et identité de la bibliothèque sur le PC restent à vérifier.
+  `machonm.py --stubs` donne les 82 importations, identiques à `otool -Iv` ; trois tests
+  hors VM passent. Aucun code de rendu changé.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`

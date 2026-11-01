@@ -57,7 +57,8 @@ décision. Une piste retenue monte dans « Maintenant » (au plus trois chantier
    10 % de mieux sur lui vaut 1-3 % sur chaque jeu, sur les deux hôtes, sans portage. Leviers :
    PGO et LTO du plugin lui-même (le gcc 4.0 de Tiger a `-fprofile-generate/-fprofile-use` ;
    profil pris en jouant la matrice dans la VM de dev), appels internes directs (`static`,
-   visibilité cachée : fin des stubs PIC, `___stub_getrealaddr` 1 % du vCPU de cmr),
+   visibilité cachée, gain à mesurer ; l'étiquette `___stub_getrealaddr` à 1 % sur cmr doit
+   d'abord être résolue sur ses adresses, `docs/re/plugin-symboles-tiger.md`),
    configuration lue une fois (A5 : plus de `getenv` dans le chemin chaud). **Fermeture :**
    plugmd5 0 écart, A/B des cinq jeux, tous en gain. Coût : deux à trois jours (agent Opus).
    Risque : la maturité du PGO de gcc 4.0 sur PowerPC.
@@ -127,10 +128,12 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   (`docs/plugin-allegement.md` §8, profil `bench/tcg/ab/xprof-0111-cmr-pb`). Le coût est
   maintenant étalé : `geom_draw_client` 3,7 % du vCPU de cmr, `geom_draw_native` 1,5,
   `send_state` 1,3, `prog_sync` 1,1, `geom_dispatch_locked` 1,1, **`___stub_getrealaddr` 1,0**
-  (stub PIC de libgcc : appels indirects à travers les stubs, à ramener en appels directs ou
-  en ligne), `texture_unit_ok` 0,9, `geom_format` 0,8, `us_fill`/`us_get` 1,3,
+  (étiquette à résoudre avant d'en tirer un levier : sur le M4, résolveur du stub de
+  `fprintf`, suivi des 82 stubs d'importation ; `docs/re/plugin-symboles-tiger.md`),
+  `texture_unit_ok` 0,9, `geom_format` 0,8, `us_fill`/`us_get` 1,3,
   `prog_params_arena`/`prog_state` 1,4 ; dans libSystem, le bloc `0x90131200` fait 1,8 % sur
-  cmr et 0,7 % sur d3/mb (à identifier : `memcpy`, verrou ?). Méthode du §2 : un levier par
+  cmr et 0,7 % sur d3/mb (identifié sur le M4 dans `memcmp`/`bcmp`, libSystem MD5
+  `80719800…` ; appelants et empreinte du PC à vérifier). Méthode du §2 : un levier par
   variable `POMPPC_GL_*`, mode `=2` de contrôle, `plugmd5` 0 écart, A/B des cinq jeux sur le
   PC ; le M4 a le bundle depuis le 01/11 (VM quotidienne), A/B PACKBITS `m4-bundle-0111` lancé,
   en attente de la fin de Time Machine (gain attendu 1-4 %). S'y rattache l'**avis borné** des
