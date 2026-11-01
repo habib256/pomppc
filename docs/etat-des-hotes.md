@@ -189,7 +189,30 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 01/11/2026, fin de séance (A/B `m4-bundle-0111` interrompu par un redémarrage de l'hôte)
+## 3. Mac M4 : état au 01/11/2026, 22 h 38 (campagne nocturne en cours ; arrêt prévu le 02/11 à 6 h 40)
+
+**Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
+6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
+absents : anciens A/B, références binaires et script de reprise indisponibles. Le manifeste
+versionné des références reste présent ; **ne pas confondre la nouvelle preuve avec un rejeu
+des anciennes références**.
+- QEMU reconstruit depuis HEAD, capacités complètes (`.run/build-nuit-0111.log`), aucun levier
+  supplémentaire allumé. VM quotidienne : plugin `20261101-ombre` et kext chargés ; accès ssh
+  du banc rétabli (nouvelle clé locale, jamais versionnée).
+- Job `prebuilt` compilé par ssh dans la VM, sans installation : kext, plugin, GA, gltest,
+  glwin et accelprobe rapportés dans `disks/prebuilt`, `VERSION=20261101-ombre`. Ancien paquet
+  dans `bench/prebuilt-0111n/avant.tar`, journaux de compilation à côté.
+- Preuve mb-fen `bench/matrice/preuve-nuit-0111-mb` : 6,2 ms/image, zéro repli, rejeu/VM
+  0,03 / 0,02 %. Nouvelle référence regardée (bille au départ de gems.mis) et validée ;
+  ancien enregistrement conservé dans l'historique Git.
+- Campagnes **neuves** `m4-bundle-0111n-{fen,pe}`, puis `m4-profils-0111n-{fen,pe}` par
+  `.run/chaine-nuit-0111.sh` (journal `.run/chaine-nuit-0111.log`). Trois bras entrelacés :
+  `avant` (PACKBITS=0, QE_NONSIMPLE=0), `bits` (1,0), `actuel` (1,1) ; trois parties par bras,
+  mb/zen/ut/d3 en fenêtre, mb/cmr en plein écran. PACKBITS est ainsi séparé du coût de l'avis
+  d'ombre. Barrière `chargehote.py attendre` et relevé continu de charge ; Time Machine arrêté.
+  Ensuite profils hôte 30 s et invité 10 s avec les défauts, sur les cinq jeux.
+- Tests de départ : 397 OK, 49 signalements ShellCheck préexistants, 5 ignorés. Les campagnes
+  de vitesse sans vidage restent rouges par construction ; elles ne prouvent pas les images.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
