@@ -16,6 +16,7 @@
 #   tools/tcg/pgo-train.sh --dry-run                 # montre tout, ne lance rien
 #   tools/tcg/pgo-train.sh                           # gen, jouer, use
 #   tools/tcg/pgo-train.sh --parties 2 --jeux d3,ut  # plus long, autre mélange
+#   tools/tcg/pgo-train.sh --plein-ecran ""          # sans cmr (plein écran, joué après)
 #   tools/tcg/pgo-train.sh --etapes use              # reconstruire seulement
 #   tools/tcg/pgo-train.sh --importer ~/src/qemu-d3tcg/pgo-data3   # profil d'un arbre
 #                       voisin, .gcda renommés pour <arbre>/build-fast (--de <préfixe>
@@ -60,6 +61,9 @@ PGO_CPU="${PGO_CPU:-x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vpe
 PGO_TCG="${PGO_TCG:-x-jit-near=on,x-jit-rel32=on,x-jc-bits=14,x-jc-word=on,x-jc-2way=on}"
 MEM="${PGO_MEM:-20G}"
 DRY=""; FORCE=""; PARTIES=1; JEUX="mb,zen,ut,d3"; MODE=fen; ETAPES=""
+# 01/11 : jeux joués en plein écran après les autres (cmr ne tourne qu'en plein écran ; sans lui
+# le profil ignorait ses chemins chauds, tcg-g4 §47) ; --plein-ecran "" pour s'en passer
+JEUX_PE="cmr"
 IMPORT=""; DE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -68,6 +72,7 @@ while [ $# -gt 0 ]; do
     --parties)  PARTIES="$2"; shift ;;
     --jeux)     JEUX="$2"; shift ;;
     --mode)     MODE="$2"; shift ;;
+    --plein-ecran) JEUX_PE="$2"; shift ;;
     --etapes)   ETAPES="$2"; shift ;;
     --importer) IMPORT="$2"; shift ;;
     --de)       DE="$2"; shift ;;
@@ -232,6 +237,11 @@ if has jouer; then
     esac
     say "partie d'entraînement ($CIBLE) : $JEUX $MODE, $PARTIES partie(s) → $R/bench/tcg/ab/$C"
     run env -u QEMU_BIN ${WRAP[@]+"${WRAP[@]}"} "$WT/tools/tcg/matab.sh" "$C" "$PARTIES" "${BRAS[@]}" "$JEUX" "$MODE"
+    if [ -n "$JEUX_PE" ]; then
+      # les .gcda se cumulent d'une sortie de QEMU à l'autre
+      say "partie d'entraînement en plein écran : $JEUX_PE → $R/bench/tcg/ab/$C-pe"
+      run env -u QEMU_BIN ${WRAP[@]+"${WRAP[@]}"} "$WT/tools/tcg/matab.sh" "$C-pe" "$PARTIES" "${BRAS[@]}" "$JEUX_PE" pe
+    fi
     QUOI="$R/bench/tcg/ab/$C"
   else
     # VM de développement : jamais la VM quotidienne (DEVDISK est un raw de dev).
@@ -271,7 +281,7 @@ if has jouer; then
       echo "cible=$CIBLE"
       echo "banc=$BANC"
       if [ "$BANC" = dev ]; then echo "jeux=VM de dev $DEVDISK : bureau ${PGO_GUI:-120} s + ${PGO_JOBS:-plugmd5 gpu suite mtbench t2bench}"
-      else echo "jeux=$JEUX $MODE, $PARTIES partie(s)"; fi
+      else echo "jeux=$JEUX $MODE${JEUX_PE:+ + $JEUX_PE pe}, $PARTIES partie(s)"; fi
       echo "binaire=$FAST"
       echo "serie=$(serie_hash)"
       echo "pomppc=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null)"

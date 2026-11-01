@@ -65,8 +65,9 @@ Au début d'une séance :
 **À faire sur le PC, dans l'ordre**
 0. Valider la référence cmr-pe (`matrice.py --valider cmr-pe`), regarder les captures de
    `bench/tcg/ab/cmr-res-3110/`.
-1. PGO avec cmr : étendre `tools/tcg/pgo-train.sh` à un mode par jeu (cmr en plein écran),
-   réentraîner `build-fast/`, A/B sur la matrice.
+1. PGO avec cmr : `tools/tcg/pgo-train.sh` joue désormais cmr en plein écran après les jeux en
+   fenêtre (`--plein-ecran`, défaut `cmr`, 01/11 6 h 55, vu en `--dry-run` seulement) ;
+   réentraîner `build-fast/` (~1 h 15), puis A/B neuf contre ancien sur la matrice et cmr.
 2. Plugin sur cmr, suite de PACKBITS : `prog_params_arena`, `prog_sync`, `prog_state`, `fbits` non
    mis en ligne (profil `xprof-0111-cmr`) ; nouveau profil de la course avec le plugin packbits.
 3. `tcg/0063` : témoin sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063 sur cmr. La panique de
