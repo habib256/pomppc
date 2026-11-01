@@ -200,6 +200,14 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   le 27/10 (`docs/os9-optimisations-cpu.md`), défaut `g4` conservé. Reste : A/B de vitesse sur
   une charge reproductible, autres jeux et application AltiVec.
 
+- [ ] **[Plugin] `POMPPC_GL_PRESENTQ` rouvert (01/11, demande de l'utilisateur)** : image n mise
+  en file avant d'attendre la n−1 quand l'hôte présente (`SURF_PRESENT`) ; « non tranché » depuis
+  le 22/10 (neutre en VM de dev, mb −0,2 ms). Sous QE, les jeux en fenêtre présentent par le
+  kext (`present_qe`) : le levier n'agit qu'en **plein écran** (`present_direct`). A/B au repos
+  lancé le 01/11 à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras, pe).
+  **Fermeture :** allumé si aucune cellule pe ne perd et qu'une gagne, sinon classé « écarté sur
+  chiffres » ; variante pour le chemin QE (ne pas attendre la n−1 avant la présentation par le
+  kext) à instruire si le gain en plein écran est net.
 - [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` allumés le 01/10
   sans l'A/B prévu. `tools/matrice/ab-attente.sh 6 qflush` sur hôte au repos ; éteindre si une
   cellule régresse.

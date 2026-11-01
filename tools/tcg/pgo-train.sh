@@ -23,10 +23,11 @@
 #                       si la devinette se trompe), puis --etapes use
 #
 # Cible entraînée (docs/ppc32-mttcg.md §11) : le profil doit couvrir le binaire
-# réellement lancé. --cible ppc64 (défaut : la matrice en SMP=2 sur qemu-system-ppc64,
-# comme toujours), ppc32mt (bras PPC32MT=1 : qemu-system-ppc en MTTCG ; run_tiger.sh
-# du dépôt principal doit connaître PPC32MT), les-deux (un bras par cible, les .gcda
-# s'additionnent).
+# réellement lancé. --cible ppc32mt (DÉFAUT depuis le 01/11 : c'est la production des deux
+# hôtes depuis le 23/10 et le 26/10, bras PPC32MT=1 : qemu-system-ppc en MTTCG), ppc64 (bras
+# PPC32MT=0 explicite : qemu-system-ppc64 ; avant le 01/11 le défaut était « ppc64 » mais le
+# bras héritait du PPC32MT=1 de run_tiger.sh, donc entraînait en fait ppc32mt), les-deux (un
+# bras par cible, les .gcda s'additionnent).
 # --banc dev : la partie se joue sur une VM de DÉVELOPPEMENT (DEVDISK=<raw>, jamais la
 # VM quotidienne) par tools/tcg/ppc32mt-bench.sh : un démarrage du bureau
 # (devloop start --gui, PGO_GUI s de bureau, défaut 120), puis un démarrage
@@ -54,7 +55,7 @@ R="${R:-$WT}"
 SRC="${QEMU_SRC:-$HOME/src/qemu}"
 FASTB="${QEMU_FAST_BUILD:-build-fast}"
 PGO_DIR="${PGO_DIR:-$SRC/pgo-${FASTB#build-}}"
-CIBLE=ppc64; BANC=matrice
+CIBLE=ppc32mt; BANC=matrice
 read -r -a WRAP <<< "${PGO_WRAP:-}"
 # Options de production (Linux x86-64), celles de tools/tcg/ppc32mt-bench.sh : bureau du --banc dev
 PGO_CPU="${PGO_CPU:-x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on,x-fp-inline=on,x-fp-native=on,x-fp-native64=on,x-fp-native-cmp=on,x-fp-known=on,x-fprf-lazy=on,x-stfs-known=on,x-vfp-native-cmp=on,x-tb-fast=on,x-ret-inline=on,x-jc-idx=on,x-icbi-sync=on,x-msr-nobql=on,x-tlb-precise=on,x-lmw-inline=on,x-dcbz-inline=on,x-dirty-skip=on,x-pteg-map=on}"
@@ -231,9 +232,9 @@ if has jouer; then
     [ -f "$R/disks/tiger.qcow2" ] || [ -n "$DRY" ] || die "VM quotidienne absente ($R/disks/tiger.qcow2)"
     [ -f "$R/disks/tiger.qcow2" ] || echo "  (VM quotidienne absente : $R/disks/tiger.qcow2)"
     case "$CIBLE" in
-      ppc64)    BRAS=("train:QEMU_BIN=$FAST") ;;
+      ppc64)    BRAS=("train:QEMU_BIN=$FAST PPC32MT=0") ;;
       ppc32mt)  BRAS=("train:QEMU_BIN=$FAST PPC32MT=1") ;;
-      les-deux) BRAS=("train64:QEMU_BIN=$FAST" "train32:QEMU_BIN=$FAST PPC32MT=1") ;;
+      les-deux) BRAS=("train64:QEMU_BIN=$FAST PPC32MT=0" "train32:QEMU_BIN=$FAST PPC32MT=1") ;;
     esac
     say "partie d'entraînement ($CIBLE) : $JEUX $MODE, $PARTIES partie(s) → $R/bench/tcg/ab/$C"
     run env -u QEMU_BIN ${WRAP[@]+"${WRAP[@]}"} "$WT/tools/tcg/matab.sh" "$C" "$PARTIES" "${BRAS[@]}" "$JEUX" "$MODE"
@@ -251,7 +252,7 @@ if has jouer; then
       die "$WT/bench/devloop/mailbox.json absent (le copier du dépôt principal)"
     case "$CIBLE" in ppc64) CIBLES="ppc64" ;; ppc32mt) CIBLES="ppc32mt" ;; *) CIBLES="ppc32mt ppc64" ;; esac
     for c in $CIBLES; do
-      p32=""; [ "$c" = ppc32mt ] && p32=1
+      p32=0; [ "$c" = ppc32mt ] && p32=1
       say "entraînement $c sur la VM de dev ($DEVDISK) : bureau ${PGO_GUI:-120} s"
       if [ -n "$DRY" ]; then
         run env DEVDISK="$DEVDISK" QEMU_BIN="$FAST" SMP=2 PPC32MT="$p32" SND=none \

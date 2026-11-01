@@ -377,7 +377,7 @@ fonction statique qui n'est pas déclarée `inline`.
 ### 10.2 Les leviers
 
 Tous exacts par construction, chacun derrière une variable (allumée par défaut depuis le
-21/10, `*_DEFAULT 1`, après l'A/B du §10.5 ; `=0` la coupe), sauf HOTINLINE (compilation, allumé). Aucun ne touche `qgpu_proto.h` ni
+21/10, `*_DEFAULT 1`, après l'A/B du §10.5 bis ; `=0` la coupe), sauf HOTINLINE (compilation, allumé). Aucun ne touche `qgpu_proto.h` ni
 `qgpu_abi.h` : ni QEMU ni kext à reconstruire. Gains : instructions par dessin de `d3inter`,
 chaque levier seul.
 
@@ -419,7 +419,7 @@ sur l'image — à mesurer, la répartition des dispatches de DOOM 3 n'est pas c
 
 ### 10.4 A/B sur la VM quotidienne (à jouer)
 
-(01/11 : joué le 21/10, voir le second §10.5, « Résultats » ; les cinq variables sont à 1.)
+(01/11 : joué le 21/10, voir le §10.5 bis, « Résultats » ; les cinq variables sont à 1.)
 
 Installer le plugin `20261021-d3p` (bundle construit dans la VM de dev :
 `bench/d3plug-2110/GLDriver-POMPPC-20261021.bundle.tar` du worktree), d'abord une partie
@@ -459,7 +459,7 @@ levier par levier.
   d'abord.
 - Le crochetage sauté de DISPONE compare encore 36 cases par dispatch (~320 instructions).
 
-### 10.5 Résultats (VM quotidienne, PC, 21/10, hôte au repos, binaire rapide PGO)
+### 10.5 bis Résultats (VM quotidienne, PC, 21/10, hôte au repos, binaire rapide PGO)
 
 Contrôle (`d3p-chk`, 2 500 images de DOOM 3) : `dispfast 2` 84 197 clés reprises, `mtxdirty 2`
 1 201 504 comparaisons sautées, `stunit 2` 129 133 séries contrôlées, **0 écart** partout.
