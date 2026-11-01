@@ -3,7 +3,8 @@
 # Copyright (c) 2026 VERHILLE Arnaud
 # go.sh — construit et installe POMPPCQFB.kext depuis le CD, en mode single-user.
 #
-#   mkdir /c ; mount_cd9660 /dev/disk1 /c ; sh /c/go.sh
+#   mkdir /c ; mount_cd9660 /dev/disk1 /c ; sh /c/kext/POMPPCQFB/go.sh
+#   (CD de scripts/make_kext_iso.sh ; /dev/diskNs0 si la tranche de session est demandée)
 #
 # Journal complet : /var/log/pomppcqfb-build.log ; résumé sur la console.
 LOG=/var/log/pomppcqfb-build.log

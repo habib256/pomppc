@@ -10,7 +10,8 @@ intervalle de confiance. Mode d'emploi : docs/endurance.md.
         [--mode froid|reboot|reset] [--qemu BIN] [--nom CAMPAGNE]
     python3 tools/endurance/endurance.py jeu --jeu mb -n 20 [--duree 60]
     python3 tools/endurance/endurance.py rapport bench/endurance/CAMPAGNE
-    python3 tools/endurance/endurance.py collecte SOCKET_MONITEUR DOSSIER
+    python3 tools/endurance/endurance.py compare CAMP1 CAMP2 [--type jeu] [--depart reboot]
+    python3 tools/endurance/endurance.py collecte SOCKET_MONITEUR DOSSIER [--serie SOCKET]
 
 Jamais sur la VM quotidienne : chaque instance démarre sur un recouvrement
 qcow2 NEUF (disks/tiger-endurance.qcow2 en lecture seule dessous, copie du

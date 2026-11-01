@@ -198,10 +198,12 @@ branche `screamer-v9.1.0` du fork de Mark Cave-Ayland
 récupérer au build est délibéré : **le dépôt doit pouvoir reconstruire son binaire de
 référence sans dépendre d'un fork tiers**, qui peut disparaître ou se réécrire.
 
-Une seule modification fonctionnelle par rapport à l'amont, signalée en tête de
-`screamer.c` : `dc->reset` a disparu entre QEMU 9.1 et 9.2, remplacé par
-`device_class_set_legacy_reset()` (même sémantique — `hw/display/qfb-pci.c` utilise déjà la
-forme 9.2).
+Première modification par rapport à l'amont : `dc->reset` a disparu entre QEMU 9.1 et 9.2,
+remplacé par `device_class_set_legacy_reset()` (même sémantique — `hw/display/qfb-pci.c`
+utilise déjà la forme 9.2). Ce n'est plus la seule (01/11) : anneau de 8192 trames et
+écriture partielle (`docs/audio-stabilite.md`), compteur de trames à la lecture du DMA et
+registre 5 inscriptible (saccades de DOOM 3, 29/09), correctifs DBDMA ci-dessous, API
+`audio_be_*` de QEMU 11.1.2 ; la liste est en tête de `screamer.c`.
 
 La garde de débordement commentée de `pmac_screamer_tx()` a été **remplacée par l'explication
 de pourquoi elle ne doit pas être restaurée** (commentaire, aucun changement de code) : le

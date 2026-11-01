@@ -5,7 +5,7 @@
 Le banc ajoute à chaque instance un UART 16550 sur PCI (`-device pci-serial`)
 relié à un socket unix de l'hôte (`.run/endurance/<campagne>-<i>/serie.sock`).
 Tiger 10.4.11 le prend avec Apple16X50Serial.kext (correspondance de classe PCI
-0x0700) et le publie en /dev/tty.pci-serial17 ; la base
+0x0700) et le publie en /dev/tty.pci-serial18 (fente 0x12) ; la base
 `disks/tiger-endurance-serie.qcow2` y lance un getty (ligne de /etc/ttys,
 docs/endurance.md §8). Ce module ouvre une session (tiger / tiger974), exécute
 des commandes et rend leur sortie — même quand le port 22 ne répond plus.

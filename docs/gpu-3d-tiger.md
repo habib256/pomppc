@@ -734,8 +734,11 @@ python3 tools/guest/devloop.py run mon_job/   # exécute mon_job/job.sh, rapatri
 python3 tools/guest/devloop.py click 400 150 800x600   # clic souris (résolution courante)
 ```
 
-`SMP=2` et `SND=1` (ou `SND=none`, Screamer muet) au démarrage reproduisent les conditions de
-`run_tiger.sh` : deux cœurs MTTCG, son, RAM plafonnée à 768 Mo.
+`SMP=2 PPC32MT=1` et `SND=1` (ou `SND=none`, Screamer muet) au démarrage rapprochent la VM de
+`run_tiger.sh` : deux cœurs MTTCG sur `qemu-system-ppc`, son, RAM plafonnée à 768 Mo (1 024 Mo
+sans `SND`). 01/11 : sans `PPC32MT=1`, `SMP=2` prend `qemu-system-ppc64` (défaut voulu de
+`devloop.py`, contrairement au lanceur) ; les leviers TCG de `run_tiger.sh` ne sont pas
+repris d'office (`CPU_OPTS`, `TCG_OPTS`).
 
 En mode bureau, un processus racine ne peut pas ouvrir de fenêtre (ni même de contexte CGL :
 erreur 10006) : `gui_run 'commande'` (`tools/guest/guilib.sh`) fait exécuter la commande dans la

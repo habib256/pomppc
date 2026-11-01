@@ -28,8 +28,14 @@
  * Vendu dans POMPPC depuis la branche « screamer-v9.1.0 » du fork
  * https://github.com/mcayland/qemu — copié ici pour que le dépôt puisse
  * reconstruire son binaire de référence SANS dépendre d'un fork tiers.
- * Seule modification : portage de dc->reset vers device_class_set_legacy_reset
- * (API changée entre QEMU 9.1 et 9.2). Voir patches/README.md.
+ * Modifications POMPPC (01/11 : ce n'est plus le seul portage de dc->reset vers
+ * device_class_set_legacy_reset, API changée entre QEMU 9.1 et 9.2) : anneau de
+ * SCREAMER_RING_FRAMES trames et écriture partielle d'audio_be_write
+ * (docs/audio-stabilite.md), compteur de trames à la lecture du DMA et
+ * registre 5 inscriptible (saccades de DOOM 3, 29/09), arrêt/pause/FLUSH du
+ * DBDMA, fragment différé, reliquat de moins d'une trame, relecture du codec,
+ * reset de io.processing (bug hunts du 29/09), API audio_be de QEMU 11.1.2.
+ * Voir patches/README.md.
  */
 
 #include "qemu/osdep.h"
@@ -485,9 +491,10 @@ static void screamerspk_callback(void *opaque, int free_b)
             }
             accepted = audio_be_write(s->audio_be, s->voice, s->mixbuf + (idx << s->shift),
                                  requested);
-            /* AUD_write may accept less than requested (including zero). Only
-             * retire PCM actually accepted, otherwise samples vanish. Writes
-             * are whole stereo frames. A short write is backpressure: keep the
+            /* audio_be_write (AUD_write before the QEMU 11.1.2 port) may
+             * accept less than requested (including zero). Only retire PCM
+             * actually accepted, otherwise samples vanish. Writes are whole
+             * stereo frames. A short write is backpressure: keep the
              * rest, do not replace it with silence, and do not spin. The frame
              * counter follows the DMA (screamer_tx_copy), not this output. */
             samples = (unsigned)(accepted >> s->shift);
