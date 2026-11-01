@@ -10,8 +10,12 @@
  * produire les mêmes pixels aux points testés (intérieur des primitives et
  * fond — jamais sur une arête, où les règles de rastérisation diffèrent).
  *
- *   cc -pthread -I patches/qgpu tests/qgpu_core_test.c patches/qgpu/qgpu-{core,soft,gl}.c \
- *      [-framework OpenGL | -lEGL -lGL] -o qgpu_core_test && ./qgpu_core_test
+ *   cc -std=gnu11 -O1 -pthread -I patches/qgpu tests/qgpu_core_test.c \
+ *      patches/qgpu/qgpu-{core,soft,gl}.c \
+ *      [-framework OpenGL | $(pkg-config --libs egl gl)] -lm -o qgpu_core_test && ./qgpu_core_test
+ * (la ligne de tests/run-all.sh, qui passe aussi QGPU_TEST_DP : permutations
+ * GLSL de DarkPlaces extraites par tests/dp_glsl_extract.py, si leurs sources,
+ * non versionnées, sont là).
  *
  * Comme dans le device (v9), le backend est initialisé sur un thread et tout le
  * reste — exécution, reset, libération — se fait sur UN AUTRE : c'est ce qui a
