@@ -3,21 +3,26 @@
 > **Deux hôtes (PC x86-64 et Mac M4) en alternance** : l'état de chacun et ce qui y reste à faire
 > sont dans [docs/etat-des-hotes.md](docs/etat-des-hotes.md), à lire en premier.
 
-État au 01/11/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 02/11/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
 M4 342 démarrages et 40 cycles de jeu sans incident le 29/10 ; Quartz Extreme allumé sur les
 deux hôtes). **L'orientation est de nouveau la vitesse, sur les deux hôtes**, car la version x86
-reste trop lente pour être publiée (règle du 20/10). Vitesse au 01/11, ms/image, hôte au repos :
+reste trop lente pour être publiée (règle du 20/10). Vitesse, ms/image, hôte au repos
+(PC du 01/11, M4 du 02/11) :
 
-| jeu | PC x86-64 (binaire rapide, plugin `packbits`) | M4 (30/10, QE) | rapport |
+| jeu | PC x86-64 (binaire rapide, plugin `packbits`) | M4 (02/11, QE) | rapport |
 |---|---:|---:|---:|
-| DOOM 3, fenêtre | 78-80 | 29 | ×2,7 |
-| UT2004, fenêtre | 40 | 19,6 | ×2,0 |
-| Marble Blast, fenêtre | 8,3 | 6,1 | ×1,4 |
-| Zenerchi, fenêtre | 4,6 | 2,8 | ×1,6 |
-| Colin McRae, plein écran, **en course** | 82 | 42 (01/11, 1920×1080, mesuré sous Time Machine) | — |
+| DOOM 3, fenêtre | 78-80 | 28,9 | ×2,7 |
+| UT2004, fenêtre | 40 | 19,3 | ×2,1 |
+| Marble Blast, fenêtre | 8,3 | 6,2 | ×1,3 |
+| Zenerchi, fenêtre | 4,6 | 2,6 | ×1,8 |
+| Colin McRae, plein écran, **en course** | 82 | 41,7 (1920×1080) | ×2,0 |
+
+M4 : médianes du témoin sans attente précise de l'A/B `m4-pollns-0211`, trois parties,
+frontal Cocoa, profils pris après les fenêtres (`docs/tcg-g4.md` §42.2). Ces valeurs
+remplacent le relevé sous Time Machine ; elles ne mesurent pas ImGuiDock.
 
 Cible du PC : DOOM 3 à 50 ms/image (`docs/vitesse-doom3-x86.md` : 148,7 au premier relevé du 03/10, §2 ; 111,5 avec le
 binaire rapide le 06/10, §13).
@@ -64,11 +69,12 @@ décision. Une piste retenue monte dans « Maintenant » (au plus trois chantier
    Risque : la maturité du PGO de gcc 4.0 sur PowerPC.
 3. **Fil de rendu de l'hôte : convertir les attributs une fois.** `nat_conv_attr` fait 27 % de
    `qgpu-render` (attributs reconvertis à chaque dessin natif ; à convertir au `BUF_SUBDATA`).
-   Sur le PC le fil prend 20 ms par image de d3 sans bloquer l'invité ; sur le M4, où d3 est à
-   29 ms, il peut être le chemin critique, et sur mb et zen (55 % et 41 % d'un cœur) il dispute
-   les cœurs rapides aux vCPU. **Ordre :** le profil croisé du M4 d'abord (chantier M4, point 2),
-   puis le levier si le fil est critique. **Fermeture :** A/B des cinq jeux sur les deux hôtes.
-   Gain : M4 d3 jusqu'à −20 % si le fil est critique, sinon moins de CPU hôte. Coût : deux jours.
+   Sur le PC le fil prend 20 ms par image de d3 sans bloquer l'invité ; il dispute aussi les
+   cœurs rapides aux vCPU sur mb et zen. **Profil M4 du 02/11 fait** : sur d3, 0,178 cœur de
+   travail estimé et 82,2 % d'attente de condition (`docs/profil-m4-0211.md` §2), ce qui ne
+   justifie pas de placer ce levier en tête sur le M4. **Fermeture :** A/B des cinq jeux sur
+   les deux hôtes. Gain utile à chiffrer selon le jeu ; réduction de CPU hôte attendue.
+   Coût : deux jours. Aucune optimisation de cette piste lancée.
 4. **Boîte noire des paniques.** Les plantages en jeu (délai de verrou, `exit 138`/`139`) restent
    « sans cause » faute de relevé au moment même. Levier : QEMU arme un point d'arrêt sur
    `_panic` du `mach_kernel` (adresse connue de `tools/re/kpanic.py`) et, à l'entrée, écrit

@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 4 h 48 (attente UT identifiée ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 4 h 51 (endurance finale en cours ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -329,6 +329,11 @@ des anciennes références**.
 - **Contrôle général après le mappage : 408 OK**, mêmes 49 signalements ShellCheck
   préexistants (liste de fichiers comparée), 5 ignorés ; test de souris du frontal réussi.
   `.run/tests-samplejit-0211.log`.
+- **Tranche finale démarrée à 4 h 50**, VM quotidienne arrêtée proprement et frontal
+  fermé : `m4-nuit-0211-fin-dem` (50 démarrages froids au plus, borne 5 h 35), puis
+  `m4-nuit-0211-fin-jeux` (mb, zen, ut, d3, aucun nouveau cycle après 6 h 05).
+  Base immuable du 01/11, QEMU `8568ff59…`, tous les défauts, attente précise éteinte.
+  Journal `.run/nuit-fin-0211.log` ; remise de la VM normale après ces contrôles.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
