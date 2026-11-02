@@ -12,5 +12,5 @@ POMPPC_GL_FRAMES=$T/frames.csv; export POMPPC_GL_FRAMES
 POMPPC_EXITWATCH=$T/exitwatch.txt; export POMPPC_EXITWATCH
 DYLD_INSERT_LIBRARIES=/Users/tiger/libexitwatch.dylib; export DYLD_INSERT_LIBRARIES
 # chemin brut ACTIF (défaut) ; sonde des sommets aberrants (traînées) → note.txt
-cd "/Users/tiger/Desktop/Unreal Tournament 2004 Demo.app/Contents/MacOS"
+cd "/Users/tiger/Desktop/Unreal Tournament 2004 Demo.app/Contents/MacOS" || exit 1
 exec "./Unreal Tournament 2004 Demo" > $T/stdout.txt 2>&1

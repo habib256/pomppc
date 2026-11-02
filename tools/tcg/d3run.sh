@@ -43,7 +43,7 @@ stop_vm() {
 }
 
 wait_ssh() { # 0 si l'invité répond à ssh dans les 300 s
-  for i in $(seq 1 60); do
+  for _i in $(seq 1 60); do
     $TS true >/dev/null 2>&1 && return 0
     sleep 5
   done
@@ -63,7 +63,7 @@ QB="${QEMU_BIN:-/Users/mercure/src/qemu-tcg19/build/qsr}"
 OUT="$WT/bench/tcg/d3/$L"; mkdir -p "$OUT"
 
 stop_vm
-for essai in 1 2; do
+for _essai in 1 2; do
   ( cd "$WT" && QEMU_BIN="$QB" SMP="$SMPN" SRTLB="$SR" DISK=$R/disks/tiger.qcow2 \
       POMPPC_SCRATCH=$R/.run NOCD=1 nohup ./run_tiger.sh > "$OUT/run_tiger.log" 2>&1 & )
   sleep 20

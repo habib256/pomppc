@@ -29,5 +29,5 @@ for s in tex13 tex14 gl15 texlod mixte dlist lit texgen; do
   env "$@" POMPPC_GL_NOTE=$O/$s.note $B $s 256 256 > $O/$s.log 2>&1; echo "rc $?" >> $O/$s.log
   [ -f gltest.ppm ] && md5 -q gltest.ppm > $O/$s.md5
 done
-cd $O; for f in *.log; do s=${f%.log}; r=$(grep -E '^(OK|ÉCHEC|ECHEC|FAIL)|échec|rc ' $f | grep -v img/s | tr '\n' ' '); echo "$s: $r $(cat $s.md5 2>/dev/null)"; done
+cd "$O" || exit 1; for f in *.log; do s=${f%.log}; r=$(grep -E '^(OK|ÉCHEC|ECHEC|FAIL)|échec|rc ' $f | grep -v img/s | tr '\n' ' '); echo "$s: $r $(cat $s.md5 2>/dev/null)"; done
 echo "-- notes"; grep -h 'stateblk=\|STATEBLK\|VERDICT total\|VERDICT écart\|TEXMEMO écart\|STATE écart' *.note | sort | uniq -c | sort -rn | head -20

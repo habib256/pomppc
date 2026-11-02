@@ -25,7 +25,7 @@
 # Code de sortie : 0 si tout passe.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 SLOW=0; [ "${1:-}" = "--slow" ] && SLOW=1
 
 pass=0; fail=0; skip=0
@@ -69,6 +69,7 @@ if python3 tests/matrice_test.py >/dev/null; then ok "matrice de jeux : règles 
 if python3 tests/endurance_memory_test.py; then ok "endurance : collecte RAM"; else ko "endurance : collecte RAM"; fi
 if python3 tests/endurance_launch_test.py; then ok "endurance : arrêt pendant le lancement"; else ko "endurance : arrêt pendant le lancement"; fi
 if python3 tests/host_detach_test.py; then ok "VM détachée : survit au groupe du lanceur"; else ko "VM détachée : survit au groupe du lanceur"; fi
+if python3 tests/shellcleanup_test.py; then ok "nettoyage des sondes : noms préservés"; else ko "nettoyage des sondes"; fi
 if python3 tests/threadbusy_test.py; then ok "sample hôte : coûts et attentes par fil"; else ko "sample hôte : coûts et attentes par fil"; fi
 if python3 tests/samplejit_test.py; then ok "sample arm64 : PC invités et appelants sans ambiguïté"; else ko "sample arm64 : PC invités et appelants sans ambiguïté"; fi
 if python3 tests/machonm_stubs_test.py; then ok "Mach-O ppc : symboles indirects"; else ko "Mach-O ppc : symboles indirects"; fi
@@ -87,6 +88,11 @@ fi
 if [ "$(uname -sm)" = "Darwin arm64" ] && command -v cc >/dev/null 2>&1 &&
    [ -f "$POLLNS_SRC/tcg/aarch64/tcg-target.c.inc" ]; then
   if python3 tools/tcg/coldbranchproof.py "$POLLNS_SRC"; then ok "M4 : portes longues exécutées (préparation zone froide)"; else ko "M4 : portes longues"; fi
+  if grep -q tcg_out_cold_veneers "$POLLNS_SRC/tcg/aarch64/tcg-target.c.inc"; then
+    if python3 tools/tcg/coldzoneproof.py "$POLLNS_SRC"; then ok "M4 : zone froide, relais et pools"; else ko "M4 : zone froide"; fi
+  else
+    noop "zone froide arm64 : arbre QEMU tcg/0066 requis"
+  fi
 else
   noop "portes longues : Mac arm64 et sources QEMU requis"
 fi
@@ -130,6 +136,9 @@ if [ -x "$QEMU_BIN" ] || command -v "$QEMU_BIN" >/dev/null 2>&1; then
   cap "device qfb-pci"                   qemu_has_device   "$QEMU_BIN" qfb-pci
   cap "device qgpu-pci"                  qemu_has_device   "$QEMU_BIN" qgpu-pci
   cap "slirp"                            qemu_has_netdev   "$QEMU_BIN" user
+  if [ "$(uname -s)" = Darwin ]; then
+    cap "attente macOS à budget (tcg/0067)" qemu_has_poll_budget "$QEMU_BIN"
+  fi
   # SMP : sondé sur le binaire 64 bits, celui que run_tiger.sh lance dès
   # SMP >= 2 — et sur la machine du lanceur, car -smp 2 exige via=pmu. C'était
   # la seule capacité annoncée par le README que rien ne vérifiait.
@@ -189,7 +198,14 @@ echo "=== 4 bis. flottant rapide : test différentiel hôte (softfloat) ==="
 # lie à fpu_softfloat.c.o de l'arbre QEMU : sans cet arbre (ou sans le patch),
 # il n'y a rien à tester, et c'est « ignoré », pas un échec.
 FFP_SRC="${QEMU_SRC:-$(dirname "$(dirname "$QEMU_BIN")")}"
-FFP_OBJ="$FFP_SRC/build/libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o"
+FFP_OBJ=""; FFP_REL=""
+# QEMU 11 compile softfloat dans libcommon ; les anciennes séries le
+# rangeaient dans la bibliothèque de cible. Ne pas prendre l'objet d'un test.
+for FFP_REL in libcommon.a.p/fpu_softfloat.c.o libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o; do
+  if [ -f "$FFP_SRC/build/$FFP_REL" ]; then
+    FFP_OBJ="$FFP_SRC/build/$FFP_REL"; break
+  fi
+done
 if ! grep -qs "no_hardfloat" "$FFP_SRC/include/fpu/softfloat-types.h"; then
   noop "arbre QEMU sans le patch fastfp ($FFP_SRC)"
 elif [ ! -f "$FFP_OBJ" ] || [ ! -f "$FFP_SRC/build/compile_commands.json" ]; then
@@ -200,10 +216,10 @@ else
   # Les -I/-D de l'objet softfloat, repris tels quels : les en-têtes de QEMU ne
   # se compilent qu'avec eux, et la disposition de float_status doit être LA
   # MÊME des deux côtés du lien.
-  FFP_FLAGS="$(python3 - "$FFP_SRC/build/compile_commands.json" <<'PY'
+  FFP_FLAGS="$(python3 - "$FFP_SRC/build/compile_commands.json" "$FFP_REL" <<'PY'
 import json, shlex, sys
 for e in json.load(open(sys.argv[1])):
-    if e['output'].endswith('libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o'):
+    if e['output'].endswith(sys.argv[2]):
         t = shlex.split(e['command']); out = []; i = 0
         while i < len(t):
             if t[i].startswith(('-I', '-iquote', '-isystem', '-D', '-include')):
@@ -402,7 +418,7 @@ if command -v cc >/dev/null 2>&1; then
   QGPU_BIN="${TMPDIR:-/tmp}/qgpu_core_test.$$"
   case "$(uname -s)" in
     Darwin) QGPU_LIBS=(-framework OpenGL) ;;
-    *)      QGPU_LIBS=(); pkg-config --exists egl gl 2>/dev/null && QGPU_LIBS=($(pkg-config --libs egl gl))
+    *)      QGPU_LIBS=(); pkg-config --exists egl gl 2>/dev/null && read -r -a QGPU_LIBS <<< "$(pkg-config --libs egl gl)"
             # même plateforme EGL que run_tiger.sh : sous la session Wayland d'Ubuntu 26.04,
             # l'EGL par défaut est llvmpipe, qui mesure l'atténuation des points sur |z| et
             # fait échouer « atténuation c·d² » (14/10/2026, comme tex14 du job gpu)

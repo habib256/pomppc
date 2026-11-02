@@ -9,4 +9,9 @@ cd $SRC/guest/gltest && mkdir -p $OUT/trace
 GLTEST_NOWS=1 POMPPC_GL_TRYCUBE=256 POMPPC_GL_T3DDUMP=1 POMPPC_GLTRACE=$OUT/trace \
   ./gltest cubeprobe 64 64 c.ppm 2>&1 | grep -E "cube|face|RENDERER"
 grep -E "emplacement|gldCreateTextureLevel" $OUT/trace/trace.txt | head -30
-cd $OUT/trace && ls | grep -v "prm\|dt[0-9]" | grep bin | xargs rm -f
+( cd "$OUT/trace" || exit 1
+    for dump in ./*bin*; do
+      [ -f "$dump" ] || continue
+      case "$dump" in *prm*|*dt[0-9]*) ;; *) rm -f "$dump" ;; esac
+    done
+  )

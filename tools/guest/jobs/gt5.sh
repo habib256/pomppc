@@ -24,5 +24,5 @@ done
 rm -f gltest.ppm
 env "$@" POMPPC_GL_NOTE=$O/r4.note $B r4 > $O/r4.log 2>&1; echo "rc $?" >> $O/r4.log
 [ -f gltest.ppm ] && md5 -q gltest.ppm > $O/r4.md5
-cd $O; for f in *.log; do s=${f%.log}; r=$(grep -E '^(OK|ÉCHEC|ECHEC|FAIL)|échec|rc ' $f | grep -v img/s | tr '\n' ' '); echo "$s: $r $(cat $s.md5 2>/dev/null)"; done
+cd "$O" || exit 1; for f in *.log; do s=${f%.log}; r=$(grep -E '^(OK|ÉCHEC|ECHEC|FAIL)|échec|rc ' $f | grep -v img/s | tr '\n' ' '); echo "$s: $r $(cat $s.md5 2>/dev/null)"; done
 echo "-- VERDICT"; grep -h 'VERDICT total\|VERDICT écart\|TEXMEMO écart\|STATE écart' *.note

@@ -29,12 +29,12 @@ for s in $SC; do
     [ -f gltest.ppm ] && { md5 -q gltest.ppm > $O/$s-$m.md5; cp gltest.ppm $O/$s-$m.ppm; }
   done
 done
-cd $O
+cd "$O" || exit 1
 for s in $SC; do
   line="$s:"
   for m in ref sane natshm tout apple; do
     v=$(grep -E '^(OK|ÉCHEC|ECHEC)' $s-$m.log | head -1 | cut -c1-24)
-    line="$line  $m[$(grep '^rc' $s-$m.log | cut -c4-) $(cut -c1-8 $s-$m.md5 2>/dev/null) $v]"
+    line="$line  ${m}[$(grep '^rc' $s-$m.log | cut -c4-) $(cut -c1-8 $s-$m.md5 2>/dev/null) $v]"
   done
   echo "$line"
 done

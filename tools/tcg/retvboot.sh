@@ -22,10 +22,10 @@ BIN=$QB/qemu-system-ppc; [ "$SMP" -gt 1 ] && BIN=${BIN}64
 ACC="tcg,x-jit-near=on,x-jit-rel32=on,x-jc-bits=14,x-jc-word=on"
 [ "$SMP" -gt 1 ] && ACC="$ACC,thread=multi"
 CPU="g4,x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-vmx-inline=on,x-vfp-native=on,x-lmw-vector=on,x-fp-inline=on,x-fp-native=on,x-fp-native64=on,x-fp-native-cmp=on,x-vfp-native-cmp=on,x-tb-fast=on,x-ret-inline=on,x-jc-idx=on,x-ret-verify=on,x-icbi-sync=on,x-msr-nobql=on,x-tlb-precise=${TLBP:-on},x-lmw-inline=on,x-dcbz-inline=on${EXTRA_CPU:+,$EXTRA_CPU}"
-ARGS=(-k fr -M mac99,via=pmu -cpu "$CPU" -m "${RAM:-768}" -smp "$SMP" -accel "$ACC"
+ARGS=(-k fr -M "mac99,via=pmu" -cpu "$CPU" -m "${RAM:-768}" -smp "$SMP" -accel "$ACC"
   -display none -bios "$R/patches/smp-mac99/openbios-smp-screamer.elf" -g 1024x768x32
   -drive "file=$DISK,format=raw,media=disk" -snapshot
-  -device usb-tablet,x-abs-margin=15 -nic none -device qgpu-pci,id=gpu0,backend=auto
+  -device "usb-tablet,x-abs-margin=15" -nic none -device "qgpu-pci,id=gpu0,backend=auto"
   -prom-env "auto-boot?=true" -prom-env "boot-device=hd:10,\\System\\Library\\CoreServices\\BootX"
   -prom-env "boot-args=-v -s")
 echo "# $(date -Iseconds) SMP=$SMP RAM=${RAM:-768} TLBP=${TLBP:-on} WATCH=${WATCH:-} EXTRA=${EXTRA_CPU:-} $BIN" > "$LOG"

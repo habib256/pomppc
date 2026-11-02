@@ -19,7 +19,7 @@ kextstat | grep -i pomppc | awk '{print "chargé :", $6, $7}'
 step "second exemplaire (copie à plat laissée dans Resources)"
 mkdir -p $RES/GLDriver-POMPPC.bundle
 cp $EXT/GLDriver-POMPPC.bundle/Contents/MacOS/GLDriver-POMPPC $RES/GLDriver-POMPPC.bundle/
-cd $SRC/guest/gltest
+cd "$SRC/guest/gltest" || exit 1
 /usr/bin/gcc-4.0 -arch ppc -O1 -isysroot $SDK -o glwin glwin.c -framework GLUT \
   -framework OpenGL || exit 1
 rm -rf /tmp/trdup && mkdir -m 777 /tmp/trdup

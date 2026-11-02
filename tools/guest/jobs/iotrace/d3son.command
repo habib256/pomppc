@@ -15,6 +15,6 @@ if [ "${IOTRACE_OFF:-0}" != 1 ]; then
 fi
 if [ "${FS:-0}" = 1 ]; then F=1; M=5; else F=0; M=3; fi
 echo "start $(date +%s) fs=$F $EXTRA" >> $D/log.txt
-cd "$APP/Contents/MacOS"
+cd "$APP/Contents/MacOS" || exit 1
 "./Doom 3 Demo" +set r_fullscreen $F +set r_mode $M +set com_showFPS 1 +set r_useARBProgram 1 $EXTRA +map game/demo_mars_city1 < /dev/null > $D/stdout.txt 2>&1
 echo "exit $? $(date +%s)" >> $D/log.txt

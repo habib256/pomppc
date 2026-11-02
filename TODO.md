@@ -138,13 +138,24 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      `archive/m4-pollns-court-0211`, `tcg-g4.md` §42.2. Le levier reste éteint. Sur UT,
      travail d'horloge 0,013→0,18 cœur et charge vCPU 1,07→1,63 : **appelant identifié**
      sur le M4 dans `delay_idle` (noyau xnu-792.24.17, attente active SMP),
-     `docs/re/ut-attente-m4.md`. Répartir la perte entre réveils, attente et verrou avant
-     un nouveau levier ; aucune attente du noyau n'est supprimée.
-  4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
-     sur un goulot L1i propre au PC. **Revue et preuve préparatoire faites le 02/11** :
-     36 portes longues exécutées sur le M4, deux mutants détectés ; familles mémoire,
-     FP et tlbb à couvrir, régions SMP=1 et pools littéraux à traiter. Implantation et
-     A/B restent à faire (`docs/tcg-zone-froide-arm64.md`), levier toujours sans effet.
+     `docs/re/ut-attente-m4.md`. Reprise du matin : diagnostic de cadence
+     (UT ~11 000 expirations/s en mode 2, zen ~2 000), prototypes écartés
+     et archivés. **0067, `POLLNS=3`** : budget par fil, retour temporaire au
+     poll courant en rafale, paliers 250 ms à 2 s ; **1 635 contrôles, neuf mutants**.
+     Matrice finale : trois passages et témoin identique, zen −9,08 %, UT +1,01 %
+     (ensemble avec froid : −10,06 / +0,23 %), d3 petit coût possible. Aucun gain
+     générique établi : option disponible, **éteinte par défaut**. Trois prototypes
+     écartés sont archivés. Aucun raccourci du noyau ni changement d'horloge.
+  4. **Zone froide arm64 implantée le 02/11 matin (`tcg/0066`)** : relais chauds
+     imm26 pour les cinq familles mémoire/FP/tlbb, régions nominales ≤64 Mio
+     même en SMP=1, pools froids séparés. 53 cas natifs et cinq mutants ;
+     preuves invitées SMP=1/JIT éloigné et SMP=2/tampon 64 Mio réussies,
+     sorties identiques au témoin, fautes au PC/DAR exact et **2 560 exceptions FP**.
+     Six preuves d'image vertes avec 0066+0067 ; matrice finale des cinq jeux
+     **60 cellules, zéro anomalie/repli**, témoin identique et charge valide.
+     **Portage clos, `TCGCOLD=1` disponible, éteint par défaut** : aucun gain
+     générique établi, gain PC non transféré (`docs/tcg-zone-froide-arm64.md` §7).
+     Restent les causes des alertes TLB/RETVERIFY du témoin, séparées du portage.
   5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle
      et 4 cycles, puis 55 démarrages et 4 cycles avec le binaire final : **70 démarrages
      et 8 jeux sains** (`endurance.md` §16–17). Restauration détachée corrigée et vérifiée.
@@ -397,11 +408,11 @@ L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
-| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit le 01/11 sur `a0e028e` : `qgpu-core.c` du 31/10, `tcg/0059`, `tcg/0064`) |
-| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059` et `0064` compilés, éteints sur les deux hôtes (PC : `0064` à reconstruire) ; `0060`-`0063` éteints, non nommés |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit le 02/11 matin, série incluant `0066/0067`, empreintes dans `docs/etat-des-hotes.md`) |
+| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059`, `0064`-`0067` compilés sur le M4, options éteintes ; zone froide arm64 disponible via `0066`. PC : reconstruire référence + rapide depuis `0066/0067`, puis valider le finaliseur de pools. `0060`-`0063` éteints, non nommés |
 | Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : les mêmes depuis le 01/11 à 16 h 57 (VM quotidienne, compilés dans l'invité, redémarrée ; anciens dans `/var/tmp/avant-0111/` de l'invité) |
-| Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 ; le 01/11, mb et d3 fen/pe vertes avec le nouveau bundle, cmr-pe reprise (faux reflet, `docs/re/cmr-rendu-vers-texture.md` §7), nouvelle référence à valider à l'œil |
-| Tests natifs | PC 245 OK / 0 échec (14/10, `docs/binaire-rapide-x86.md`), M4 287 OK / 0 échec (27/10) |
+| Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 ; le 01/11, mb et d3 fen/pe vertes avec le nouveau bundle, cmr-pe reprise (faux reflet, `docs/re/cmr-rendu-vers-texture.md` §7), six références renouvelées et validées à l'œil dans la nuit, six preuves vertes avec `0066/0067` le 02/11 |
+| Contrôle général | PC 245 OK / 0 échec (14/10, `docs/binaire-rapide-x86.md`) ; M4 `--slow` : 470 OK / 0 échec / 1 ignoré (02/11 matin), 49 scripts ShellCheck corrigés |
 
 ## Matrice de jeux
 

@@ -113,7 +113,10 @@ cette liste ; la séance suivante se fait sur le M4)
 ~82 ms/image **en course** (plein écran).
 
 **À faire sur le PC, dans l'ordre** (au retour du M4)
-0. Vérifier à l'œil le curseur unique du frontal et la bande d'ombre avec le kext du 01/11 ;
+0. **Reconstruire `build/` et `build-fast/` depuis la série 0066/0067**, avant
+   toute mesure (profil PGO du 31/10). 0066 modifie le finaliseur générique de pools :
+   valider les chemins x86-64 sur cet hôte ; les preuves natives M4 ne le remplacent pas.
+   Vérifier à l'œil le curseur unique du frontal et la bande d'ombre avec le kext du 01/11 ;
    une cellule de preuve verte de la matrice en fenêtre (les tours du 01/11 étaient sans vidage).
 1. PGO avec cmr : réentraîné le 01/11 (7 h-8 h 20) ; A/B neuf contre ancien neutre en fenêtre,
    cmr +6 % sur 2 parties (une polluée par mes dépouillements de profils, charge 3,1 ; une
@@ -191,14 +194,55 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 6 h 40 (séance close, VM normale en service)
+## 3. Mac M4 : état au 02/11/2026, 13 h 34 (travaux du matin clos, VM normale en service)
 
-**Pour reprendre après cette nuit :** QEMU, kext, plugin et paquet `prebuilt` à jour ;
-six preuves d'image neuves vertes. A/B au repos et profils des cinq jeux clos ; attente
-précise écartée (UT +10 %), aucun nouveau levier allumé. Endurance : 70 démarrages et
-8 jeux sans incident. La VM quotidienne tourne sous ImGuiDock depuis 5 h 58, restauration
-détachée corrigée ; toujours saine au contrôle final de 6 h 40. Restent le curseur en plein écran à l'œil,
-le coût des avis d'ombre actifs et le portage complet de la zone froide arm64 (§4).
+**Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
+plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente
+courte corrigée par un budget progressif. Matrice des cinq jeux close, **60 cellules
+sans anomalie ni repli**, six preuves d'image séparées vertes. Aucun nouveau levier
+allumé : gain zen, petit coût possible d3, pas de gain générique. Contrôle général
+**470 OK, zéro échec, une exclusion Linux**. VM quotidienne restaurée à 13 h 33 sous
+ImGuiDock, frontal détaché (parent PID 1), QEMU vivant, SSH et kext contrôlés à 13 h 34.
+Restent le curseur en plein écran à l'œil et le coût des avis d'ombre actifs (§4).
+
+**Matin du 02/11, demande de correction et de portage** (base `5067b22`) :
+- **Attente 0067, `POLLNS=3`** : 128 expirations précises en 32 ms par fil, puis
+  retour temporaire au `g_poll` courant ; si les rafales reprennent, paliers de
+  250 ms à 2 s. Les E/S ne consomment pas le budget, initialisation synchronisée.
+  1 635 contrôles, neuf mutants. Aucun code ni horloge de Tiger modifié. Le diagnostic
+  séparé compte ~11 000 expirations/s sous UT en mode 2, ~2 000 sous zen ; les temps
+  instrumentés ne servent pas d'A/B. Trois prototypes rejetés sont sous étiquettes
+  `archive/m4-pollns-{plancher-250us,idle,budget250}-0211`.
+- **Zone froide arm64 0066** : relais `B` imm26 en fin du chaud pour les cinq
+  callbacks, régions nominales ≤64 Mio même en SMP=1, pools froids séparés et état
+  chaud rétabli sur erreur. 53 cas natifs M4, cinq mutants ; tests invités sans/avec
+  froid en SMP=1/JIT éloigné et SMP=2/tampon 64 Mio, sorties identiques, 137
+  renouvellements de tampon avec froid. Fautes PC/DAR exactes (500 984 cas tlbb,
+  309 224 fautes) ; **2 560 exceptions FP au PC exact**, aucune erreur. Les alertes
+  TLB/RETVERIFY déjà présentes dans les témoins restent [F], séparées du portage,
+  avec procédure pour les instruire (`tcg-zone-froide-arm64.md` §6).
+- **Matrice finale 0066/0067, close à 13 h 28** : quatre bras référence, témoin
+  identique, attente progressive, attente + froid ; trois passages chacun, mb/zen/ut/d3
+  en fenêtre, cmr en course 1920×1080. Hôte au repos et charge continue valide,
+  60 cellules sans anomalie/repli. Attente seule : zen −9,08 %, UT +1,01 % ;
+  ensemble : zen −10,06 %, UT +0,23 %, d3 +1,09 %, mb −0,76 %, cmr +0,65 %.
+  UT recouvre les contrôles, CMR dans leur dispersion ; petit coût d3 possible.
+  **Options conservées éteintes**, aucun gain générique revendiqué.
+  Données `bench/tcg/ab/m4-progressif-0211-{fen,pe}/`, provenance et synthèse dans
+  `m4-progressif-0211/` ; détails `re/ut-attente-m4.md` §5–7. Six preuves d'image
+  distinctes vertes avec 3/1, références validées réutilisées, zéro repli.
+- **49 scripts ShellCheck corrigés** sans désactivation globale ; nettoyages testés
+  sur noms avec espaces, retour à la ligne et tiret initial. Différentiel softfloat
+  QEMU 11 réactivé : 1 673 079 cas sans divergence ; QFB/QGPU/pont D-Bus passent.
+  Contrôle final isolé `./tests/run-all.sh --slow` : **470 OK, zéro échec, un ignoré**
+  (binaire rapide Linux absent par nature sur ce M4), `.run/tests-cloture-0211.log`.
+- **Binaire mesuré et restauré** : `~/src/qemu/build`, reconstruction progressive
+  `.run/build-budget-progressif-0211.log`, sources figées avant A/B ; empreintes exactes
+  dans `bench/tcg/ab/m4-progressif-0211/provenance.json`. Construit sur l'arbre de
+  travail du matin avant son commit ; ne pas attribuer ce binaire au seul HEAD de
+  base inscrit par les anciens rapports. Aucun QEMU de campagne restant, verrou
+  conservé. Retour sur PC : reconstruire **référence et rapide** puis valider le
+  finaliseur générique des pools modifié par 0066 ; aucun contrôle Linux revendiqué.
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -415,12 +459,14 @@ prouvée : `PPC32MT TLBPRECISE LMWINLINE DCBZINLINE FPNATIVECMP VFPNATIVECMP DIR
 JC2WAY FPKNOWN FPRFLAZY STFSKNOWN LFSKNOWN TLBBASE`. A/B : DOOM 3 −23,9 %, UT2004 −18,6 %,
 Marble Blast −22,7 %. Garde : un binaire sans tcg/0037-0039 les laisse éteints. Quartz Extreme
 allumé depuis le 29/10 (`c792464` : `run_tiger.sh` pose `qe=on`, `QE=0` l'éteint ; le kext en
-personnalité « auto » le suit). `tcg/0057`, `0058` compilés, éteints ; `x-tcg-cold` (`0056`)
-compilé, sans effet sur arm64.
+personnalité « auto » le suit). `tcg/0057`–`0059`, `0064`–`0067` compilés ;
+options éteintes. `x-tcg-cold` est disponible sur arm64 système depuis `0066`,
+**éteint par défaut sur le M4** ; attente progressive via `POLLNS=3`, éteinte aussi.
 
-**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit dans la nuit du 01 au 02/11
-(série jusqu'à `0059` et `0064`, correctif de contrat de 0058 et variante 0065 éteinte) ; kext du 01/11
-et plugin `20261101-ombre` (voir ci-dessus).
+**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit le 02/11 matin,
+série jusqu'à `0059` et `0064`–`0067`, correctif de contrat de 0058 ; empreintes
+et preuves dans le bilan du matin ci-dessus. Kext du 01/11 et plugin
+`20261101-ombre` inchangés.
 
 **Fait le 30/10**
 - **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
@@ -482,8 +528,9 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 - **Venu du PC le 01/11 (pour le M4), dans l'ordre** — reprend les entrées du 30/10 et du
   31/10, réduites le 01/11 à ce qui n'y figure pas :
   (Bilan du 02/11 : points 1-2 faits, la VM **quotidienne** servant de VM de dev ; preuves
-  et mesures neuves faites, profils et variante courte clos. Restent le curseur à l'œil,
-  le coût d'un avis d'ombre effectivement actif et le portage complet de la zone froide ; §3.)
+  et mesures neuves faites, profils clos. Matin : attente progressive et portage
+  complet de la zone froide validés, A/B clos, options éteintes. Restent le curseur
+  à l'œil et le coût d'un avis d'ombre effectivement actif ; §3.)
   1. `git pull` ; **reconstruire QEMU** (`qgpu-core.c` du 31/10 : reflets de cmr ; `tcg/0059`
      nommé depuis le 30/10) ; ni le protocole ni l'ABI n'ont changé. Vérifier que la série se
      compile sur arm64 avec `tcg/0059` (l'opcode générique n'y est jamais émis ; rien ne change
@@ -503,9 +550,9 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
      référence sans faux reflet, `references.csv` du M4 renouvelé. `profil-m4-0211.md`.
   5. **Profils des cinq jeux faits**, puis variante courte `tcg/0065` mesurée et écartée
      (UT +10,06 %, `tcg-g4.md` §42.2). Attente active `delay_idle` identifiée sur ce noyau
-     (`re/ut-attente-m4.md`), empreinte du PC à vérifier. **Suite : zone froide 0056** :
-     revue et 36 portes longues exécutées sur le M4, mais implantation/A/B encore à faire ;
-     traiter aussi FP, tlbb, régions SMP=1 et pools littéraux (`tcg-zone-froide-arm64.md`).
+     (`re/ut-attente-m4.md`), empreinte du PC à vérifier. **Matin : attente progressive
+     0067 et portage froid 0066 terminés**, FP/tlbb/pools et SMP=1 couverts ; matrice
+     complète close, aucun allumage (`tcg-zone-froide-arm64.md` §6–7).
   6. **Endurance faite** : 70 démarrages de contrôle et 8 jeux sains dans la nuit,
      résultats au §3 et dans `endurance.md` §16–17. Restauration détachée corrigée.
 

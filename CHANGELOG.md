@@ -9,6 +9,30 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Contrôle général remis au vert, 02/11 matin.** Les 49 scripts en échec
+  ShellCheck sont corrigés : retours de `cd`, arguments littéraux, variables
+  réellement inutilisées et nettoyages par noms complets. Trois nettoyages
+  testés avec espaces, retour à la ligne et tiret initial. Réactivation du
+  différentiel softfloat sur l'objet QEMU 11, avec ses règles PPC de NaN :
+  1 673 079 cas sans divergence. Harnais isolé `--slow` : **470 OK, zéro échec,
+  une exclusion Linux sur le M4** ; QFB, QGPU et pont D-Bus passent.
+- **Zone froide arm64 implantée, 02/11 matin.** `tcg/0066` : cinq callbacks,
+  relais chauds conservant le chemin rapide, régions bornées en SMP=1/2,
+  pools froids séparés et état chaud restauré sur erreur. 53 cas exécutés
+  nativement sur le M4, cinq mutants ; tests invités mémoire/FP/vecteurs,
+  fautes PC/DAR, tlbb et code réécrit, sorties identiques au témoin ; **2 560
+  exceptions FP au PC exact**. Six preuves d'image vertes avec l'attente progressive.
+  Matrice des cinq jeux close, aucun gain générique établi : disponible,
+  **éteinte par défaut sur le M4** (`tcg-zone-froide-arm64.md` §6–7).
+- **Attente courte bornée, 02/11 matin.** `tcg/0067`, `POLLNS=3` : budget
+  par fil, retour progressif au poll courant en rafale (250 ms à 2 s),
+  initialisation synchronisée ; 1 635 contrôles et neuf mutants. Matrice finale
+  à trois passages et témoin identique, **60 cellules sans anomalie/repli** :
+  attente seule zen −9,08 %, UT +1,01 % ; avec froid zen −10,06 %, UT +0,23 %,
+  d3 +1,09 %, mb −0,76 %, cmr +0,65 %. La grande perte UT du mode 2 est retirée,
+  aucun gain générique revendiqué ; **éteinte par défaut**. Trois prototypes
+  rejetés archivés ; détails et limites dans `re/ut-attente-m4.md` §5–7.
+
 - **Restauration : la VM survit à son lanceur, 02/11.** `matab.sh` utilise une
   vraie session détachée ; sur macOS sans `setsid(1)`, `host_detach` passe par
   `os.setsid` et `exec`, car `nohup` gardait le groupe parent. Deux tests échouent

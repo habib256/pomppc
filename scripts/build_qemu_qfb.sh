@@ -1204,6 +1204,15 @@ TCG52_MARKERS
     echo "▶ patch : attente macOS sous la milliseconde (tcg/0065)"
     patch_strict "$ROOT/patches/tcg/0065-macos-poll-short.patch"
   fi
+  # tcg/0067 : mode 3, budget de réveils précis pour éviter les rafales.
+  if ! grep -q 'qemu_poll_ns_precision_allowed' util/qemu-timer.c; then
+    echo "▶ patch : attente courte macOS à cadence bornée (tcg/0067)"
+    patch_strict "$ROOT/patches/tcg/0067-macos-poll-budget.patch"
+  fi
+  grep -q 'POLLNS_MAX_BACKOFF_US' util/qemu-timer.c &&
+    grep -q 'trace_pomppc_poll_budget_backoff' util/qemu-timer.c &&
+    grep -q '^pomppc_poll_budget_backoff(' util/trace-events || {
+      echo "⚠ patch tcg 0067 incomplet (budget ou capacité absente)" >&2; exit 1; }
   # tcg/0059 : x-vperm-inline, vperm en une opération vectorielle (PSHUFB sur x86).
   if ! grep -q "x-vperm-inline" target/ppc/cpu_init.c; then
     echo "▶ patch TCG : vperm en ligne (x-vperm-inline, tcg/0059)"
@@ -1228,6 +1237,21 @@ accel/tcg/cpu-exec.c tbh_report
 tcg/tcg.c tb_head_off
 include/exec/translation-block.h head_skip
 TCG64_MARKERS
+  # tcg/0066 : zone froide arm64, relais chauds et pools de constantes séparés.
+  if ! grep -q 'tcg_out_cold_finalize' tcg/tcg.c; then
+    echo "▶ patch TCG : zone froide arm64, relais et pools (tcg/0066)"
+    patch_strict "$ROOT/patches/tcg/0066-tcg-cold-arm64.patch"
+  fi
+  while read -r f m; do
+    grep -q "$m" "$f" || {
+      echo "⚠ patch tcg 0066 incomplet : '$m' absent de $f" >&2; exit 1; }
+  done <<'TCG66_MARKERS'
+tcg/aarch64/tcg-target.h TCG_TARGET_COLD_VENEERS
+tcg/aarch64/tcg-target.c.inc tcg_out_cold_veneers
+tcg/aarch64/tcg-target.c.inc reloc_ldst
+tcg/region.c tcg_cold_region_count
+tcg/tcg.c tcg_out_cold_finalize
+TCG66_MARKERS
   grep -q 'cpu->t2_vinsns' accel/tcg/translator.c &&
     grep -q 'uint32_t t2_vinsns' include/hw/core/cpu.h || {
       echo "⚠ patch tcg 0055 incomplet (compteur des instructions absent)" >&2; exit 1; }
@@ -1398,7 +1422,7 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   # coûté le son et le réseau une première fois).
   case "$(uname -s)" in
     Darwin) UI_OPTS=(--enable-cocoa --audio-drv-list=coreaudio) ;;
-    *)      UI_OPTS=(--enable-gtk --enable-sdl --audio-drv-list=pa,alsa) ;;
+    *)      UI_OPTS=(--enable-gtk --enable-sdl "--audio-drv-list=pa,alsa") ;;
   esac
   PY_OPTS=()
   [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")

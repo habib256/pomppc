@@ -16,8 +16,8 @@ PORT="${TSSH_PORT:-$(cat "${MAIN:-$D/../..}/.run/tiger.sshport" 2>/dev/null)}"
 case "$PORT" in ''|0) PORT=2222 ;; esac
 OPTS=(-p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR
       -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa
-      -o KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1
-      -o Ciphers=+aes128-cbc,3des-cbc -o MACs=+hmac-sha1 -o ConnectTimeout=10)
+      -o "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1"
+      -o "Ciphers=+aes128-cbc,3des-cbc" -o MACs=+hmac-sha1 -o ConnectTimeout=10)
 # Multiplexage (docs/matrice-jeux.md §5, « Mesure et rafales ») : une connexion
 # maîtresse par port, réutilisée ControlPersist s ; chaque commande suivante ne
 # refait ni l'échange de clés ni l'authentification (2,2 s → 0,09 s vu de

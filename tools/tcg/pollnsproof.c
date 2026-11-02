@@ -26,6 +26,17 @@ static int proof_select(int n, fd_set *r, fd_set *w, fd_set *e, struct timeval *
     return select(n, r, w, e, tv);
 }
 
+#ifdef HAVE_POLL_BUDGET
+static int64_t proof_now_us = 1000000;
+static int64_t proof_monotonic(void) { return proof_now_us; }
+static void trace_pomppc_poll_budget_backoff(unsigned expired, int64_t pause_us)
+{
+    g_assert(expired == 128);
+    g_assert(pause_us == 250000 || pause_us == 500000 ||
+             pause_us == 1000000 || pause_us == 2000000);
+}
+#define g_get_monotonic_time proof_monotonic
+#endif
 #define select proof_select
 #include "pollns-target.inc"
 #undef select
@@ -64,6 +75,15 @@ static void compare(const char *name, const GPollFD *input, unsigned n,
     }
 }
 
+#ifdef HAVE_POLL_BUDGET
+static gpointer other_poll_thread(gpointer arg)
+{
+    GPollFD f = {*(int *)arg, G_IO_IN, 0xffff};
+    compare("autre fil : budget neuf malgré le repli du fil parent", &f, 1, 1000, 1);
+    return NULL;
+}
+#endif
+
 int main(void)
 {
     const int64_t delays[] = {-1, 0, 1, 999999, 1000000, 1000001, 1000000000000LL};
@@ -74,6 +94,10 @@ int main(void)
     const char *mode = getenv("POMPPC_POLL_NS");
     unsigned i, full = mode && !strcmp(mode, "1");
     unsigned short_only = mode && !strcmp(mode, "2");
+#ifdef HAVE_POLL_BUDGET
+    unsigned adaptive = mode && !strcmp(mode, "3");
+    short_only |= adaptive;
+#endif
     unsigned on = full || short_only;
     GPollFD f[3];
     alarm(10);
@@ -92,11 +116,66 @@ int main(void)
     f[1] = f[0];
     f[2] = (GPollFD){-1, G_IO_IN, 0xffff};
     compare("doublons et fd ignoré", f, 3, 1000, on);
+
     compare("aucun fd", NULL, 0, 1, on);
     f[0] = (GPollFD){p[0], 0, 0xffff};
     compare("aucun événement demandé", f, 1, 1, on);
     f[0] = (GPollFD){FD_SETSIZE + 7, G_IO_IN, 0xffff};
     compare("hors fd_set : repli", f, 1, 1, 0);
+#ifdef HAVE_POLL_BUDGET
+    if (adaptive) {
+        proof_now_us += 32000;
+        for (i = 0; i < 128; i++) {
+            compare("budget précis", NULL, 0, 1, 1);
+        }
+        compare("128 expirations : chemin courant", NULL, 0, 1, 0);
+        GThread *thread = g_thread_new("poll-proof", other_poll_thread, &p[0]);
+        g_thread_join(thread);
+        proof_now_us += 249999;
+        compare("repli encore actif à 249999 us", NULL, 0, 1, 0);
+        proof_now_us++;
+        compare("précision rétablie à 250000 us", NULL, 0, 1, 1);
+        f[0] = (GPollFD){p[0], G_IO_IN, 0xffff};
+        for (i = 0; i < 256; i++) {
+            compare("E/S prêtes : aucun budget consommé", f, 1, 1, 1);
+        }
+        proof_now_us += 32000;
+        for (i = 0; i < 64; i++) { compare("demi-budget", NULL, 0, 1, 1); }
+        proof_now_us += 32000;
+        for (i = 0; i < 64; i++) { compare("nouvelle fenêtre", NULL, 0, 1, 1); }
+        compare("fenêtres séparées : aucun repli", f, 1, 1, 1);
+        /* Chaque palier est juge par le vrai routage du poll, aux deux
+         * cotes de son echeance, sans lire l'etat prive du code extrait. */
+        const int64_t pauses[] = {250000, 500000, 1000000, 2000000, 2000000};
+        proof_now_us += 3000000;
+        for (unsigned step = 0; step < G_N_ELEMENTS(pauses); step++) {
+            for (i = 0; i < 128; i++) {
+                compare("rafale recurrente", NULL, 0, 1, 1);
+            }
+            compare("repli progressif", NULL, 0, 1, 0);
+            proof_now_us += pauses[step] - 1;
+            compare("repli progressif encore actif", NULL, 0, 1, 0);
+            proof_now_us++;
+            compare("echeance du palier : E/S prete", f, 1, 1, 1);
+        }
+        /* Une reprise apres 32 ms perd le palier accumule. A 32 ms
+         * exactement, une nouvelle rafale continue la progression. */
+        const int64_t gaps[] = {32001, 32000, 32001};
+        const int64_t isolated[] = {250000, 500000, 250000};
+        for (unsigned step = 0; step < G_N_ELEMENTS(gaps); step++) {
+            proof_now_us += gaps[step];
+            for (i = 0; i < 128; i++) {
+                compare("rafale apres intervalle", NULL, 0, 1, 1);
+            }
+            compare("repli apres intervalle", NULL, 0, 1, 0);
+            proof_now_us += isolated[step] - 1;
+            compare("intervalle : repli encore actif", NULL, 0, 1, 0);
+            proof_now_us++;
+            compare("intervalle : echeance du palier", f, 1, 1, 1);
+        }
+
+    }
+#endif
     close(p[1]);
     f[0] = (GPollFD){p[0], G_IO_IN, 0xffff};
     compare("fin de pipe", f, 1, 1, on);

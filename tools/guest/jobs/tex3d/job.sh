@@ -6,7 +6,7 @@
 # 3D coupée (POMPPC_GL_TEX3D=0) : elle ne doit plus être annoncée.
 . ./lib.sh
 kext_load && plugin_install && gltest_build || exit 1
-cd $SRC/guest/gltest
+cd "$SRC/guest/gltest" || exit 1
 for mode in ${MODES:-brut herite coupe}; do
   case $mode in
     brut)   e="" ;;

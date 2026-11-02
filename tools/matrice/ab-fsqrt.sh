@@ -12,7 +12,7 @@
 # cellule dont l'invité a redémarré entre-temps (kext perdu) est marquée INVALIDE.
 # Sorties : bench/vitesse/ab-fsqrt/<bras><i>/ et resume.txt.
 set -u
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/../.." || exit 1
 N=${1:-3}; JEUX=${2:-nx,prey}; MODES=${3:-fen}
 O=bench/vitesse/ab-fsqrt; mkdir -p $O
 T=tools/guest/tssh.sh
