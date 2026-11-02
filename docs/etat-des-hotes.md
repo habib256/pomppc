@@ -214,7 +214,7 @@ sans Homebrew** (les 25 binaires, garde-fou `MIN_MACOS`) ; recette et arbres dan
 `docs/publier-macos.md`. Archive éprouvée sous macOS 27 sur un M4 seulement, les notes le disent.
 
 **0.4.1 préparée, non publiée (21 h).** `POMPPC.app` dans `dist/POMPPC-0.4.1-macos-arm64.dmg`, commit
-`a9b25ca` : assistant de premier lancement, données dans `~/POMPPC`, frontal en anglais. Essayée
+`e133145` : assistant de premier lancement, combo 10.4.11 téléchargé chez Apple avant le pilote, données dans `~/POMPPC`, frontal en anglais. Essayée
 ici depuis le `.dmg` avec Tiger et OS 9 ; assistant couvert par `tests/app_wizard_test.sh`, réponses
 simulées. L'assistant ouvre la page de Macintosh Garden et attend le fichier : il ne télécharge rien
 lui-même. **Pas éprouvé :** accord de Gatekeeper sur une app réellement téléchargée, clics réels dans
