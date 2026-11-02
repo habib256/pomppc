@@ -22,13 +22,13 @@ bool ChimePlayer::play(const std::string& file, float level, std::string& error)
         NSString* ext = [[path pathExtension] lowercaseString];
         if (!([ext isEqualToString:@"wav"] || [ext isEqualToString:@"aiff"] ||
               [ext isEqualToString:@"aif"])) {
-            error = "format attendu : WAV ou AIFF";
+            error = "expected format: WAV or AIFF";
             return false;
         }
         impl_->sound = [[NSSound alloc] initWithContentsOfFile:path byReference:NO];
         volume(level);
         if (!impl_->sound || ![impl_->sound play]) {
-            error = "fichier absent, illisible ou sortie audio indisponible : " + file;
+            error = "file missing or unreadable, or audio output unavailable: " + file;
             stop();
             return false;
         }

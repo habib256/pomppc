@@ -369,7 +369,7 @@ int main(int argc, char** argv) {
     ChimePlayer chimePlayer;
     ChimeTrigger chimeTrigger;
     auto saveChime = [&]() {
-        if (!chime.save(chimeSettingsPath)) journal("échec sauvegarde carillon");
+        if (!chime.save(chimeSettingsPath)) journal("could not save the chime settings");
     };
 
     // Un lanceur passé en argument (run_tiger.sh délègue ainsi) prime sur
@@ -384,7 +384,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "QemuBridge start failed: %s\n", err.c_str());
         return 1;
     }
-    journal("QEMU lancé : %s", curLauncher.c_str());
+    journal("QEMU started: %s", curLauncher.c_str());
     chimeTrigger.arm();
 
     glfwSetErrorCallback(glfwErr);
@@ -418,7 +418,7 @@ int main(int argc, char** argv) {
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);
 #ifdef __APPLE__
-    journal("Ctrl+Cmd+F rendu au frontend (%d entrée(s) « Enter Full Screen » du menu Cocoa)",
+    journal("Ctrl+Cmd+F given back to the front end (%d \"Enter Full Screen\" Cocoa menu item(s))",
             disableNativeFullScreen(window));
 #endif
     std::signal(SIGINT, onQuitSignal);
@@ -485,7 +485,7 @@ int main(int argc, char** argv) {
     int winX = 0, winY = 0, winW = 1280, winH = 900;
     glfwGetWindowPos(window, &winX, &winY);
     glfwGetWindowSize(window, &winW, &winH);
-    if (feLoaded) journal("réglages relus : %s", feSettingsPath.c_str());
+    if (feLoaded) journal("settings loaded: %s", feSettingsPath.c_str());
 
     // Rectangle réellement dessiné (points ImGui) : la seule référence de la
     // souris invité. Mis à jour à chaque frame par la vue de l'invité.
@@ -510,10 +510,10 @@ int main(int argc, char** argv) {
         bridge = std::make_unique<QemuBridge>();
         std::string e;
         if (!bridge->start(makeConfig(launcher, runtimeDir, sound, pad), &e))
-            journal("relance échouée : %s", e.c_str());
+            journal("restart failed: %s", e.c_str());
         else {
             curLauncher = launcher;
-            journal("QEMU relancé : %s", launcher.c_str());
+            journal("QEMU restarted: %s", launcher.c_str());
             glfwSetWindowTitle(window, windowTitle(*bridge).c_str());
             chimeTrigger.arm();
         }
@@ -599,7 +599,7 @@ int main(int argc, char** argv) {
                 bridge->mouseButton(qb, true);
                 mouseHeld[b] = true;
                 if (b == 0)
-                    journal("clic hôte (%.0f,%.0f) -> invité (%d,%d) %s [rect %.0fx%.0f @ %.0f,%.0f]",
+                    journal("host click (%.0f,%.0f) -> guest (%d,%d) %s [rect %.0fx%.0f @ %.0f,%.0f]",
                             io.MousePos.x, io.MousePos.y,
                             (int)std::floor((io.MousePos.x - origin.x) * sx),
                             (int)std::floor((io.MousePos.y - origin.y) * sy),
@@ -649,7 +649,7 @@ int main(int argc, char** argv) {
             probeMx = drawOrigin.x + std::clamp(st.x, 0.0f, 1.0f) * (drawSize.x - 1);
             probeMy = drawOrigin.y + std::clamp(st.y, 0.0f, 1.0f) * (drawSize.y - 1);
             pio.AddMousePosEvent(probeMx, probeMy);
-            journal("épreuve position : hôte %.1f,%.1f -> invité %d,%d", probeMx, probeMy,
+            journal("position probe: host %.1f,%.1f -> guest %d,%d", probeMx, probeMy,
                     (int)((probeMx - drawOrigin.x) * guestW / drawSize.x),
                     (int)((probeMy - drawOrigin.y) * guestH / drawSize.y));
         } else if (st.op == "move") {
@@ -688,7 +688,7 @@ int main(int argc, char** argv) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
         if (done) {
-            journal("épreuve : %s %s", st.op.c_str(), st.arg.c_str());
+            journal("probe: %s %s", st.op.c_str(), st.arg.c_str());
             ++probeIdx;
             probePhase = 0;
         } else {
@@ -717,7 +717,7 @@ int main(int argc, char** argv) {
             lastGx = lastGy = -1;
             for (int button = 0; button < 3; ++button) bridge->mouseButton(button, false);
             for (bool& m : mouseHeld) m = false;
-            journal("souris hôte : %s", capture ? "capturée, relative sans bord" : "libérée");
+            journal("host mouse: %s", capture ? "captured, relative without edges" : "released");
         }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
@@ -751,8 +751,8 @@ int main(int argc, char** argv) {
             if (chimeTrigger.frame(bridge->running(), w, h, chime.enabled, chime.volume)) {
                 std::string error;
                 if (chimePlayer.play(chime.file, chime.volume, error))
-                    journal("carillon hôte : %s (volume %.0f %%)", chime.file.c_str(), chime.volume * 100);
-                else journal("carillon non joué : %s", error.c_str());
+                    journal("host chime: %s (volume %.0f %%)", chime.file.c_str(), chime.volume * 100);
+                else journal("chime not played: %s", error.c_str());
             }
             if (w != guestW || h != guestH) journal("scanout %dx%d", w, h);
             guestW = w; guestH = h;
@@ -785,15 +785,15 @@ int main(int argc, char** argv) {
             bridge->mouseIsAbsolute() != wantAbsolute && glfwGetTime() >= nextPointerRetry;
         if ((int)bridge->mouseIsAbsolute() != lastAbs || pointerPrefChanged || retryPointer) {
             if ((int)bridge->mouseIsAbsolute() != lastAbs || pointerPrefChanged)
-                journal("souris invité : %s", bridge->mouseIsAbsolute() ? "absolue (SetAbsPosition)" : "relative");
+                journal("guest mouse: %s", bridge->mouseIsAbsolute() ? "absolute (SetAbsPosition)" : "relative");
             lastAbs = bridge->mouseIsAbsolute();
             lastGx = lastGy = -1;
             if (bridge->running() && (lastAbs != (int)wantAbsolute || pointerPrefChanged)) {
                 int m = bridge->selectMouse(wantAbsolute);
                 nextPointerRetry = glfwGetTime() + 1.0;
                 if (m > 0)
-                    journal("souris QEMU n°%d rendue courante (%s)", m,
-                            wantAbsolute ? "tablette absolue" : "relative");
+                    journal("QEMU mouse #%d made current (%s)", m,
+                            wantAbsolute ? "absolute tablet" : "relative");
             }
             pointerPrefChanged = false;
         }
@@ -1072,7 +1072,7 @@ int main(int argc, char** argv) {
         glfwSwapBuffers(window);
         if (!probeShot.empty()) {
             std::string cmd = "screencapture -x '" + probeShot + "'";
-            if (std::system(cmd.c_str()) != 0) journal("capture échouée : %s", probeShot.c_str());
+            if (std::system(cmd.c_str()) != 0) journal("capture failed: %s", probeShot.c_str());
             probeShot.clear();
         }
 
@@ -1087,12 +1087,12 @@ int main(int argc, char** argv) {
                 glfwSetWindowMonitor(window, mon, 0, 0, vm->width, vm->height,
                                      vm->refreshRate);
                 fullscreen = true;
-                journal("plein écran : %s %dx%d @%d Hz", glfwGetMonitorName(mon),
+                journal("full screen: %s %dx%d @%d Hz", glfwGetMonitorName(mon),
                         vm->width, vm->height, vm->refreshRate);
             } else {
                 glfwSetWindowMonitor(window, nullptr, winX, winY, winW, winH, 0);
                 fullscreen = false;
-                journal("fenêtre : %dx%d @ %d,%d", winW, winH, winX, winY);
+                journal("window: %dx%d @ %d,%d", winW, winH, winX, winY);
             }
             lastGx = lastGy = -1;
             relAccX = relAccY = 0;
@@ -1121,7 +1121,7 @@ int main(int argc, char** argv) {
     fe.fullscreen = fullscreen;
     fe.winX = winX; fe.winY = winY; fe.winW = winW; fe.winH = winH;
     if (feKeep && !fe.save(feSettingsPath))
-        std::fprintf(stderr, "[pomppc] échec de l'écriture de %s\n", feSettingsPath.c_str());
+        std::fprintf(stderr, "[pomppc] could not write %s\n", feSettingsPath.c_str());
 
     bridge->stop();
     glDeleteTextures(1, &tex);

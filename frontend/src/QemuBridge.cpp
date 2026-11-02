@@ -793,7 +793,7 @@ bool QemuBridge::checkAlive() {
     if (waitpid(qemuPid_, nullptr, WNOHANG) == qemuPid_) {
         qemuReaped_ = true;
         running_.store(false, std::memory_order_relaxed);
-        std::fprintf(stderr, "QemuBridge: QEMU (pid %ld) a quitté\n", qemuPid_);
+        std::fprintf(stderr, "QemuBridge: QEMU (pid %ld) exited\n", qemuPid_);
         return false;
     }
     return true;
@@ -839,8 +839,8 @@ void QemuBridge::queueInline(bool scanout, int x, int y, int w, int h,
             if (victim == impl_->inlineQ.end()) break;
             static bool once = false;
             if (!once) {
-                std::fprintf(stderr, "QemuBridge: file d'images saturée (%zu Mio), "
-                             "image intermédiaire abandonnée\n", impl_->inlineBytes >> 20);
+                std::fprintf(stderr, "QemuBridge: image queue full (%zu MiB), "
+                             "intermediate image dropped\n", impl_->inlineBytes >> 20);
                 once = true;
             }
             impl_->inlineBytes -= g_variant_get_size(victim->data);
@@ -1177,7 +1177,7 @@ bool QemuBridge::qmpCommand(const std::string& json, std::string* reply) {
     if (fatal) {
         // A read timeout leaves half a line in qmpBuf_; every later command
         // would then parse garbage. Drop the channel instead of limping on.
-        std::fprintf(stderr, "QemuBridge: canal QMP perdu — contrôle désactivé\n");
+        std::fprintf(stderr, "QemuBridge: QMP channel lost, control disabled\n");
         close(qmpFd_);
         qmpFd_ = -1;
         qmpBuf_.clear();

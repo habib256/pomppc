@@ -64,7 +64,7 @@ bool decode(const std::vector<uint8_t>& d, Pcm& out, std::string& error) {
                     for (size_t i = 0; i + bytes <= sz; i += bytes)
                         out.samples.push_back(pcm16(&d[body + i], bytes, false, true));
                 } else {
-                    error = "WAV non PCM (format " + std::to_string(fmt) + ", " +
+                    error = "non-PCM WAV (format " + std::to_string(fmt) + ", " +
                             std::to_string(bits) + " bits)";
                     return false;
                 }
@@ -72,7 +72,7 @@ bool decode(const std::vector<uint8_t>& d, Pcm& out, std::string& error) {
             }
             o = body + sz + (sz & 1);
         }
-        error = "WAV sans bloc fmt/data lisible";
+        error = "WAV without a readable fmt/data chunk";
         return false;
     }
     if (n >= 12 && !memcmp(&d[0], "FORM", 4) && !memcmp(&d[8], "AIFF", 4)) {
@@ -98,10 +98,10 @@ bool decode(const std::vector<uint8_t>& d, Pcm& out, std::string& error) {
             }
             o = body + sz + (sz & 1);
         }
-        error = "AIFF sans bloc COMM/SSND lisible";
+        error = "AIFF without a readable COMM/SSND chunk";
         return false;
     }
-    error = "format attendu : WAV ou AIFF";
+    error = "expected format: WAV or AIFF";
     return false;
 }
 
@@ -128,7 +128,7 @@ bool ChimePlayer::play(const std::string& file, float level, std::string& error)
     stop();
     std::ifstream in(file, std::ios::binary);
     if (!in) {
-        error = "fichier absent ou illisible : " + file;
+        error = "file missing or unreadable: " + file;
         return false;
     }
     std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -139,14 +139,14 @@ bool ChimePlayer::play(const std::string& file, float level, std::string& error)
     }
     pa_sample_spec spec = {PA_SAMPLE_S16LE, pcm.rate, (uint8_t)pcm.channels};
     if (!pa_sample_spec_valid(&spec)) {
-        error = "échantillonnage non pris en charge : " + file;
+        error = "sample format not supported: " + file;
         return false;
     }
     int err = 0;
     pa_simple* s = pa_simple_new(nullptr, "POMPPC", PA_STREAM_PLAYBACK, nullptr, "carillon",
                                  &spec, nullptr, nullptr, &err);
     if (!s) {
-        error = std::string("sortie audio indisponible : ") + pa_strerror(err);
+        error = std::string("audio output unavailable: ") + pa_strerror(err);
         return false;
     }
     volume(level);

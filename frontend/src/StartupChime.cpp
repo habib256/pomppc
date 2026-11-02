@@ -34,7 +34,7 @@ struct ChimePlayer::Impl {};
 ChimePlayer::ChimePlayer() : impl_(new Impl) {}
 ChimePlayer::~ChimePlayer() = default;
 bool ChimePlayer::play(const std::string&, float, std::string& error) {
-    error = "carillon indisponible : construit sans macOS ni libpulse-simple";
+    error = "chime unavailable: built without macOS or libpulse-simple";
     return false;
 }
 void ChimePlayer::stop() {}
