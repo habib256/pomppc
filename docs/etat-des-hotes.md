@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 3 h 39 (A/B 0058 plein écran en cours ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 4 h 31 (A/B 0058 clos ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -305,6 +305,13 @@ des anciennes références**.
   valides ; un pic système de cinq secondes hors fenêtre de d3 est précisé au §42.2 de
   `tcg-g4.md`. Sur UT, charge des vCPU 1,07→1,63 cœur, plus de travail d'horloge et de code
   généré ; le mutex n'explique pas seul ce constat. Plein écran cmr continue, aucun allumage.
+- **0058 clos sur les cinq jeux à 4 h 30**, 45 mesures sans incident ni repli : cmr
+  mode 1 −1,20 %, mode 2 −0,31 %, inconclusifs ; neuf parties pe valides. Le mode court
+  conserve UT +10,06 % : **écarté**, gardé comme option éteinte de diagnostic,
+  `archive/m4-pollns-court-0211`. Contrat corrigé validé, mais aucun gain générique.
+  Relevé séparé `m4-ut-mappage-0211` démarré à 4 h 31 : `in_asm,out_asm` filtré sur
+  noyau/libSystem et `sample` hôte, pour identifier l'appelant des horloges. Aucun chiffre
+  de vitesse de ce relevé instrumenté n'est ajouté à l'A/B.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`

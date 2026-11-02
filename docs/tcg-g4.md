@@ -5639,14 +5639,24 @@ de toutes les parties témoins. Les écarts sous 3 % restent inconclusifs sur tr
 parties. Les neuf parties passent le contrôle de charge ; un pic étranger de
 2,43 cœurs dure cinq secondes à 2 h 47 min 20 (mds, backupd-helper, mobileassetd),
 pendant le chargement de d3, hors de sa fenêtre (fin à 2 h 48 min 24).
-Colin en plein écran reste en cours à 3 h 39. Aucun allumage.
+Colin en plein écran terminé à 4 h 30, neuf mesures sans incident ni repli,
+neuf parties valides : défaut **41,7014**, mode 1 **41,2000** (−1,20 %), mode 2
+**41,5724** (−0,31 %) ms/image, inconclusif sur trois parties. Fenêtres en course,
+trois échanges par image ; les délais d'accès à la scène vont de 227 à 522 s et
+ne sont pas les temps d'image. Journaux `m4-pollns-0211-pe`.
+
+**Mode court écarté pour la vitesse générique, comme le mode complet :** il
+conserve la perte d'UT malgré le contrat corrigé. Les deux restent éteints ;
+variante gardée comme option de diagnostic, étiquette
+`archive/m4-pollns-court-0211`. Le rattrapage, les profils puis la variante courte
+prévus au TODO ont ainsi leur mesure ; la zone froide arm64 reste après cette étude.
 
 [A] Profils d'UT, dix secondes après chaque fenêtre, trois relevés par bras :
 les vCPU occupent environ **1,07 cœur au défaut, 1,63 dans les deux modes**.
 Le fil `qemu_main` passe d'environ 0,03 à 0,12–0,15 cœur. Les attentes de mutex des
 vCPU montent de 0,007 à 0,03–0,04 cœur, mais davantage de travail apparaît aussi
 dans le code généré et les lectures de base de temps (`tbf_load`,
-`cpu_ppc_load_tbu/tbl`, `cpu_get_clock_offset`). Ne pas attribuer toute la perte
+`cpu_ppc_load_tbu/tbl`, `cpu_get_clock_offset` : environ 0,013→0,18 cœur). Ne pas attribuer toute la perte
 au verrou global sur cette seule observation : l'appelant invité des horloges
 reste à identifier. Données : `ut-profils-somme.json` et profils bruts à côté.
 
