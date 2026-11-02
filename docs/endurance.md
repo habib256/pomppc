@@ -940,3 +940,10 @@ intacts. Journaux `.run/host-detach-{avant,apres}-0211.log`.
 Linux conserve l'utilitaire `setsid`. Restauration réelle contrôlée à 5 h 59 :
 frontal dans son propre groupe, vivant après le départ du lanceur, QEMU et SSH
 actifs. Noyau invité MD5 `def99c6e…`, kext chargé. Aucun verrou supprimé.
+
+[A — hôte] **Contrôle prolongé jusqu'à 6 h 40** : frontal et QEMU vivants après
+le départ du lanceur, SSH disponible, invité démarré depuis 42 minutes. Les 48
+relevés de 6 h 04 à 6 h 40 ne voient aucun échec SSH ni disparition de processus
+(`bench/endurance/restauration-finale-0211.jsonl`). Un seul QEMU à la clôture,
+celui de la VM quotidienne sous ImGuiDock ; elle reste ouverte. Ce suivi n'ajoute
+aucun démarrage aux totaux d'endurance ci-dessus.

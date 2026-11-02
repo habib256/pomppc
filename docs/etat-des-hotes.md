@@ -191,7 +191,14 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 6 h 02 (contrôles clos, VM normale remise ; fin à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 6 h 40 (séance close, VM normale en service)
+
+**Pour reprendre après cette nuit :** QEMU, kext, plugin et paquet `prebuilt` à jour ;
+six preuves d'image neuves vertes. A/B au repos et profils des cinq jeux clos ; attente
+précise écartée (UT +10 %), aucun nouveau levier allumé. Endurance : 70 démarrages et
+8 jeux sans incident. La VM quotidienne tourne sous ImGuiDock depuis 5 h 58, restauration
+détachée corrigée ; toujours saine au contrôle final de 6 h 40. Restent le curseur en plein écran à l'œil,
+le coût des avis d'ombre actifs et le portage complet de la zone froide arm64 (§4).
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -353,6 +360,11 @@ des anciennes références**.
 - Après cette correction : **412 OK**, mêmes 49 scripts en échec ShellCheck (fichiers
   comparés, diagnostics des trois scripts modifiés inchangés), 5 ignorés.
   `.run/tests-detach-0211.log`. Aucun changement de binaire QEMU ni de levier.
+- **Clôture à 6 h 40** : frontal dans sa propre session et QEMU quotidien vivants,
+  SSH répond, invité démarré depuis 42 minutes ; aucun QEMU privé ni campagne résiduelle.
+  Suivi `bench/endurance/restauration-finale-0211.jsonl` : 48 relevés de 6 h 04 à 6 h 40,
+  aucun échec SSH ni disparition des deux processus. VM laissée ouverte sous ImGuiDock,
+  aucun verrou supprimé. Travaux poussés sur `main` ; reprise détaillée au §4.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
