@@ -91,6 +91,8 @@ public:
 
     // ── Machine control over QMP (thread-safe; runs on the caller thread) ──
     bool reset();                         // system_reset
+    bool pressPowerKey();                 // la touche d'alimentation : l'invité propose de s'éteindre
+    bool exitedCleanly() const { return qemuReaped_ && exitedCleanly_; }
     bool setPaused(bool paused);          // stop / cont
     bool changeCd(const std::string& path, const std::string& id = "gamecd");
     bool ejectCd(const std::string& id = "gamecd");
@@ -174,6 +176,7 @@ private:
 
     long qemuPid_ = -1;
     std::string qemuVersion_;
+    bool exitedCleanly_ = false;    // QEMU sorti de lui-même avec le code 0
     bool qemuReaped_ = false;       // waitpid() already collected it
     uint32_t qmpSeq_ = 0;           // correlates QMP replies with commands
 };

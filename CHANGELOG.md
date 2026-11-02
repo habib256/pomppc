@@ -25,7 +25,15 @@ Developer : macOS demande un accord au premier lancement. Le frontal et l'assist
 anglais ; le menu OS grise un système sans disque ; `run_os9.sh` ne dépend plus de python3 au
 démarrage. README refondu autour de l'app. QEMU et les binaires invités sont ceux de la 0.4.
 
-**Choix des disques.** Onglet **Disks** du frontal, par système : disque de démarrage, jusqu'à deux
+**Ne plus perdre de travail.** Fermer POMPPC propose d'éteindre le système : **Shut Down** envoie la
+touche d'alimentation, Mac OS pose sa question, et POMPPC se ferme quand il s'est arrêté. Son, manette,
+changement de système et redémarrage demandent confirmation. QEMU arrêté ou impossible à lancer s'affiche
+dans la fenêtre, en quelques secondes, au lieu d'une attente sans fin.
+
+**L'invité d'abord.** Panneaux fermés par défaut, fenêtre à la taille de l'invité et image nette à 100 %,
+pomme d'Apple au lieu du texte du noyau dans l'app, titre au nom du système.
+
+**Choix des disques.** Panneau **View ▸ Disks** du frontal, par système : disque de démarrage, jusqu'à deux
 autres en même temps (un sous OS 9 avec `disks/games.iso` : 4 emplacements IDE, partagés avec les
 CD), création de disques, type HD ou SSD. Tiger n'a pas de notion de SSD : le type pose
 `rotation_rate=1` et un modèle lisible, sans changer la vitesse. Les fenêtres ayant changé de nom, la

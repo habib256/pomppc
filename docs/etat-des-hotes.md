@@ -222,11 +222,16 @@ l'assistant, installation complète (pas de média ici), macOS 15 et M1 (M1 de l
 15.8), Colin McRae, matrice. Sans système installé, l'autre système ne s'ajoute pas depuis le
 frontal : son entrée du menu OS reste grisée.
 
+**Ergonomie, lots 1 et 2 (22 h, dans la 0.4.1).** Arrêt propre par la touche d'alimentation (`send-key
+power` ; `system_powerdown` sans effet sur mac99), confirmations, écran d'arrêt ou d'échec, panneaux fermés
+et fenêtre à l'invité, pomme d'Apple dans l'app (`POMPPC_BOOT_ARGS`). `POMPPC_FE_SCRIPT` joue de vrais clics
+dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une capture de l'écran. Reste le lot 3
+(assistant unique, installateur à double-cliquer, détection du pilote), puis le 4.
+
 **Panneau Disks (21 h 30, dans la 0.4.1).** Démarrage + 2 disques au plus, HD ou SSD, création.
 Essayé ici : Tiger voit 3 disques, formate le SSD, le volume revient au redémarrage ; démarrage en SSD
 seul ; lancement d'OS 9 avec un disque attaché (QEMU l'attache, sa vue dans OS 9 n'est pas contrôlée).
-Sélections posées par `imguidock.conf` : **aucun clic réel dans le panneau** (pas d'outil d'interface
-sur ce frontal), à essayer à l'œil. Le SSD n'est qu'une étiquette, Tiger n'en a pas la notion.
+Le SSD n'est qu'une étiquette, Tiger n'en a pas la notion.
 
 **Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
 plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente

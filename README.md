@@ -164,12 +164,22 @@ own Tiger installation media.
    also holds small OpenGL test programs (`glwin`, `gltest`).
 
 Your Tiger disk is the single file `disks/tiger.qcow2`: copy it while the VM is off to back it up.
-The front end's menus are **Machine**, **Games**, **OS**, **Devices** and **View**. In this archive,
+The front end's menus are **Machine**, **Games**, **OS**, **Devices** and **View**. The window shows
+only the system, at its real size. **View** opens the other panels, and **Fit Window to Guest** brings
+back the original size. In this archive,
 the scripts' Terminal messages are in French.
+
+### Quitting POMPPC
+
+Use **Machine ▸ Shut Down**, or just close the window. Mac OS then asks you to confirm, as on a real
+Mac, and POMPPC closes when the system has stopped. **Force Quit** is there if the system doesn't
+respond, but it's like pulling the plug: anything not saved is lost.
+
+Changing the sound, the gamepad or the system restarts the machine, so POMPPC asks first.
 
 ### Choosing your disks
 
-The **Disks** tab, next to **Library** on the right of the POMPPC window, lets you:
+Open **View ▸ Disks**. This panel lets you:
 
 - choose the startup disk with **Start**,
 - add up to two more disks at the same time with **Use**,

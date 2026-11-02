@@ -26,7 +26,11 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <spawn.h>
+#include <functional>
 #include <vector>
+
+extern char** environ;
 
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder*
@@ -182,7 +186,9 @@ static QemuBridge::Config makeConfig(const std::string& launcher,
 //   wait <s> | move <x> <y> | click <x> <y> (points fenêtre)
 //   | guestmove <x> <y> (fractions 0-1 de la vue dessinée, sans clic)
 //   | fs (Ctrl+Cmd+F) | altenter | f11 | esc | type <texte: a-z 0-9 espace .>
-//   | enter | shot <fichier.png> (screencapture -x, hôte macOS) | quit
+//   | enter | shot <fichier.png> (screencapture -x, hôte macOS) | quit (sans rien demander)
+//   | glshot <fichier.ppm> (l'image de la fenêtre seule, sans droit de capture d'écran)
+//   | close (comme le bouton de fermeture : pose la question)
 struct ProbeStep { std::string op; std::string arg; float x = 0, y = 0; };
 static std::vector<ProbeStep> parseProbe(const char* s) {
     std::vector<ProbeStep> out;
@@ -396,12 +402,15 @@ int main(int argc, char** argv) {
                                  maxExtraDisks(root, tiger));
         return diskEnv(root, tiger, sel);
     };
+    // Un échec ici s'affiche dans la fenêtre : lancée par le Finder, l'app n'a pas de terminal.
+    std::string startProblem;
     if (!bridge->start(makeConfig(curLauncher, runtimeDir, sound, pad, diskVarsFor(curLauncher)), &err)) {
         std::fprintf(stderr, "QemuBridge start failed: %s\n", err.c_str());
-        return 1;
+        startProblem = err;
+    } else {
+        journal("QEMU started: %s", curLauncher.c_str());
+        chimeTrigger.arm();
     }
-    journal("QEMU started: %s", curLauncher.c_str());
-    chimeTrigger.arm();
 
     glfwSetErrorCallback(glfwErr);
     if (!glfwInit()) { std::fprintf(stderr, "GLFW init failed\n"); return 1; }
@@ -419,16 +428,18 @@ int main(int argc, char** argv) {
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
 #endif
+    if (std::getenv("POMPPC_FE_DISKS")) fe.showDisks = true;   // pour vérifier le panneau par une capture
     const bool feGeom = fe.winW > 0 && fe.winH > 0;
     // La version vient de l'accueil QMP du QEMU réellement lancé (QEMU_BIN
     // peut viser un autre arbre que ~/src/qemu).
-    auto windowTitle = [](const QemuBridge& b) {
-        const std::string& v = b.qemuVersion();
-        return std::string("POMPPC — PowerPC Macintosh (QEMU") + (v.empty() ? "" : " " + v) + ")";
+    // Le système, pas la machinerie : la version de QEMU est dans le panneau Status.
+    auto windowTitle = [&](const std::string& launcher) {
+        return std::string("POMPPC — ") +
+               (launcher == tigerSh ? "Mac OS X 10.4 Tiger" : "Mac OS 9.2.2");
     };
     GLFWwindow* window =
-        glfwCreateWindow(feGeom ? fe.winW : 1280, feGeom ? fe.winH : 900,
-                         windowTitle(*bridge).c_str(), nullptr, nullptr);
+        glfwCreateWindow(feGeom ? fe.winW : 1024, feGeom ? fe.winH : 790,
+                         windowTitle(curLauncher).c_str(), nullptr, nullptr);
     if (!window) { glfwTerminate(); return 1; }
     if (feGeom) glfwSetWindowPos(window, fe.winX, fe.winY);
     glfwMakeContextCurrent(window);
@@ -519,18 +530,48 @@ int main(int argc, char** argv) {
     bool pointerCaptured = false;
     bool suppressPointerDelta = false;
 
+    // Un geste qui couperait l'invité se confirme d'abord (fenêtres dessinées à la fin de l'image).
+    bool askQuit = false, quitWhenStopped = false, forceQuit = false, askRestart = false;
+    bool stoppedSeen = false;
+    std::string restartTitle;
+    std::function<void()> restartAction;
+    auto osNameOf = [&](const std::string& launcher) {
+        return std::string(launcher == tigerSh ? "Tiger" : "Mac OS 9");
+    };
+    auto confirmRestart = [&](const std::string& title, std::function<void()> action) {
+        if (!bridge->running()) { action(); return; }
+        restartTitle = title;
+        restartAction = std::move(action);
+        askRestart = true;
+    };
+    const std::string appLog = runtimeDir + "/app.log";
+    auto openFile = [](const std::string& path) {
+#ifdef __APPLE__
+        const char* tool = "open";
+#else
+        const char* tool = "xdg-open";
+#endif
+        const char* args[] = {tool, path.c_str(), nullptr};
+        pid_t pid = -1;
+        posix_spawnp(&pid, tool, nullptr, nullptr, const_cast<char* const*>(args), environ);
+    };
+
     auto relaunch = [&](const std::string& launcher) {
         chimePlayer.stop();
         chimeTrigger.pending = false;
+        stoppedSeen = false;
+        startProblem.clear();
+        quitWhenStopped = false;
         bridge->stop();
         bridge = std::make_unique<QemuBridge>();
         std::string e;
-        if (!bridge->start(makeConfig(launcher, runtimeDir, sound, pad, diskVarsFor(launcher)), &e))
+        if (!bridge->start(makeConfig(launcher, runtimeDir, sound, pad, diskVarsFor(launcher)), &e)) {
             journal("restart failed: %s", e.c_str());
-        else {
+            startProblem = e;
+        } else {
             curLauncher = launcher;
             journal("QEMU restarted: %s", launcher.c_str());
-            glfwSetWindowTitle(window, windowTitle(*bridge).c_str());
+            glfwSetWindowTitle(window, windowTitle(launcher).c_str());
             chimeTrigger.arm();
         }
         guestW = guestH = 0;
@@ -552,8 +593,35 @@ int main(int argc, char** argv) {
     auto guestView = [&](bool allowZoom) {
         ImGuiIO& io = ImGui::GetIO();
         if (guestW <= 0) {
-            ImGui::TextDisabled("Waiting for the QEMU display…");
             drawSize = ImVec2(0, 0);
+            if (!stoppedSeen && startProblem.empty()) {
+                ImGui::TextDisabled("Starting %s…", osNameOf(curLauncher).c_str());
+                return;
+            }
+            // QEMU n'est plus là. Un arrêt voulu n'est pas une panne : on le dit autrement.
+            const bool clean = startProblem.empty() && bridge->exitedCleanly();
+            const std::string os = osNameOf(curLauncher);
+            ImGui::SetCursorPos(ImVec2(24, 24));
+            ImGui::BeginGroup();
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 520);
+            if (clean) ImGui::Text("%s has shut down.", os.c_str());
+            else ImGui::Text("%s couldn't start, or stopped unexpectedly.", os.c_str());
+            if (!startProblem.empty()) ImGui::TextDisabled("%s", startProblem.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+            std::string again = clean ? "Start " + os : std::string("Try Again");
+            if (ImGui::Button(again.c_str())) relaunch(curLauncher);
+            std::error_code logEc;
+            if (!clean && fs::exists(appLog, logEc)) {
+                ImGui::SameLine();
+                if (ImGui::Button("Show Log")) openFile(appLog);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Quit")) {
+                forceQuit = true;
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+            ImGui::EndGroup();
             return;
         }
         ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -640,6 +708,7 @@ int main(int argc, char** argv) {
     int probePhase = 0;
     double probeUntil = 0;
     float probeMx = -1, probeMy = -1;
+    std::string probeGlShot;
     std::string probeShot;
     auto probeKeys = [](std::initializer_list<ImGuiKey> ks, bool down) {
         ImGuiIO& pio = ImGui::GetIO();
@@ -700,7 +769,12 @@ int main(int argc, char** argv) {
             }
         } else if (st.op == "shot") {
             probeShot = st.arg;
+        } else if (st.op == "glshot") {
+            probeGlShot = st.arg;
         } else if (st.op == "quit") {
+            forceQuit = true;
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        } else if (st.op == "close") {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         }
         if (done) {
@@ -712,14 +786,29 @@ int main(int argc, char** argv) {
         }
     };
 
-    while (!glfwWindowShouldClose(window)) {
+    // Ajustement de la fenêtre à l'invité : après 0,7 s sans changement de mode, pour ne pas suivre
+    // chaque étape du démarrage (640x480, puis le mode du bureau).
+    int fitGuestW = 0, fitGuestH = 0, fitLastW = 0, fitLastH = 0, fitSettle = 0;
+    double fitSince = 0;
+    bool fitDone = false;
+
+    while (true) {
+        if (glfwWindowShouldClose(window)) {
+            // Fermer la fenêtre couperait l'invité. Un signal ne demande rien : personne n'est là
+            // pour répondre.
+            if (gQuitSignal || forceQuit || !bridge->checkAlive()) break;
+            glfwSetWindowShouldClose(window, GLFW_FALSE);
+            askQuit = true;
+        }
         glfwPollEvents();
         if (gQuitSignal) glfwSetWindowShouldClose(window, GLFW_TRUE);
         // After the Cocoa event pump, which puts this thread back in the
         // interactive band above QEMU's audio timer.
         preferGuestAudio();
+        // Une confirmation à l'écran rend le pointeur : il faut pouvoir y cliquer, en plein écran aussi.
+        const bool uiModal = askQuit || askRestart || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
         const bool capture = wantsPointerCapture(fullscreen,
-            glfwGetWindowAttrib(window, GLFW_FOCUSED), bridge->running(), paused,
+            glfwGetWindowAttrib(window, GLFW_FOCUSED), bridge->running(), paused || uiModal,
             bridge->mouseIsAbsolute());
         suppressPointerDelta = capture != pointerCaptured;
         if (suppressPointerDelta) {
@@ -770,7 +859,12 @@ int main(int argc, char** argv) {
                     journal("host chime: %s (volume %.0f %%)", chime.file.c_str(), chime.volume * 100);
                 else journal("chime not played: %s", error.c_str());
             }
-            if (w != guestW || h != guestH) journal("scanout %dx%d", w, h);
+            if (w != guestW || h != guestH) {
+                journal("scanout %dx%d", w, h);
+                fitGuestW = w; fitGuestH = h;
+                fitSince = glfwGetTime();
+                fitDone = false;
+            }
             guestW = w; guestH = h;
             glBindTexture(GL_TEXTURE_2D, tex);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
@@ -793,7 +887,49 @@ int main(int argc, char** argv) {
 
         // QEMU peut mourir de son côté : sans ce test, le frontend affichait
         // indéfiniment la dernière image en annonçant « en marche ».
-        bridge->checkAlive();
+        if (!bridge->checkAlive() && !stoppedSeen && startProblem.empty()) {
+            stoppedSeen = true;
+            guestW = guestH = 0;
+            chimePlayer.stop();
+            journal(bridge->exitedCleanly() ? "%s has shut down" : "%s stopped unexpectedly",
+                    osNameOf(curLauncher).c_str());
+            if (quitWhenStopped) {
+                forceQuit = true;
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+        }
+        // La fenêtre suit l'invité, à 100 %, tant que l'utilisateur ne l'a pas redimensionnée.
+        if (fe.autoFit && !fullscreen) {
+            int ww = 0, wh = 0;
+            glfwGetWindowSize(window, &ww, &wh);
+            if (fitSettle > 0) {
+                if (--fitSettle == 0) { fitLastW = ww; fitLastH = wh; }
+            } else if (fitLastW > 0 && (ww != fitLastW || wh != fitLastH)) {
+                fe.autoFit = false;
+            }
+            if (fe.autoFit && !fitDone && fitGuestW > 0 && glfwGetTime() - fitSince > 0.7) {
+                fitDone = true;
+                if (!showLibrary && !showBilan && !showJournal && !fe.showDisks) {
+                    int ax = 0, ay = 0, aw = 0, ah = 0, wx = 0, wy = 0, ft = 0;
+                    glfwGetMonitorWorkarea(monitorOf(window), &ax, &ay, &aw, &ah);
+                    glfwGetWindowFrameSize(window, nullptr, &ft, nullptr, nullptr);
+                    const int menuH = (int)std::ceil(ImGui::GetFrameHeight());
+                    const int tw = std::min(fitGuestW, aw);
+                    const int th = std::min(fitGuestH + menuH, ah - ft);
+                    glfwGetWindowPos(window, &wx, &wy);
+                    glfwSetWindowSize(window, tw, th);
+                    wx = std::max(ax, std::min(wx, ax + aw - tw));
+                    wy = std::max(ay + ft, std::min(wy, ay + ah - th));
+                    glfwSetWindowPos(window, wx, wy);
+                    fitSettle = 3;
+                    journal("window fitted to the guest: %dx%d", tw, th);
+                } else if (fitSettle == 0) {
+                    glfwGetWindowSize(window, &fitLastW, &fitLastH);
+                }
+            }
+        } else if (fullscreen) {
+            fitSettle = 3;
+        }
         // Souris : suivre le mode de QEMU et, si demandé, rendre la tablette
         // courante chaque fois que la souris HID relative la reprend.
         const bool wantAbsolute = wantsAbsolutePointer(fullscreen, preferTablet);
@@ -839,9 +975,17 @@ int main(int argc, char** argv) {
         // ── Menu bar → machine control over QMP ──────────────────────────
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("Machine")) {
-                if (ImGui::MenuItem("Restart") && bridge->reset()) {
-                    chimePlayer.stop();
-                    chimeTrigger.arm();
+                if (ImGui::MenuItem("Shut Down", nullptr, false, bridge->running())) {
+                    if (paused) { paused = false; bridge->setPaused(false); }
+                    bridge->pressPowerKey();
+                }
+                if (ImGui::MenuItem("Restart", nullptr, false, bridge->running())) {
+                    confirmRestart("Restart " + osNameOf(curLauncher) + "?", [&] {
+                        if (bridge->reset()) {
+                            chimePlayer.stop();
+                            chimeTrigger.arm();
+                        }
+                    });
                 }
                 if (ImGui::MenuItem(paused ? "Resume" : "Pause")) {
                     paused = !paused;
@@ -867,10 +1011,10 @@ int main(int argc, char** argv) {
                 const bool hasOs9 = std::getenv("OS9_DISK") || fs::exists(root + "/disks/os9.qcow2") ||
                                     (!fe.os9Disks.boot.empty() && fs::exists(root + "/disks/" + fe.os9Disks.boot));
                 if (ImGui::MenuItem("Mac OS X 10.4 (Tiger)", nullptr, onTiger, !onTiger && hasTiger))
-                    relaunch(tigerSh);
+                    confirmRestart("Switch to Tiger?", [&] { relaunch(tigerSh); });
                 bool onOs9 = (curLauncher == os9Sh);
                 if (ImGui::MenuItem("Mac OS 9.2.2", nullptr, onOs9, !onOs9 && hasOs9))
-                    relaunch(os9Sh);
+                    confirmRestart("Switch to Mac OS 9?", [&] { relaunch(os9Sh); });
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Devices")) {
@@ -895,11 +1039,19 @@ int main(int argc, char** argv) {
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
-                ImGui::TextDisabled("(switching restarts the VM immediately)");
-                if (ImGui::MenuItem("Sound (Screamer)", nullptr, &sound))
-                    relaunch(curLauncher);
-                if (ImGui::MenuItem("USB Gamepad", nullptr, &pad))
-                    relaunch(curLauncher);
+                ImGui::TextDisabled("(changing these restarts the machine)");
+                if (ImGui::MenuItem("Sound (Screamer)", nullptr, sound)) {
+                    confirmRestart(sound ? "Turn sound off?" : "Turn sound on?", [&] {
+                        sound = !sound;
+                        relaunch(curLauncher);
+                    });
+                }
+                if (ImGui::MenuItem("USB Gamepad", nullptr, pad)) {
+                    confirmRestart(pad ? "Turn the USB gamepad off?" : "Turn the USB gamepad on?", [&] {
+                        pad = !pad;
+                        relaunch(curLauncher);
+                    });
+                }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("View")) {
@@ -918,6 +1070,12 @@ int main(int argc, char** argv) {
                 ImGui::MenuItem(kWinBilan, nullptr, &showBilan);
                 ImGui::MenuItem(kWinJournal, nullptr, &showJournal);
                 ImGui::MenuItem(kWinDisks, nullptr, &fe.showDisks);
+                if (ImGui::MenuItem("Fit Window to Guest", nullptr, false, !fullscreen)) {
+                    fitView = fe.autoFit = true;
+                    showLibrary = showBilan = showJournal = fe.showDisks = false;
+                    fitDone = false;
+                    fitSince = 0;
+                }
                 if (ImGui::MenuItem("Default Layout")) resetLayout = true;
                 ImGui::EndMenu();
             }
@@ -930,7 +1088,12 @@ int main(int argc, char** argv) {
         // ── DockSpace plein cadre (sous la barre de menus) ───────────────
         if (resetLayout || !ImGui::DockBuilderGetNode(dsId)) {
             buildDefaultLayout(dsId, vp);
-            showLibrary = showBilan = showJournal = true;
+            if (resetLayout) {
+                showLibrary = showBilan = showJournal = fe.showDisks = false;
+                fitView = fe.autoFit = true;
+                fitDone = false;
+                fitSince = 0;
+            }
             resetLayout = false;
         }
         ImGui::DockSpaceOverViewport(dsId, vp);
@@ -973,6 +1136,7 @@ int main(int argc, char** argv) {
                 if (ImGui::SmallButton("Refresh")) cdImagesStale = true;
                 if (cdImagesStale) { cdImages = listCdImages(root); cdImagesStale = false; }
                 ImGui::Separator();
+                if (cdImages.empty()) ImGui::TextWrapped("Put .iso, .cdr, .img or .toast files in %s/disks, then click Refresh.", root.c_str());
                 ImGui::BeginChild("games");
                 for (const std::string& g : cdImages) {
                     bool sel = (g == currentCd);
@@ -992,7 +1156,8 @@ int main(int argc, char** argv) {
         // ── Disks : disque de démarrage, disques en plus, création ───────
         if (fe.showDisks) {
             // Pour vérifier le panneau par une capture : un onglet derrière un autre n'y paraît pas.
-            static bool focusDisks = std::getenv("POMPPC_FE_DISKS") != nullptr;
+            static bool focusDisks = true;
+            if (!std::getenv("POMPPC_FE_DISKS")) focusDisks = false;
             if (focusDisks) { ImGui::SetNextWindowFocus(); focusDisks = false; }
             if (ImGui::Begin(kWinDisks, &fe.showDisks)) {
                 const bool tiger = curLauncher == tigerSh;
@@ -1109,6 +1274,7 @@ int main(int argc, char** argv) {
                 int fbw = 0, fbh = 0, ww = 0, wh = 0;
                 glfwGetFramebufferSize(window, &fbw, &fbh);
                 glfwGetWindowSize(window, &ww, &wh);
+                ImGui::Text("QEMU: %s", bridge->qemuVersion().c_str());
                 ImGui::Text("Guest: %dx%d  (%s)", guestW, guestH,
                             bridge->running() ? "running" : "stopped");
                 ImGui::Text("View: %s", fitView ? "fit to ratio" : "fixed zoom");
@@ -1135,6 +1301,52 @@ int main(int argc, char** argv) {
             ImGui::End();
         }
         }   // !fullscreen
+
+        // ── Confirmations : hors du bloc précédent, pour exister aussi en plein écran ─────
+        if (askQuit) { ImGui::OpenPopup("Quit POMPPC?"); askQuit = false; }
+        if (askRestart) { ImGui::OpenPopup("###restart"); askRestart = false; }
+        {
+            const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            if (ImGui::BeginPopupModal("Quit POMPPC?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                const std::string os = osNameOf(curLauncher);
+                ImGui::Text("%s is still running.", os.c_str());
+                ImGui::Text("Shut it down first, or anything not saved in it will be lost.");
+                ImGui::Spacing();
+                if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+                ImGui::SameLine();
+                if (ImGui::Button("Force Quit")) {
+                    forceQuit = true;
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Shut Down")) {
+                    // L'invité pose sa propre question ; POMPPC se ferme quand il s'est éteint.
+                    if (paused) { paused = false; bridge->setPaused(false); }
+                    bridge->pressPowerKey();
+                    quitWhenStopped = true;
+                    journal("shutdown requested: POMPPC quits when %s has stopped", os.c_str());
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+            ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            const std::string title = restartTitle + "###restart";
+            if (ImGui::BeginPopupModal(title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("%s restarts at once: anything not saved in it will be lost.",
+                            osNameOf(curLauncher).c_str());
+                ImGui::Spacing();
+                if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+                ImGui::SameLine();
+                if (ImGui::Button("Restart")) {
+                    if (restartAction) restartAction();
+                    restartAction = nullptr;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+        }
 
         // Clipboard bridge: offer host clipboard to the guest (throttled poll),
         // and paste any text the guest copied onto the host clipboard.
@@ -1167,7 +1379,7 @@ int main(int argc, char** argv) {
         // terminal, sans activation de l'application).
         const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) != 0
                              || probeIdx < probe.size();
-        bool keysLive = grabbed && focused && !io.WantTextInput && bridge->running();
+        bool keysLive = grabbed && focused && !io.WantTextInput && bridge->running() && !uiModal;
         if (keysLive) {
             for (int i = 0; i < kKeyCount; ++i) {
                 if (!swallow[i] && ImGui::IsKeyPressed(kKeys[i].k, false)) {
@@ -1202,6 +1414,19 @@ int main(int argc, char** argv) {
         else glClearColor(0.08f, 0.08f, 0.10f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (!probeGlShot.empty()) {
+            int pw = 0, ph = 0;
+            glfwGetFramebufferSize(window, &pw, &ph);
+            std::vector<unsigned char> px((size_t)pw * ph * 3);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, pw, ph, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+            if (FILE* out = std::fopen(probeGlShot.c_str(), "wb")) {
+                std::fprintf(out, "P6\n%d %d\n255\n", pw, ph);
+                for (int y = ph - 1; y >= 0; --y) std::fwrite(&px[(size_t)y * pw * 3], 3, pw, out);
+                std::fclose(out);
+            }
+            probeGlShot.clear();
+        }
         glfwSwapBuffers(window);
         if (!probeShot.empty()) {
             std::string cmd = "screencapture -x '" + probeShot + "'";

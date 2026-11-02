@@ -153,7 +153,15 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   full-screen behaviour is disabled — the green button zooms instead.
 - The pointer is mapped on the **rectangle actually drawn** (`SetAbsPosition` in guest pixels,
   relative motion scaled by the same factor, remainders carried); the bands send nothing.
-- **Disks** (tab next to Library, **View ▸ Disks**) chooses the guest's disks, per system: the
+- **Quit and restarts.** Closing the window, or **Machine ▸ Quit**, asks first while the guest runs:
+  **Shut Down** sends the power key (`send-key power`), the guest shows its own dialog, and the front
+  end closes when QEMU exits. `system_powerdown` has no effect on mac99. Sound, gamepad, system and
+  **Machine ▸ Restart** ask too. SIGTERM doesn't ask. When QEMU stops, the Screen window says so, with
+  **Start** or **Try Again**, and **Show Log** if `.run/app.log` exists.
+- **Window size.** Panels are closed by default and the window follows the guest at 100 %, 0.7 s after
+  its last mode change, until the user resizes it (**View ▸ Fit Window to Guest** turns it back on).
+  Settings older than `disposition = 2` start again from this state, once.
+- **Disks** (**View ▸ Disks**) chooses the guest's disks, per system: the
   startup disk, and up to two more at the same time (one under Mac OS 9 when `disks/games.iso`
   exists: the machine has 4 IDE slots, shared with the CDs). It lists the qcow2 images of `disks/`,
   creates new ones, and marks each disk HD or SSD. **Apply and Restart** restarts the VM. The choice
@@ -189,7 +197,8 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   pointer mode; **Log** records launches, CDs, scanout changes, switches and left clicks
   (host point → guest pixel).
 
-`POMPPC_FE_SCRIPT` plays a test script through ImGui's input queue (same path as the real
+`glshot <file.ppm>` captures the window alone, without screen-recording rights, and `close` acts like
+the window's close button. `POMPPC_FE_SCRIPT` plays a test script through ImGui's input queue (same path as the real
 mouse and keyboard, no macOS Accessibility permission needed) and takes captures, e.g.:
 
 ```sh

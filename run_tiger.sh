@@ -143,6 +143,7 @@
 #                             # ou une fois pour toutes : echo 0 > disks/tiger.qcow2.tablet-margin
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   POMPPC_CD=<image> ./run_tiger.sh  # cette image dans 'gamecd' à la place du CD de l'invité
+#   POMPPC_BOOT_ARGS= ./run_tiger.sh  # démarrage sans le texte du noyau (-v par défaut ; POMPPC.app)
 #   POMPPC_EXTRA_DISKS="a.qcow2;b.qcow2" DISK=c.qcow2 ./run_tiger.sh  # disques en plus du démarrage,
 #                             # 2 au plus ; <disque>.type = ssd (panneau Disks, scripts/disques.sh)
 #   GLISO=0 ./run_tiger.sh    # omet le CD de l'invité dans 'gamecd' : pomppc-guest.iso du
@@ -1405,7 +1406,7 @@ exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \
   ${TABLET_ARGS[@]+"${TABLET_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} ${QFB_ARGS[@]+"${QFB_ARGS[@]}"} ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} ${USER_EXTRA[@]+"${USER_EXTRA[@]}"} \
   -prom-env 'auto-boot?=true' \
   -prom-env "boot-device=$BOOTDEV" \
-  -prom-env 'boot-args=-v' \
+  -prom-env "boot-args=${POMPPC_BOOT_ARGS--v}" \
   -name "Tiger" \
   ${QMP_ARGS[@]+"${QMP_ARGS[@]}"} \
   -monitor "unix:$MON,server,nowait"

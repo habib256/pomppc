@@ -434,6 +434,8 @@ principal() {
   # Sans outils de développement, /usr/bin/python3 ouvrirait une fenêtre d'installation. Le relais
   # web de Tiger est le seul à en dépendre au démarrage : il attend ces outils.
   xcode-select -p >/dev/null 2>&1 || export WEBPROXY=0
+  # Pour l'utilisateur, le démarrage de Mac OS X plutôt que le texte du noyau.
+  export POMPPC_BOOT_ARGS=""
   cd "$D" || exit 1
   exec >>"$D/.run/app.log" 2>&1
   exec "$D/run_frontend.sh" "$D/$lanceur"

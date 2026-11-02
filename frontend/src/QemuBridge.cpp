@@ -526,7 +526,16 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
     int qmp = -1;
     for (int i = 0; i < 200 && qmp < 0; ++i) {
         qmp = connectUnix(qmpPath);
-        if (qmp < 0) usleep(50 * 1000);
+        if (qmp >= 0) break;
+        // QEMU déjà sorti (disque illisible ou déjà utilisé) : inutile d'attendre les 10 s.
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            qemuReaped_ = true;
+            if (err) *err = "It may be using a damaged disk, or another POMPPC may be using this disk.";
+            stop();
+            return false;
+        }
+        usleep(50 * 1000);
     }
     if (qmp < 0) {
         if (err) *err = "could not connect to QMP socket " + qmpPath;
@@ -790,8 +799,10 @@ void QemuBridge::stopQemu() {
 
 bool QemuBridge::checkAlive() {
     if (qemuPid_ <= 0 || qemuReaped_) return false;
-    if (waitpid(qemuPid_, nullptr, WNOHANG) == qemuPid_) {
+    int status = 0;
+    if (waitpid(qemuPid_, &status, WNOHANG) == qemuPid_) {
         qemuReaped_ = true;
+        exitedCleanly_ = WIFEXITED(status) && WEXITSTATUS(status) == 0;
         running_.store(false, std::memory_order_relaxed);
         std::fprintf(stderr, "QemuBridge: QEMU (pid %ld) exited\n", qemuPid_);
         return false;
@@ -1215,6 +1226,12 @@ int QemuBridge::selectMouse(bool absolute) {
     return qmpCommand(cmd) ? pick : -1;
 }
 bool QemuBridge::reset() { return qmpCommand("{\"execute\":\"system_reset\"}"); }
+// [A] Mesuré sous Tiger 10.4.11 et Mac OS 9.2.2 (M4, 02/11) : la touche ouvre le dialogue d'arrêt de
+// l'invité, et QEMU sort une fois l'invité éteint. system_powerdown n'a, lui, aucun effet sur mac99.
+bool QemuBridge::pressPowerKey() {
+    return qmpCommand("{\"execute\":\"send-key\",\"arguments\":{\"keys\":"
+                      "[{\"type\":\"qcode\",\"data\":\"power\"}]}}");
+}
 bool QemuBridge::setPaused(bool p) {
     return qmpCommand(p ? "{\"execute\":\"stop\"}" : "{\"execute\":\"cont\"}");
 }

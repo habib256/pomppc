@@ -36,6 +36,7 @@ bool parseInt(const std::string& v, int& out) {
 bool FrontendSettings::load(const std::string& path) {
     std::ifstream in(path);
     if (!in) return false;
+    int version = 0;
     std::string line;
     while (std::getline(in, line)) {
         line = trim(line);
@@ -60,6 +61,8 @@ bool FrontendSettings::load(const std::string& path) {
         else if (k == "bilan") parseBool(v, showBilan);
         else if (k == "journal") parseBool(v, showJournal);
         else if (k == "panneau_disques") parseBool(v, showDisks);
+        else if (k == "fenetre_ajustee") parseBool(v, autoFit);
+        else if (k == "disposition") parseInt(v, version);
         else if (k == "disque_tiger") tigerDisks.boot = v;
         else if (k == "disques_tiger") tigerDisks.extras = splitNames(v);
         else if (k == "disque_os9") os9Disks.boot = v;
@@ -69,6 +72,14 @@ bool FrontendSettings::load(const std::string& path) {
         else if (k == "fenetre_y") parseInt(v, winY);
         else if (k == "fenetre_l") parseInt(v, winW);
         else if (k == "fenetre_h") parseInt(v, winH);
+    }
+    // Avant la disposition 2, les panneaux s'ouvraient d'office et réduisaient l'invité : personne
+    // ne les avait choisis. On repart une fois de l'invité seul, à sa taille.
+    if (version < 2) {
+        showLibrary = showBilan = showJournal = showDisks = false;
+        fitView = autoFit = true;
+        zoom = 1.0f;
+        winW = winH = 0;
     }
     // Une géométrie absurde (fichier édité à la main) retombe sur le défaut.
     if (winW < 320 || winH < 240 || winW > 16384 || winH > 16384) winW = winH = 0;
@@ -82,6 +93,7 @@ bool FrontendSettings::save(const std::string& path) const {
         if (!out) return false;
         out << "# Réglages d'ImGuiDock (POMPPC), écrits à l'arrêt du frontend.\n"
                "# Modifiables à la main ; la disposition des fenêtres est dans imgui2.ini.\n"
+            << "disposition = 2\n"
             << "os = " << os << '\n'
             << "son = " << sound << '\n'
             << "manette = " << pad << '\n'
@@ -93,6 +105,7 @@ bool FrontendSettings::save(const std::string& path) const {
             << "bilan = " << showBilan << '\n'
             << "journal = " << showJournal << '\n'
             << "panneau_disques = " << showDisks << '\n'
+            << "fenetre_ajustee = " << autoFit << '\n'
             << "disque_tiger = " << tigerDisks.boot << '\n'
             << "disques_tiger = " << joinNames(tigerDisks.extras) << '\n'
             << "disque_os9 = " << os9Disks.boot << '\n'

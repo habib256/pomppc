@@ -22,10 +22,12 @@ struct FrontendSettings {
     bool preferTablet = true;    // souris absolue en fenêtre
     bool fitView = true;
     float zoom = 1.0f;           // 0,5 à 2 quand fitView est faux
-    bool showLibrary = true;
-    bool showBilan = true;
-    bool showJournal = true;
-    bool showDisks = true;
+    // Panneaux fermés par défaut : l'invité d'abord, net et à sa taille.
+    bool showLibrary = false;
+    bool showBilan = false;
+    bool showJournal = false;
+    bool showDisks = false;
+    bool autoFit = true;         // la fenêtre suit la taille de l'invité, jusqu'à un redimensionnement
     DiskSelection tigerDisks, os9Disks;   // panneau Disks ; vides = les disques par défaut
     bool fullscreen = false;
     // Géométrie de la fenêtre (mode fenêtré), valide si winW/winH > 0.
