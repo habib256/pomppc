@@ -29,6 +29,7 @@ struct FrontendSettings {
     bool showDisks = false;
     int memoryTiger = 0, memoryOs9 = 0;   // Mo ; 0 = le défaut du lanceur
     int coresTiger = 0;                   // 0 = le défaut du lanceur
+    std::string sharedTiger, sharedOs9;   // dossier du Mac présenté comme un disque ; vide = aucun
     bool sharpImage = true;               // agrandissement net, ou lissé
     bool autoFit = true;         // la fenêtre suit la taille de l'invité, jusqu'à un redimensionnement
     DiskSelection tigerDisks, os9Disks;   // panneau Disks ; vides = les disques par défaut

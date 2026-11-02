@@ -46,6 +46,7 @@ extern char** environ;
 #include "SetupFlow.h"
 #include "SetupUi.h"
 #include "AppExtras.h"
+#include "SharedFolder.h"
 #include "roboto_font.h"
 
 #ifndef IMGUI_HAS_DOCK
@@ -619,13 +620,60 @@ int main(int argc, char** argv) {
     };
     bool showPrefs = false, showAbout = false;
 
+    // Dossier partagé (SharedFolder.h) : une image à la fois, puisqu'une seule VM tourne ici. Tant que
+    // l'image existe, ce que l'invité y a écrit n'est peut-être pas revenu : elle n'est jamais écrasée.
+    enum class ShareState { Off, Building, Attaching, Attached, Releasing, Syncing, Ejected };
+    ShareState shareState = ShareState::Off;
+    BackgroundTask shareTask, shareChoose;
+    std::string shareFolder, shareProblem, shareLast;
+    bool shareBlocked = false;           // un échec : on attend l'utilisateur, sans réessayer en boucle
+    bool shareRecovering = false;        // l'image d'un arrêt brutal : une fois rendue, on branche normalement
+    double shareNext = 0;
+    int shareTries = 0;
+    const std::string shareImage = runtimeDir + "/shared-disk.dmg";
+    const std::string shareList = runtimeDir + "/shared-disk.list";
+    const std::string shareMount = runtimeDir + "/shared-mount";
+    const std::string shareId = "pomppcshared";
+    auto shareStartSync = [&](const std::string& folder, bool allowDeletes) {
+        shareState = ShareState::Syncing;
+        const std::string guest = osNameOf(curLauncher);
+        shareTask.start([=](std::string* e) {
+            SharedSyncReport report;
+            syncSharedDisk(folder, shareMount, shareImage, shareList, allowDeletes, guest, &report, e);
+            return report.summary();
+        });
+    };
+    // Avant de quitter ou de relancer : QEMU est parti, plus personne n'écrit dans l'image.
+    auto shareFinishNow = [&](bool clean) {
+        std::string r, e;
+        while (shareTask.busy()) usleep(20000);
+        shareTask.poll(&r, &e);
+        std::error_code ec;
+        if (fs::exists(shareImage, ec) && !shareBlocked) {
+            const std::string folder = sharedManifestFolder(shareList);
+            SharedSyncReport report;
+            e.clear();
+            if (folder.empty() || !syncSharedDisk(folder, shareMount, shareImage, shareList, clean,
+                                                  osNameOf(curLauncher), &report, &e)) {
+                shareProblem = e;
+                shareBlocked = true;
+                journal("shared folder: %s", e.c_str());
+            } else {
+                journal("shared folder: %s", report.summary().c_str());
+            }
+        }
+        shareState = ShareState::Off;
+    };
+
     auto relaunch = [&](const std::string& launcher) {
         chimePlayer.stop();
         chimeTrigger.pending = false;
         stoppedSeen = false;
         startProblem.clear();
         quitWhenStopped = false;
+        const bool cleanStop = !bridge->running() && bridge->exitedCleanly();
         bridge->stop();
+        shareFinishNow(cleanStop);
         bridge = std::make_unique<QemuBridge>();
         std::string e;
         if (!bridge->start(makeConfig(launcher, runtimeDir, sound, pad, diskVarsFor(launcher)), &e)) {
@@ -1071,7 +1119,7 @@ int main(int argc, char** argv) {
         }
         if (!pendingUsb.empty()) {
             const std::string id = "pomppcusb" + std::to_string(++usbCounter);
-            if (usbDisks.size() >= 4) {
+            if (usbDisks.size() + (shareState == ShareState::Attached ? 1 : 0) >= 4) {
                 showToast("Eject a USB disk first, in the Devices menu.");
             } else if (bridge->attachUsbDisk(pendingUsb, pendingUsbReadOnly, id)) {
                 usbDisks.push_back({id, pendingUsb, fs::path(pendingUsb).stem().string()});
@@ -1094,6 +1142,108 @@ int main(int argc, char** argv) {
             }
         }
         if (!bridge->running()) { usbDisks.clear(); usbReleasing.clear(); }
+        // Dossier partagé : construire, brancher, attendre l'éjection ou l'arrêt, ramener.
+        {
+            std::string done, e;
+            const std::string wanted = curLauncher == tigerSh ? fe.sharedTiger : fe.sharedOs9;
+            std::error_code ec;
+            if (shareTask.poll(&done, &e)) {
+                if (shareState == ShareState::Building) {
+                    if (done.empty()) {
+                        shareProblem = e;
+                        shareBlocked = true;
+                        shareState = ShareState::Off;
+                        journal("shared folder: %s", e.c_str());
+                    } else {
+                        shareFolder = done;
+                        shareState = ShareState::Attaching;
+                        shareTries = 0;
+                        shareNext = 0;
+                    }
+                } else if (shareState == ShareState::Syncing) {
+                    if (e.empty()) {
+                        shareLast = done;
+                        showToast("\"" + sharedVolumeName(shareFolder) + "\" is back on your Mac. " + done, 8.0);
+                    } else {
+                        shareLast.clear();
+                        shareProblem = e;
+                        shareBlocked = true;
+                        journal("shared folder: %s", e.c_str());
+                    }
+                    shareState = bridge->running() && !shareRecovering ? ShareState::Ejected : ShareState::Off;
+                    shareRecovering = false;
+                }
+            }
+            const double now = glfwGetTime();
+            switch (shareState) {
+                case ShareState::Off:
+                    if (shareBlocked || shareTask.busy()) break;
+                    if (fs::exists(shareImage, ec)) {
+                        // Restée d'un arrêt brutal : rien ne dit qu'elle est complète, donc sans suppression.
+                        shareFolder = sharedManifestFolder(shareList);
+                        if (shareFolder.empty()) {
+                            shareProblem = "POMPPC couldn't read the disk's list of files. It's still here: " + shareImage;
+                            shareBlocked = true;
+                        } else {
+                            shareRecovering = true;
+                            shareStartSync(shareFolder, false);
+                        }
+                    } else if (bridge->running() && !wanted.empty() && !setup.active() && !trySession) {
+                        const std::string problem = sharedFolderProblem(wanted, root);
+                        if (!problem.empty()) {
+                            shareProblem = problem;
+                            shareBlocked = true;
+                        } else {
+                            shareProblem.clear();
+                            shareLast.clear();
+                            shareState = ShareState::Building;
+                            shareTask.start([=](std::string* err) {
+                                return buildSharedDisk(wanted, shareMount, shareImage, shareList, err) ? wanted : std::string();
+                            });
+                        }
+                    }
+                    break;
+                case ShareState::Attaching:
+                    if (!bridge->running()) { shareStartSync(shareFolder, false); break; }
+                    if (now < shareNext) break;
+                    shareNext = now + 1.0;
+                    if (bridge->attachUsbDisk(shareImage, false, shareId)) {
+                        shareState = ShareState::Attached;
+                        journal("shared folder connected: %s", shareFolder.c_str());
+                    } else if (++shareTries > 15) {
+                        shareProblem = "POMPPC couldn't connect the shared folder's disk.";
+                        shareStartSync(shareFolder, false);
+                    }
+                    break;
+                case ShareState::Attached: {
+                    if (!bridge->running()) {
+                        shareStartSync(shareFolder, bridge->exitedCleanly());
+                        break;
+                    }
+                    if (now < shareNext) break;
+                    shareNext = now + 1.0;
+                    std::string reply;
+                    if (bridge->qmpCommand("{\"execute\":\"query-block\"}", &reply) && usbDiskEjected(reply, shareId) &&
+                        bridge->detachUsbDisk(shareId)) {
+                        shareState = ShareState::Releasing;
+                        shareTries = 0;
+                    }
+                    break;
+                }
+                case ShareState::Releasing:
+                    if (now < shareNext) break;
+                    shareNext = now + 0.5;
+                    // L'invité a éjecté : l'image est complète, même si QEMU tarde à la rendre.
+                    if (!bridge->running() || bridge->releaseUsbDisk(shareId) || ++shareTries > 20)
+                        shareStartSync(shareFolder, true);
+                    break;
+                case ShareState::Ejected:
+                    if (!bridge->running()) shareState = ShareState::Off;
+                    break;
+                default:
+                    break;
+            }
+        }
         {
             std::string tag, e;
             if (updateTask.poll(&tag, &e)) {
@@ -1675,6 +1825,96 @@ int main(int argc, char** argv) {
                     ImGui::TextWrapped("SSD is only a label for the guest: speed doesn't change.");
                     ImGui::PopStyleColor();
                 }
+
+                ImGui::SeparatorText("Shared Folder");
+                std::string& sharedPath = tiger ? fe.sharedTiger : fe.sharedOs9;
+                const bool shareInUse = shareState != ShareState::Off && shareState != ShareState::Ejected;
+                {
+                    std::string chosen, e;
+                    if (shareChoose.poll(&chosen, &e) && !chosen.empty()) {
+                        const std::string problem = sharedFolderProblem(chosen, root);
+                        if (!problem.empty()) {
+                            showToast(problem);
+                        } else {
+                            sharedPath = chosen;
+                            shareProblem.clear();
+                            shareLast.clear();
+                            shareBlocked = fs::exists(shareImage);
+                            if (shareState == ShareState::Ejected) shareState = ShareState::Off;
+                        }
+                    }
+                }
+                if (sharedPath.empty()) {
+                    ImGui::TextWrapped("Choose a folder on your Mac: it appears as a disk in Mac OS.");
+                } else {
+                    ImGui::TextWrapped("%s", sharedPath.c_str());
+                    ImGui::SetItemTooltip("%s", sharedPath.c_str());
+                }
+                ImGui::BeginDisabled(shareInUse || shareChoose.busy());
+                if (ImGui::Button(sharedPath.empty() ? "Choose Folder..." : "Change Folder...")) {
+                    shareChoose.start([](std::string*) {
+                        // POMPPC_SHARED_CHOOSE : le dossier d'une épreuve scriptée, sans fenêtre de macOS.
+                        if (const char* forced = std::getenv("POMPPC_SHARED_CHOOSE")) return std::string(forced);
+                        std::string out;
+                        if (!SetupFlow::runTool({"osascript", "-e",
+                                                 "return POSIX path of (choose folder with prompt \"Choose the folder to share\")"}, &out))
+                            return std::string();
+                        out.erase(out.find_last_not_of("\r\n") + 1);
+                        if (out.size() > 1 && out.back() == '/') out.pop_back();
+                        return out;
+                    });
+                }
+                if (!sharedPath.empty()) {
+                    ImGui::SameLine();
+                    if (ImGui::Button("Stop Sharing")) {
+                        sharedPath.clear();
+                        shareLast.clear();
+                        if (shareState == ShareState::Ejected) shareState = ShareState::Off;
+                    }
+                }
+                ImGui::EndDisabled();
+                if (!sharedPath.empty() && ImGui::Button("Show on Mac")) openFile(sharedPath);
+                if (!shareProblem.empty()) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "%s", shareProblem.c_str());
+                    if (shareBlocked && ImGui::Button("Try Again")) {
+                        shareBlocked = false;
+                        shareProblem.clear();
+                        if (shareState == ShareState::Ejected) shareState = ShareState::Off;
+                    }
+                }
+                const std::string volume = sharedVolumeName(sharedPath);
+                switch (shareState) {
+                    case ShareState::Building:
+                    case ShareState::Attaching:
+                        ImGui::TextUnformatted("Preparing the disk...");
+                        break;
+                    case ShareState::Attached:
+                        ImGui::TextWrapped("\"%s\" is on the desktop of Mac OS. Eject it there to bring your changes back to the Mac.",
+                                           sharedVolumeName(shareFolder).c_str());
+                        break;
+                    case ShareState::Releasing:
+                    case ShareState::Syncing:
+                        ImGui::TextUnformatted("Bringing your changes back to the Mac...");
+                        break;
+                    case ShareState::Ejected:
+                        if (!shareLast.empty()) ImGui::TextWrapped("Back on your Mac. %s", shareLast.c_str());
+                        if (!sharedPath.empty() && !shareBlocked && ImGui::Button("Connect Again")) {
+                            shareLast.clear();
+                            shareState = ShareState::Off;
+                        }
+                        break;
+                    case ShareState::Off:
+                        if (trySession && !sharedPath.empty())
+                            ImGui::TextDisabled("Not connected in Try Without Saving.");
+                        else if (!bridge->running() && !sharedPath.empty())
+                            ImGui::TextWrapped("\"%s\" connects when the system starts.", volume.c_str());
+                        break;
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                ImGui::TextWrapped("The disk is a copy, not a live view. What Mac OS changes comes back when you eject the disk "
+                                   "or shut down; what the Mac changes appears the next time it connects. "
+                                   "Deleted files go to the Trash.");
+                ImGui::PopStyleColor();
             }
             ImGui::End();
         }
@@ -1987,7 +2227,9 @@ int main(int argc, char** argv) {
     if (feKeep && !fe.save(feSettingsPath))
         std::fprintf(stderr, "[pomppc] could not write %s\n", feSettingsPath.c_str());
 
+    const bool cleanExit = !bridge->running() && bridge->exitedCleanly();
     bridge->stop();
+    shareFinishNow(cleanExit);
     glDeleteTextures(1, &tex);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

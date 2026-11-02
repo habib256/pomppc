@@ -162,6 +162,13 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   `usb-storage` (QMP `blockdev-add`, `device_add`); a lone disc image is connected read-only, a `.dmg`
   being converted first. **Devices ▸ Eject** removes the device, then opens the disk on the host. The IDE CD
   drive can't do this: Mac OS locks it while a CD is mounted, and a forced swap goes unseen by Tiger.
+- **Shared folder (`SharedFolder`).** A chosen folder becomes an HFS+ image in `.run/shared-disk.dmg`, with a
+  manifest of sizes and dates (`shared-disk.list`), hot-plugged as `usb-storage`. `query-block` shows the guest's
+  eject (`tray_open`). The changes come back by a three-way comparison of manifest, image and folder: new or
+  changed files are copied, conflicts keep both, deletions go to the Trash, and only after a clean eject or
+  shutdown. The image is never overwritten while it exists: a crash leaves it to be brought back at the next run.
+  QEMU's `vvfat` was rejected: 503 MB at most, and files shown empty under Tiger. `POMPPC_SHARED_CHOOSE=<dir>`
+  replaces macOS's window and `POMPPC_TRASH=<dir>` the Trash in a test.
 - **Preferences, image, session.** Memory and processors go to the launchers (`RAM_MB`, `OS9_RAM`, `SMP`).
   **Sharp Image** multiplies the pixels by an integer through an FBO, then scales in bilinear; **Smooth**
   is bilinear. **Try Without Saving** passes `SNAPSHOT=1` for this session only.

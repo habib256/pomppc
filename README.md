@@ -175,6 +175,18 @@ These disks are kept in `~/POMPPC/Exchange`.
 
 **Drop a disc image** (`.iso`, `.toast`, `.cdr`, `.img`, `.dmg`) to connect it read-only in the same way.
 
+**Share a folder of your Mac.** In **View ▸ Disks**, under *Shared Folder*, choose a folder. It appears as a
+disk on the desktop of Mac OS, each time the system starts. The disk is a copy, not a live view:
+
+- What Mac OS changes comes back to your Mac when you **eject the disk in Mac OS** or **shut down**.
+- What your Mac changes appears the next time the disk connects: **Connect Again** in the panel, after an eject.
+- A file deleted in Mac OS goes to your Mac's **Trash**. If both sides changed a file, you keep both: Mac OS's
+  version arrives as `name (from Tiger).ext`.
+- After a forced quit or a crash, POMPPC brings back what it can the next time it runs, and deletes nothing.
+- The copy takes the folder's size plus about 1 GB on your Mac while it's connected, and leaves Mac OS about
+  1 GB of free room. Choose a small folder rather than your whole home folder.
+- It's not connected in **Try Without Saving**.
+
 ### Settings
 
 **Machine ▸ Preferences...** sets the memory and, for Tiger, the number of processors. Tiger gets at most

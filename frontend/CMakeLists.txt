@@ -87,6 +87,7 @@ add_executable(pomppc
     src/SetupFlow.cpp
     src/SetupUi.cpp
     src/AppExtras.cpp
+    src/SharedFolder.cpp
     ${IMGUI_SOURCES})
 target_include_directories(pomppc PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
 if(APPLE)
@@ -137,6 +138,11 @@ if(BUILD_TESTING)
     target_compile_options(extras_test PRIVATE -UNDEBUG)
     target_link_libraries(extras_test PRIVATE Threads::Threads)
     add_test(NAME app_extras COMMAND extras_test)
+    add_executable(shared_test tests/shared_test.cpp src/SharedFolder.cpp src/SetupFlow.cpp src/DiskConfig.cpp)
+    target_include_directories(shared_test PRIVATE src)
+    target_compile_options(shared_test PRIVATE -UNDEBUG)
+    target_link_libraries(shared_test PRIVATE Threads::Threads)
+    add_test(NAME shared_folder COMMAND shared_test)
     add_executable(setup_test tests/setup_test.cpp src/SetupFlow.cpp src/DiskConfig.cpp)
     target_include_directories(setup_test PRIVATE src)
     target_compile_options(setup_test PRIVATE -UNDEBUG)

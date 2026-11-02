@@ -65,6 +65,8 @@ bool FrontendSettings::load(const std::string& path) {
         else if (k == "memoire_tiger") parseInt(v, memoryTiger);
         else if (k == "memoire_os9") parseInt(v, memoryOs9);
         else if (k == "coeurs_tiger") parseInt(v, coresTiger);
+        else if (k == "dossier_tiger") sharedTiger = v;
+        else if (k == "dossier_os9") sharedOs9 = v;
         else if (k == "image_nette") parseBool(v, sharpImage);
         else if (k == "disposition") parseInt(v, version);
         else if (k == "disque_tiger") tigerDisks.boot = v;
@@ -113,6 +115,8 @@ bool FrontendSettings::save(const std::string& path) const {
             << "memoire_tiger = " << memoryTiger << '\n'
             << "memoire_os9 = " << memoryOs9 << '\n'
             << "coeurs_tiger = " << coresTiger << '\n'
+            << "dossier_tiger = " << sharedTiger << '\n'
+            << "dossier_os9 = " << sharedOs9 << '\n'
             << "image_nette = " << sharpImage << '\n'
             << "disque_tiger = " << tigerDisks.boot << '\n'
             << "disques_tiger = " << joinNames(tigerDisks.extras) << '\n'

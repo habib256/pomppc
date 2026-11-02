@@ -196,7 +196,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 23 h 55 (0.4.1 préparée et non publiée, aucune VM ne tourne)
+## 3. Mac M4 : état au 03/11/2026, 00 h 26 (dossier partagé, 0.4.1 en publication, aucune VM ne tourne)
 
 **Soir du 02/11, demande de l'utilisateur : QE doit tenir toutes les résolutions.** Corrigé
 (`docs/quartz-extreme.md`, journal du 02/11) : kext (VRAM entière), plugin `20261102-modes`, cœur
@@ -227,6 +227,14 @@ power` ; `system_powerdown` sans effet sur mac99), confirmations, écran d'arrê
 et fenêtre à l'invité, pomme d'Apple dans l'app (`POMPPC_BOOT_ARGS`). `POMPPC_FE_SCRIPT` joue de vrais clics
 dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une capture de l'écran. Reste le lot 3
 (assistant unique, installateur à double-cliquer, détection du pilote), puis le 4.
+
+**Dossier partagé (3/11, dans la 0.4.1).** Demande de l'utilisateur : un disque correspondant à un dossier du Mac.
+`vvfat` essayé puis écarté (503 Mo, fichiers vus vides). Image HFS+ et retour à l'éjection ou à l'arrêt
+(`SharedFolder`, panneau *Disks*) : **une copie, pas une vue en direct**. Éprouvé au clic et par ssh, disque quotidien
+en `SNAPSHOT=1` : Tiger (éjection, `kill -9` puis reprise sans suppression, arrêt normal, *Connect Again*), OS 9
+(montage, éjection vue par `tray_open`, fichier dupliqué et dossier créé revenus). **Pas éprouvé :** accord de
+confidentialité de macOS sur Documents ou Bureau pour l'app signée ad hoc, très gros dossier, écriture sous OS 9
+d'un fichier avec resource fork, vraie Corbeille depuis l'app (les épreuves passent par `POMPPC_TRASH`).
 
 **Ergonomie, points 2 à 8 (3/11 minuit, dans la 0.4.1).** `usbhid/0002` corrige la mort de l'OHCI (cause : le
 garde-fou `ED_LINK_LIMIT` comptait les paquets ; **QEMU à reconstruire sur le PC**). Glisser-déposer par disque USB

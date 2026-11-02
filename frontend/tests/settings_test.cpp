@@ -28,12 +28,14 @@ int main() {
         a.preferTablet = false; a.fitView = false; a.zoom = 1.5f;
         a.showLibrary = false; a.showBilan = false; a.showJournal = true;
         a.fullscreen = true; a.winX = -40; a.winY = 25; a.winW = 1440; a.winH = 900;
+        a.sharedTiger = "/Users/a/Mon Dossier = 1"; a.sharedOs9 = "/Volumes/Été/x";
         assert(a.save(p));
         FrontendSettings b;
         assert(b.load(p));
         assert(b.os == "tiger" && !b.sound && !b.pad && !b.grabbed && !b.preferTablet);
         assert(!b.fitView && b.zoom == 1.5f && !b.showLibrary && !b.showBilan && b.showJournal);
         assert(b.fullscreen && b.winX == -40 && b.winY == 25 && b.winW == 1440 && b.winH == 900);
+        assert(b.sharedTiger == "/Users/a/Mon Dossier = 1" && b.sharedOs9 == "/Volumes/Été/x");
         std::remove(p.c_str());
     }
     // Fichier abîmé ou d'une autre version : on garde ce qui est lisible.

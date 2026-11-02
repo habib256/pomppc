@@ -11,7 +11,7 @@ de commit et dans `docs/`.
 
 (rien pour l'instant)
 
-## 0.4.1 (02/11/2026)
+## 0.4.1 (03/11/2026)
 
 **Une vraie application macOS.** `POMPPC.app` dans un `.dmg`, à glisser dans Applications, sans
 Terminal sur le Mac (`scripts/package_app_macos.sh`). Les données vivent dans `~/POMPPC`. Signature ad hoc,
@@ -31,6 +31,11 @@ de l'étape du pilote et un rappel dans l'app s'y appuient. **OS ▸ Set Up Anot
 **Le contrôleur USB ne meurt plus.** `usbhid/0002` : le garde-fou de QEMU contre une liste de descripteurs en
 boucle comptait les paquets. Un seul transfert de plus de 32 paquets, ici 2112 octets vers un disque USB sous
 Tiger, tuait l'OHCI, clavier et tablette compris. **QEMU change : le PC reconstruit.**
+
+**Un dossier du Mac comme disque.** Panneau *Disks*, *Shared Folder* : le dossier choisi apparaît en disque USB
+HFS+ dans Tiger et OS 9. Ce n'est pas un partage en direct : ce que l'invité change revient à l'éjection ou à
+l'arrêt, les suppressions vont à la Corbeille, un conflit garde les deux versions, et un arrêt brutal ne
+supprime rien (`SharedFolder`). `vvfat` écarté : 503 Mo au plus, fichiers vus vides sous Tiger.
 
 **Échanger des fichiers.** Déposer des fichiers sur la fenêtre branche à chaud un disque USB *From Mac*,
 lisible et écrivable par Mac OS sans pilote, repris sur le Mac à l'éjection. Une image de disque se branche en

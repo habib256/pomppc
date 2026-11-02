@@ -113,6 +113,11 @@ if [ -x frontend/build/extras_test ]; then
 else
   noop "extras_test non construit (cmake --build frontend/build)"
 fi
+if [ -x frontend/build/shared_test ]; then
+  if frontend/build/shared_test >/dev/null; then ok "dossier partagé"; else ko "dossier partagé"; fi
+else
+  noop "shared_test non construit (cmake --build frontend/build)"
+fi
 if [ -x frontend/build/setup_test ]; then
   if frontend/build/setup_test >/dev/null; then ok "assistant de premier lancement"; else ko "assistant de premier lancement"; fi
 else
