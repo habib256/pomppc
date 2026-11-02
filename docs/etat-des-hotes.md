@@ -228,6 +228,12 @@ et fenêtre à l'invité, pomme d'Apple dans l'app (`POMPPC_BOOT_ARGS`). `POMPPC
 dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une capture de l'écran. Reste le lot 3
 (assistant unique, installateur à double-cliquer, détection du pilote), puis le 4.
 
+**Ergonomie, points 2 à 8 (3/11 minuit, dans la 0.4.1).** `usbhid/0002` corrige la mort de l'OHCI (cause : le
+garde-fou `ED_LINK_LIMIT` comptait les paquets ; **QEMU à reconstruire sur le PC**). Glisser-déposer par disque USB
+à chaud (`AppExtras`), police Roboto, rappel de capture, menu Help, Preferences, filtre net, Try Without Saving,
+capture. Le lecteur CD IDE ne convient pas au dépôt : Tiger le verrouille, et un échange forcé lui échappe. Le
+point 1 (veille pendant l'installation) n'a pas été demandé : toujours ouvert.
+
 **Ergonomie, lot 3 (23 h, dans la 0.4.1).** Assistant unique dans le frontal (`SetupFlow`, `SetupUi`), reprise
 par `.run/setup.state` ; `-no-reboot` enchaîne les étapes d'installation ; installateur `Install POMPPC.app`
 compilé dans Tiger (job `prebuilt`) ; propriété `guest-driver` de qgpu-pci. Essayé au clic (`POMPPC_FE_SCRIPT`) depuis le `.dmg` : pages, reprise, faux CD (Open Firmware), étape écourtée, vrai combo téléchargé chez Apple et son CD dans Tiger, puis pilote retiré d'un clone, **Install POMPPC**, mot de passe, redémarrage, détection. **Pas éprouvé : un vrai installateur de Tiger ou d'OS 9 (pas de média ici : le démarrage `cd:,\\\\:tbxi`, le `-no-reboot` à la fin réelle), l'application réelle du combo sur une 10.4.6, la fenêtre de fichiers de macOS (remplacée par `POMPPC_SETUP_CHOOSE`), le vrai navigateur.** **`patches/qgpu/qgpu-pci.c` a changé :

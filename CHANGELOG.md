@@ -28,6 +28,16 @@ gratuitement (SHA-1 contrôlé). Installateur **Install POMPPC** à double-cliqu
 Terminal. Propriété QOM `guest-driver` du device (IRQ_MASK armé par le kext, sans changer le protocole) : la fin
 de l'étape du pilote et un rappel dans l'app s'y appuient. **OS ▸ Set Up Another System...** ajoute l'autre système.
 
+**Le contrôleur USB ne meurt plus.** `usbhid/0002` : le garde-fou de QEMU contre une liste de descripteurs en
+boucle comptait les paquets. Un seul transfert de plus de 32 paquets, ici 2112 octets vers un disque USB sous
+Tiger, tuait l'OHCI, clavier et tablette compris. **QEMU change : le PC reconstruit.**
+
+**Échanger des fichiers.** Déposer des fichiers sur la fenêtre branche à chaud un disque USB *From Mac*,
+lisible et écrivable par Mac OS sans pilote, repris sur le Mac à l'éjection. Une image de disque se branche en
+lecture seule. **Confort.** Police vectorielle Roboto, rappel de sortie du plein écran et de la capture, menu
+*Help* (guide, données, journal, problème, mise à jour, à propos), *Preferences* (mémoire, processeurs), image
+*Sharp* ou *Smooth*, *Try Without Saving*, capture d'écran.
+
 **Ne plus perdre de travail.** Fermer POMPPC propose d'éteindre le système : **Shut Down** envoie la
 touche d'alimentation, Mac OS pose sa question, et POMPPC se ferme quand il s'est arrêté. Son, manette,
 changement de système et redémarrage demandent confirmation. QEMU arrêté ou impossible à lancer s'affiche

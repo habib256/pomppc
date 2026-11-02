@@ -62,6 +62,10 @@ bool FrontendSettings::load(const std::string& path) {
         else if (k == "journal") parseBool(v, showJournal);
         else if (k == "panneau_disques") parseBool(v, showDisks);
         else if (k == "fenetre_ajustee") parseBool(v, autoFit);
+        else if (k == "memoire_tiger") parseInt(v, memoryTiger);
+        else if (k == "memoire_os9") parseInt(v, memoryOs9);
+        else if (k == "coeurs_tiger") parseInt(v, coresTiger);
+        else if (k == "image_nette") parseBool(v, sharpImage);
         else if (k == "disposition") parseInt(v, version);
         else if (k == "disque_tiger") tigerDisks.boot = v;
         else if (k == "disques_tiger") tigerDisks.extras = splitNames(v);
@@ -106,6 +110,10 @@ bool FrontendSettings::save(const std::string& path) const {
             << "journal = " << showJournal << '\n'
             << "panneau_disques = " << showDisks << '\n'
             << "fenetre_ajustee = " << autoFit << '\n'
+            << "memoire_tiger = " << memoryTiger << '\n'
+            << "memoire_os9 = " << memoryOs9 << '\n'
+            << "coeurs_tiger = " << coresTiger << '\n'
+            << "image_nette = " << sharpImage << '\n'
             << "disque_tiger = " << tigerDisks.boot << '\n'
             << "disques_tiger = " << joinNames(tigerDisks.extras) << '\n'
             << "disque_os9 = " << os9Disks.boot << '\n'

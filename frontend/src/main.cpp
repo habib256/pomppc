@@ -28,6 +28,7 @@
 #include <string>
 #include <spawn.h>
 #include <fstream>
+#include <ctime>
 #include <functional>
 #include <vector>
 
@@ -44,6 +45,8 @@ extern char** environ;
 #include "PointerPolicy.h"
 #include "SetupFlow.h"
 #include "SetupUi.h"
+#include "AppExtras.h"
+#include "roboto_font.h"
 
 #ifndef IMGUI_HAS_DOCK
 #error "Dear ImGui docking branch required — run ./setup.sh (it fetches the docking tag)"
@@ -167,6 +170,18 @@ static std::vector<std::string> listCdImages(const std::string& root) {
 // Build a config for a given launcher (shared env). `sound`/`pad` enable the
 // engine layer's existing Screamer sound (PulseAudio on Linux, CoreAudio on
 // macOS) + usb-host gamepad passthrough.
+// Fichiers déposés sur la fenêtre : relevés ici, traités dans la boucle principale.
+static std::vector<std::string> gDroppedFiles;
+static void onFilesDropped(GLFWwindow*, int count, const char** paths) {
+    for (int i = 0; i < count; ++i) gDroppedFiles.push_back(paths[i]);
+}
+
+// Fonctions GL 3 d'agrandissement net : GLFW n'expose que l'OpenGL d'origine dans ses en-têtes.
+typedef void (*GlGenFramebuffers)(GLsizei, GLuint*);
+typedef void (*GlBindFramebuffer)(GLenum, GLuint);
+typedef void (*GlFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+typedef void (*GlBlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+
 static QemuBridge::Config makeConfig(const std::string& launcher,
                                      const std::string& runtimeDir, bool sound,
                                      bool pad, const std::vector<std::string>& diskVars) {
@@ -192,6 +207,7 @@ static QemuBridge::Config makeConfig(const std::string& launcher,
 //   | enter | shot <fichier.png> (screencapture -x, hôte macOS) | quit (sans rien demander)
 //   | glshot <fichier.ppm> (l'image de la fenêtre seule, sans droit de capture d'écran)
 //   | close (comme le bouton de fermeture : pose la question)
+//   | drop <chemin> (comme un fichier déposé sur la fenêtre)
 struct ProbeStep { std::string op; std::string arg; float x = 0, y = 0; };
 static std::vector<ProbeStep> parseProbe(const char* s) {
     std::vector<ProbeStep> out;
@@ -395,6 +411,7 @@ int main(int argc, char** argv) {
     bool pad = fe.pad;      // usb-host passthrough; the run script self-guards
     auto bridge = std::make_unique<QemuBridge>();
     std::string err;
+    bool trySession = false;      // Try Without Saving : ce que fait l'invité est jeté à l'arrêt
     // L'assistant : repris s'il était en cours, lancé par l'app s'il n'y a encore aucun disque.
     const bool appMode = std::getenv("POMPPC_APP") != nullptr;
     SetupFlow setup(root, runtimeDir);
@@ -414,6 +431,13 @@ int main(int argc, char** argv) {
         if (setup.active()) {
             const std::vector<std::string> step = setup.vmEnv();
             vars.insert(vars.end(), step.begin(), step.end());
+        } else {
+            // Preferences. Une variable posée à la main prime.
+            const int mem = tiger ? fe.memoryTiger : fe.memoryOs9;
+            const char* memVar = tiger ? "RAM_MB" : "OS9_RAM";
+            if (mem > 0 && !std::getenv(memVar)) vars.push_back(std::string(memVar) + "=" + std::to_string(mem));
+            if (tiger && fe.coresTiger > 0 && !std::getenv("SMP")) vars.push_back("SMP=" + std::to_string(fe.coresTiger));
+            if (trySession) vars.push_back("SNAPSHOT=1");
         }
         return vars;
     };
@@ -480,10 +504,18 @@ int main(int argc, char** argv) {
         io0.IniFilename = iniPath.c_str();
     }
     ImGui::StyleColorsDark();
+    // Police vectorielle embarquée. ImGui 1.92 la rastérise à la densité de l'écran : nette partout.
+    {
+        ImFontConfig fontConfig;
+        fontConfig.FontDataOwnedByAtlas = false;
+        ImGui::GetIO().Fonts->AddFontFromMemoryTTF(const_cast<unsigned char*>(kRobotoFont),
+                                                   (int)sizeof(kRobotoFont), 15.0f, &fontConfig);
+    }
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init(glslVersion);
 
     GLuint tex = 0;
+    glfwSetDropCallback(window, onFilesDropped);
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -577,6 +609,16 @@ int main(int argc, char** argv) {
         posix_spawnp(&pid, tool, nullptr, nullptr, const_cast<char* const*>(args), environ);
     };
 
+    // Un message discret, quelques secondes, en haut de la fenêtre.
+    std::string toastText;
+    double toastUntil = 0;
+    auto showToast = [&](const std::string& text, double seconds = 5.0) {
+        toastText = text;
+        toastUntil = glfwGetTime() + seconds;
+        journal("%s", text.c_str());
+    };
+    bool showPrefs = false, showAbout = false;
+
     auto relaunch = [&](const std::string& launcher) {
         chimePlayer.stop();
         chimeTrigger.pending = false;
@@ -611,6 +653,59 @@ int main(int argc, char** argv) {
     // with the guest's aspect ratio (or the fixed zoom), centred, and forward
     // the pointer relative to that rectangle only. The window background is
     // black, so the rest of the content region is the letterbox.
+    // Agrandissement net : chaque pixel de l'invité est d'abord multiplié par un entier (au plus
+    // proche, FBO), puis l'image est ramenée à sa taille en bilinéaire. Le flou reste limité aux
+    // bords des pixels, et les pixels gardent tous la même largeur à un rapport non entier.
+    // Lissé : bilinéaire direct. Un rapport entier ou une réduction se passent de FBO.
+    GLuint sharpTex = 0, sharpFbo = 0, sharpFboSrc = 0;
+    int sharpW = 0, sharpH = 0;
+    bool guestTexDirty = true;
+    auto shownTexture = [&](ImVec2 sz) -> GLuint {
+        int fbw = 0, ww = 0, unused = 0;
+        glfwGetFramebufferSize(window, &fbw, &unused);
+        glfwGetWindowSize(window, &ww, &unused);
+        const float density = ww > 0 ? (float)fbw / (float)ww : 1.0f;
+        const float scale = sz.x * density / (float)guestW;
+        const bool integer = std::fabs(scale - std::round(scale)) < 0.001f;
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                        fe.sharpImage ? GL_NEAREST : GL_LINEAR);
+        static auto genFb = (GlGenFramebuffers)glfwGetProcAddress("glGenFramebuffers");
+        static auto bindFb = (GlBindFramebuffer)glfwGetProcAddress("glBindFramebuffer");
+        static auto attach = (GlFramebufferTexture2D)glfwGetProcAddress("glFramebufferTexture2D");
+        static auto blit = (GlBlitFramebuffer)glfwGetProcAddress("glBlitFramebuffer");
+        if (!fe.sharpImage || integer || scale < 1.0f || !genFb || !bindFb || !attach || !blit) return tex;
+        const int factor = std::min((int)std::ceil(scale), 8);
+        const int w = guestW * factor, h = guestH * factor;
+        if (!sharpFbo) {
+            genFb(1, &sharpFbo);
+            genFb(1, &sharpFboSrc);
+            glGenTextures(1, &sharpTex);
+        }
+        const bool resized = w != sharpW || h != sharpH;
+        if (resized) {
+            sharpW = w; sharpH = h;
+            glBindTexture(GL_TEXTURE_2D, sharpTex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
+        if (resized || guestTexDirty) {
+            const GLenum readFb = 0x8CA8, drawFb = 0x8CA9, colour0 = 0x8CE0;
+            bindFb(readFb, sharpFboSrc);
+            attach(readFb, colour0, GL_TEXTURE_2D, tex, 0);
+            bindFb(drawFb, sharpFbo);
+            attach(drawFb, colour0, GL_TEXTURE_2D, sharpTex, 0);
+            blit(0, 0, guestW, guestH, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            bindFb(readFb, 0);
+            bindFb(drawFb, 0);
+            guestTexDirty = false;
+        }
+        return sharpTex;
+    };
+
     auto guestView = [&](bool allowZoom) {
         ImGuiIO& io = ImGui::GetIO();
         if (guestW <= 0) {
@@ -655,7 +750,7 @@ int main(int argc, char** argv) {
         float oy = std::max(0.0f, std::floor((avail.y - sz.y) * 0.5f));
         ImGui::SetCursorPos(ImVec2(cur.x + ox, cur.y + oy));
         ImVec2 origin = ImGui::GetCursorScreenPos();
-        ImGui::Image((ImTextureID)(intptr_t)tex, sz);
+        ImGui::Image((ImTextureID)(intptr_t)shownTexture(sz), sz);
         drawOrigin = origin;
         drawSize = sz;
         // IsItemHovered = inside the drawn (and visible, clipped) rectangle,
@@ -799,6 +894,8 @@ int main(int argc, char** argv) {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
         } else if (st.op == "close") {
             glfwSetWindowShouldClose(window, GLFW_TRUE);
+        } else if (st.op == "drop") {
+            gDroppedFiles.push_back(st.arg);
         }
         if (done) {
             journal("probe: %s %s", st.op.c_str(), st.arg.c_str());
@@ -808,6 +905,16 @@ int main(int argc, char** argv) {
             ++probePhase;
         }
     };
+
+    // Tâches de fond : le CD des fichiers déposés, la recherche de mise à jour.
+    BackgroundTask dropTask, updateTask;
+    struct UsbDisk { std::string id, path, label; bool showOnMac = false; };
+    std::vector<UsbDisk> usbDisks, usbReleasing;
+    std::string pendingUsb;
+    bool pendingUsbReadOnly = false, dropReadOnly = false;
+    int usbCounter = 0, usbReleaseTries = 0;
+    double usbReleaseNext = 0;
+    std::string updateFound;
 
     // Ajustement de la fenêtre à l'invité : après 0,7 s sans changement de mode, pour ne pas suivre
     // chaque étape du démarrage (640x480, puis le mode du bureau).
@@ -835,6 +942,7 @@ int main(int argc, char** argv) {
             bridge->mouseIsAbsolute());
         suppressPointerDelta = capture != pointerCaptured;
         if (suppressPointerDelta) {
+            if (capture) showToast("The mouse is captured. Ctrl+Cmd+F, F11 or Alt+Return leaves full screen and releases it.");
             pointerCaptured = capture;
             glfwSetInputMode(window, GLFW_CURSOR, capture ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
 #if GLFW_VERSION_MAJOR > 3 || (GLFW_VERSION_MAJOR == 3 && GLFW_VERSION_MINOR >= 3)
@@ -889,6 +997,7 @@ int main(int argc, char** argv) {
                 fitDone = false;
             }
             guestW = w; guestH = h;
+            guestTexDirty = true;
             glBindTexture(GL_TEXTURE_2D, tex);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
             // QEMU's mac99 scanout is PIXMAN_x8r8g8b8: the high byte is
@@ -910,6 +1019,92 @@ int main(int argc, char** argv) {
 
         // QEMU peut mourir de son côté : sans ce test, le frontend affichait
         // indéfiniment la dernière image en annonçant « en marche ».
+        // Fichiers déposés. Pendant l'étape du CD de l'assistant, c'est le disque d'installation.
+        if (!gDroppedFiles.empty()) {
+            std::vector<std::string> files;
+            files.swap(gDroppedFiles);
+            std::error_code ec;
+            const std::string exchange = root + "/Exchange";
+            if (setup.step() == SetupFlow::Step::Disc && !setup.busy() && files.size() == 1) {
+                setup.placeDisc(files[0], false);
+            } else if (!bridge->running()) {
+                showToast("Start the system first, then drop your files again.");
+            } else if (dropTask.busy()) {
+                showToast("POMPPC is still preparing the previous disk.");
+            } else if (classifyDrop(files) == DropKind::DiscImage && !isCompressedImage(files[0])) {
+                pendingUsb = files[0];
+                pendingUsbReadOnly = true;
+            } else if (classifyDrop(files) != DropKind::Nothing) {
+                fs::create_directories(exchange, ec);
+                std::string name = "From Mac";
+                for (int n = 2; fs::exists(exchange + "/" + name + ".dmg", ec); ++n)
+                    name = "From Mac " + std::to_string(n);
+                const std::string out = exchange + "/" + name + ".dmg";
+                const std::string mount = runtimeDir + "/exchange-mount";
+                if (classifyDrop(files) == DropKind::DiscImage) {
+                    // Un .dmg est compressé : le disque de QEMU veut une image brute.
+                    showToast("Preparing the disc...", 60.0);
+                    const std::string source = files[0], iso = exchange + "/" + name + ".iso";
+                    dropReadOnly = true;
+                    dropTask.start([source, iso](std::string* e) {
+                        return convertDiscImage(source, iso, e) ? iso : std::string();
+                    });
+                } else {
+                    showToast("Preparing a disk with your files...", 60.0);
+                    dropReadOnly = false;
+                    dropTask.start([files, mount, out](std::string* e) {
+                        return buildExchangeDisk(files, mount, out, e) ? out : std::string();
+                    });
+                }
+            }
+        }
+        {
+            std::string built, e;
+            if (dropTask.poll(&built, &e)) {
+                if (built.empty()) {
+                    showToast(e);
+                } else {
+                    pendingUsb = built;
+                    pendingUsbReadOnly = dropReadOnly;
+                }
+            }
+        }
+        if (!pendingUsb.empty()) {
+            const std::string id = "pomppcusb" + std::to_string(++usbCounter);
+            if (usbDisks.size() >= 4) {
+                showToast("Eject a USB disk first, in the Devices menu.");
+            } else if (bridge->attachUsbDisk(pendingUsb, pendingUsbReadOnly, id)) {
+                usbDisks.push_back({id, pendingUsb, fs::path(pendingUsb).stem().string()});
+                showToast("\"" + usbDisks.back().label + "\" is on the desktop of Mac OS.");
+            } else {
+                showToast("POMPPC couldn't connect this disk.");
+            }
+            pendingUsb.clear();
+        }
+        // Un disque éjecté n'est libre qu'une fois le périphérique parti : quelques essais.
+        if (!usbReleasing.empty() && glfwGetTime() >= usbReleaseNext) {
+            usbReleaseNext = glfwGetTime() + 0.5;
+            if (bridge->releaseUsbDisk(usbReleasing.front().id)) {
+                if (usbReleasing.front().showOnMac) openFile(usbReleasing.front().path);
+                usbReleasing.erase(usbReleasing.begin());
+            } else if (++usbReleaseTries > 20) {
+                showToast("POMPPC couldn't release this disk. It will be free when the system stops.");
+                usbReleasing.erase(usbReleasing.begin());
+                usbReleaseTries = 0;
+            }
+        }
+        if (!bridge->running()) { usbDisks.clear(); usbReleasing.clear(); }
+        {
+            std::string tag, e;
+            if (updateTask.poll(&tag, &e)) {
+                const char* mine = std::getenv("POMPPC_VERSION");
+                if (!e.empty()) showToast(e);
+                else if (mine && compareVersions(tag, mine) > 0) updateFound = tag;
+                else if (mine) showToast("POMPPC is up to date.");
+                else showToast("The latest version is " + tag + ".");
+            }
+        }
+
         setup.poll();
         const bool setupPage = setup.active() && !setup.wantsVm();
         if (setup.step() != setupLastStep) {
@@ -1101,6 +1296,30 @@ int main(int argc, char** argv) {
                     bridge->setPaused(paused);
                 }
                 ImGui::Separator();
+                if (ImGui::MenuItem("Save Screenshot", nullptr, false, bridge->running())) {
+                    std::error_code ec;
+                    const std::string dir = root + "/Screenshots";
+                    fs::create_directories(dir, ec);
+                    char stamp[32];
+                    const std::time_t now = std::time(nullptr);
+                    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H.%M.%S", std::localtime(&now));
+                    const std::string file = dir + "/POMPPC " + stamp + ".png";
+                    if (bridge->saveScreenshot(file)) {
+                        showToast("Screenshot saved in the Screenshots folder.");
+                        SetupFlow::runTool({"open", "-R", file});
+                    } else {
+                        showToast("POMPPC couldn't save the screenshot.");
+                    }
+                }
+                if (ImGui::MenuItem("Try Without Saving", nullptr, trySession, !setup.active())) {
+                    const bool next = !trySession;
+                    confirmRestart(next ? "Try without saving?" : "Go back to saving?", [&, next] {
+                        trySession = next;
+                        relaunch(curLauncher);
+                    });
+                }
+                if (ImGui::MenuItem("Preferences...")) showPrefs = true;
+                ImGui::Separator();
                 ImGui::MenuItem("Keyboard to Guest", nullptr, &grabbed);
                 if (ImGui::MenuItem("Absolute Mouse in Window", nullptr, &preferTablet))
                     pointerPrefChanged = true;
@@ -1161,6 +1380,25 @@ int main(int argc, char** argv) {
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
+                if (usbDisks.empty()) {
+                    ImGui::TextDisabled("Drop files on this window to share them with Mac OS");
+                } else {
+                    for (size_t i = 0; i < usbDisks.size(); ++i) {
+                        const std::string label = "Eject \"" + usbDisks[i].label + "\" and Show on Mac";
+                        if (ImGui::MenuItem(label.c_str())) {
+                            UsbDisk d = usbDisks[i];
+                            d.showOnMac = true;
+                            if (bridge->detachUsbDisk(d.id)) {
+                                usbReleasing.push_back(d);
+                                usbDisks.erase(usbDisks.begin() + (long)i);
+                                usbReleaseTries = 0;
+                            }
+                            break;
+                        }
+                    }
+                    ImGui::TextDisabled("Eject the disk in Mac OS first, or recent changes may be lost");
+                }
+                ImGui::Separator();
                 ImGui::TextDisabled("(changing these restarts the machine)");
                 if (ImGui::MenuItem("Sound (Screamer)", nullptr, sound)) {
                     confirmRestart(sound ? "Turn sound off?" : "Turn sound on?", [&] {
@@ -1193,6 +1431,9 @@ int main(int argc, char** argv) {
                 ImGui::MenuItem(kWinBilan, nullptr, &showBilan);
                 ImGui::MenuItem(kWinJournal, nullptr, &showJournal);
                 ImGui::MenuItem(kWinDisks, nullptr, &fe.showDisks);
+                if (ImGui::MenuItem("Sharp Image", nullptr, fe.sharpImage)) fe.sharpImage = true;
+                if (ImGui::MenuItem("Smooth Image", nullptr, !fe.sharpImage)) fe.sharpImage = false;
+                ImGui::Separator();
                 if (ImGui::MenuItem("Fit Window to Guest", nullptr, false, !fullscreen)) {
                     fitView = fe.autoFit = true;
                     showLibrary = showBilan = showJournal = fe.showDisks = false;
@@ -1202,9 +1443,33 @@ int main(int argc, char** argv) {
                 if (ImGui::MenuItem("Default Layout")) resetLayout = true;
                 ImGui::EndMenu();
             }
+            if (ImGui::BeginMenu("Help")) {
+                if (ImGui::MenuItem("POMPPC Guide")) openFile("https://github.com/habib256/pomppc#readme");
+                if (ImGui::MenuItem("Show My Data Folder")) openFile(root);
+                std::error_code logEc;
+                if (ImGui::MenuItem("Show Log", nullptr, false, fs::exists(appLog, logEc))) openFile(appLog);
+                if (ImGui::MenuItem("Report a Problem")) openFile("https://github.com/habib256/pomppc/issues/new");
+                ImGui::Separator();
+                if (ImGui::MenuItem("Check for Updates", nullptr, false, !updateTask.busy())) {
+                    updateTask.start([](std::string* e) {
+                        std::string json;
+                        if (!SetupFlow::runTool({"curl", "-fsSL", "--max-time", "20", "-H", "Accept: application/vnd.github+json",
+                                                 "https://api.github.com/repos/habib256/pomppc/releases/latest"}, &json)) {
+                            *e = "POMPPC couldn't reach GitHub.";
+                            return std::string();
+                        }
+                        const std::string tag = parseLatestTag(json);
+                        if (tag.empty()) *e = "POMPPC couldn't read the latest version.";
+                        return tag;
+                    });
+                }
+                if (ImGui::MenuItem("About POMPPC")) showAbout = true;
+                ImGui::EndMenu();
+            }
             ImGui::TextDisabled("  %dx%d  %s  %s", guestW, guestH,
                                 bridge->running() ? "running" : "stopped",
                                 paused ? "(pause)" : "");
+            if (trySession) { ImGui::SameLine(); ImGui::TextDisabled(" changes won't be saved"); }
             ImGui::EndMainMenuBar();
         }
 
@@ -1289,6 +1554,8 @@ int main(int argc, char** argv) {
                         if (bridge->changeCd(g)) {
                             currentCd = g;
                             journal("CD inserted: %s", prettyName(g).c_str());
+                        } else {
+                            showToast("Eject the current CD in Mac OS first, or drop this disc on the window.");
                         }
                     }
                 }
@@ -1492,6 +1759,100 @@ int main(int argc, char** argv) {
             }
         }
 
+        // ── Preferences ──────────────────────────────────────────────────
+        if (showPrefs) {
+            ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(470, 0), ImGuiCond_Appearing);
+            if (ImGui::Begin("Preferences", &showPrefs, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse)) {
+                const bool tiger = curLauncher == tigerSh;
+                static int draftMem = -1, draftCores = -1;
+                static bool draftTiger = true;
+                const int savedMem = tiger ? fe.memoryTiger : fe.memoryOs9;
+                if (draftMem < 0 || draftTiger != tiger) {
+                    draftMem = savedMem;
+                    draftCores = fe.coresTiger;
+                    draftTiger = tiger;
+                }
+                const int defaultMem = tiger ? 1024 : 512;
+                static const int memTiger[] = {512, 768, 1024};
+                static const int memOs9[] = {256, 512, 768};
+                const int* mem = tiger ? memTiger : memOs9;
+                const int shownMem = draftMem > 0 ? draftMem : defaultMem;
+                ImGui::Text("%s", tiger ? "Mac OS X 10.4 Tiger" : "Mac OS 9.2.2");
+                ImGui::Spacing();
+                if (ImGui::BeginCombo("Memory", (std::to_string(shownMem) + " MB").c_str())) {
+                    for (int i = 0; i < 3; ++i) {
+                        if (ImGui::Selectable((std::to_string(mem[i]) + " MB").c_str(), mem[i] == shownMem))
+                            draftMem = mem[i];
+                    }
+                    ImGui::EndCombo();
+                }
+                if (tiger && sound && effectiveMemoryMb(shownMem, true) < shownMem) {
+                    ImGui::TextWrapped("With sound on, Tiger gets 768 MB: the emulated sound chip needs less than 1 GB. "
+                                       "Turn sound off in the Devices menu to use all of it.");
+                }
+                if (tiger) {
+                    const int shownCores = draftCores > 0 ? draftCores : 2;
+                    if (ImGui::BeginCombo("Processors", std::to_string(shownCores).c_str())) {
+                        if (ImGui::Selectable("1", shownCores == 1)) draftCores = 1;
+                        if (ImGui::Selectable("2", shownCores == 2)) draftCores = 2;
+                        ImGui::EndCombo();
+                    }
+                    ImGui::TextDisabled("Two processors are faster. One is the most stable.");
+                } else {
+                    ImGui::TextDisabled("Mac OS 9 always uses one processor.");
+                }
+                ImGui::Spacing();
+                const bool changed = draftMem != savedMem || (tiger && draftCores != fe.coresTiger);
+                ImGui::BeginDisabled(!changed);
+                if (ImGui::Button("Apply and Restart")) {
+                    confirmRestart("Apply the new settings?", [&, tiger] {
+                        (tiger ? fe.memoryTiger : fe.memoryOs9) = draftMem;
+                        if (tiger) fe.coresTiger = draftCores;
+                        relaunch(curLauncher);
+                    });
+                }
+                ImGui::EndDisabled();
+                ImGui::Separator();
+                ImGui::TextDisabled("Sound and gamepad: Devices menu. Image: View menu.");
+            }
+            ImGui::End();
+        }
+        if (showAbout) { ImGui::OpenPopup("About POMPPC"); showAbout = false; }
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal("About POMPPC", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            const char* mine = std::getenv("POMPPC_VERSION");
+            ImGui::Text("POMPPC %s", mine ? mine : "(development build)");
+            ImGui::TextDisabled("QEMU %s", bridge->qemuVersion().c_str());
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Free software, GPL-3.0-or-later.");
+            if (ImGui::Button("OK")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        if (!updateFound.empty()) ImGui::OpenPopup("Update Available");
+        ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal("Update Available", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("POMPPC %s is available.", updateFound.c_str());
+            if (ImGui::Button("Later")) { updateFound.clear(); ImGui::CloseCurrentPopup(); }
+            ImGui::SameLine();
+            if (ImGui::Button("Open the Download Page")) {
+                openFile("https://github.com/habib256/pomppc/releases/latest");
+                updateFound.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+        // ── Message discret ──────────────────────────────────────────────
+        if (glfwGetTime() < toastUntil) {
+            ImDrawList* dl = ImGui::GetForegroundDrawList();
+            const ImVec2 size = ImGui::CalcTextSize(toastText.c_str());
+            const ImVec2 view = ImGui::GetMainViewport()->Size;
+            const ImVec2 at((view.x - size.x) * 0.5f, 36.0f);
+            dl->AddRectFilled(ImVec2(at.x - 12, at.y - 7), ImVec2(at.x + size.x + 12, at.y + size.y + 7),
+                              IM_COL32(20, 24, 32, 235), 6.0f);
+            dl->AddText(at, IM_COL32_WHITE, toastText.c_str());
+        }
+
         // Clipboard bridge: offer host clipboard to the guest (throttled poll),
         // and paste any text the guest copied onto the host clipboard.
         static int clipTick = 0;
@@ -1589,6 +1950,7 @@ int main(int argc, char** argv) {
                 glfwSetWindowMonitor(window, mon, 0, 0, vm->width, vm->height,
                                      vm->refreshRate);
                 fullscreen = true;
+                showToast("Ctrl+Cmd+F, F11 or Alt+Return leaves full screen.");
                 journal("full screen: %s %dx%d @%d Hz", glfwGetMonitorName(mon),
                         vm->width, vm->height, vm->refreshRate);
             } else {

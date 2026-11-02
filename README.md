@@ -166,6 +166,24 @@ only the system, at its real size. **View** opens the other panels, and **Fit Wi
 back the original size. In this archive,
 the scripts' Terminal messages are in French.
 
+### Sharing files with Mac OS
+
+**Drop files or folders on the POMPPC window.** A disk named *From Mac* appears on the desktop of Mac OS.
+It has room to spare, so Mac OS can also write on it. When you're done, eject the disk in Mac OS, then
+choose **Devices ▸ Eject "From Mac" and Show on Mac**: it opens on your Mac with everything Mac OS wrote.
+These disks are kept in `~/POMPPC/Exchange`.
+
+**Drop a disc image** (`.iso`, `.toast`, `.cdr`, `.img`, `.dmg`) to connect it read-only in the same way.
+
+### Settings
+
+**Machine ▸ Preferences...** sets the memory and, for Tiger, the number of processors. Tiger gets at most
+768 MB with sound on, because the emulated sound chip needs less than 1 GB.
+
+**Machine ▸ Try Without Saving** restarts the system so that nothing it does is kept: handy to try
+something risky. **Machine ▸ Save Screenshot** saves the screen in `~/POMPPC/Screenshots`. **View** sets
+a sharp or smooth image, and **Help** has this guide, your data folder, the log and the update check.
+
 ### Quitting POMPPC
 
 Use **Machine ▸ Shut Down**, or just close the window. Mac OS then asks you to confirm, as on a real

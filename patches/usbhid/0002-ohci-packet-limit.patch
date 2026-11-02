@@ -1,0 +1,30 @@
+diff --git a/hw/usb/hcd-ohci.c b/hw/usb/hcd-ohci.c
+index c4a9741..cc25dbd 100644
+--- a/hw/usb/hcd-ohci.c
++++ b/hw/usb/hcd-ohci.c
+@@ -43,6 +43,16 @@
+ /*#define OHCI_TIME_WARP 1*/
+ 
+ #define ED_LINK_LIMIT 32
++/*
++ * POMPPC: the guard against a TD loop in one ED counted packets, not TDs, and a
++ * TD is served one packet at a time. [A] Tiger 10.4.11, on a USB disk: one bulk
++ * OUT TD of 2112 bytes is 33 packets of 64, so the guard fired and ohci_die()
++ * took the keyboard and the tablet down with the disk. A real controller has no
++ * such limit. Keep a guard against a looping list, at what ED_LINK_LIMIT TDs of
++ * the largest size (8192 bytes) need at the smallest packet size (8 bytes).
++ * [D] QEMU hw/usb/hcd-ohci.c @ v11.1.2 for the original check.
++ */
++#define ED_PKT_LIMIT (ED_LINK_LIMIT * 8192 / 8)
+ 
+ static int64_t usb_frame_time;
+ static int64_t usb_bit_time;
+@@ -1176,7 +1186,7 @@ static int ohci_service_ed_list(OHCIState *ohci, uint32_t head)
+                 }
+             }
+ 
+-            if (ed_cnt++ > ED_LINK_LIMIT) {
++            if (ed_cnt++ > ED_PKT_LIMIT) {
+                 qemu_log_mask(LOG_GUEST_ERROR,
+                               "ohci: Too many endpoint descriptors in loop\n");
+                 ohci_die(ohci);

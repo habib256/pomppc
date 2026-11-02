@@ -45,6 +45,7 @@
 #   • vperm en ligne, PSHUFB sur x86 (x-vperm-inline, x-vperm-verify) — patches/tcg/0059
 #   • tête de bloc allégée : can_do_io déduit, goto_tb avant après la vérification (x-tb-head) — patches/tcg/0064
 #   • la tablette USB juste sous Tiger 10.4.11 (x-abs-margin)  — patches/usbhid/0001
+#   • le contrôleur USB qui ne meurt plus sur un long transfert — patches/usbhid/0002
 #   • slirp (réseau user-mode) et le son de l'hôte (PulseAudio et ALSA sous Linux,
 #     CoreAudio sous macOS), exigés explicitement
 #
@@ -1277,6 +1278,15 @@ if ! grep -q "abs_margin_pct" include/hw/input/hid.h; then
 fi
 grep -q "x-abs-margin" hw/usb/dev-hid.c || {
   echo "⚠ patch usbhid 0001 incomplet : x-abs-margin absent de hw/usb/dev-hid.c" >&2; exit 1; }
+# patches/usbhid/0002 : le garde-fou de l'OHCI comptait les paquets, pas les TD : un seul transfert de
+# plus de 32 paquets tuait le contrôleur, clavier et tablette compris (disque USB sous Tiger).
+if ! grep -q "ED_PKT_LIMIT" hw/usb/hcd-ohci.c; then
+  echo "▶ patch : garde-fou de l'OHCI sur les TD, pas sur les paquets"
+  patch_strict "$ROOT/patches/usbhid/0002-ohci-packet-limit.patch"
+  rm -f hw/usb/hcd-ohci.c.orig
+fi
+grep -q "ed_cnt++ > ED_PKT_LIMIT" hw/usb/hcd-ohci.c || {
+  echo "⚠ patch usbhid 0002 incomplet : ED_PKT_LIMIT absent de hw/usb/hcd-ohci.c" >&2; exit 1; }
 
 # --- 5. Build ---
 # QEMU_OPT (éteint par défaut, docs/vitesse-doom3-x86.md) : variantes de

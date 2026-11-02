@@ -158,6 +158,13 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   installer pass `POMPPC_NO_REBOOT=1`, so QEMU exits when the guest restarts and the next step starts.
   The driver step ends when `qom-get gpu0 guest-driver` is true (IRQ_MASK armed by the kext).
   `POMPPC_SETUP_CHOOSE=<file>` replaces macOS's file window in a test.
+- **Dropping files.** Files or folders become a writable HFS+ disk in `Exchange/`, hot-plugged as
+  `usb-storage` (QMP `blockdev-add`, `device_add`); a lone disc image is connected read-only, a `.dmg`
+  being converted first. **Devices ▸ Eject** removes the device, then opens the disk on the host. The IDE CD
+  drive can't do this: Mac OS locks it while a CD is mounted, and a forced swap goes unseen by Tiger.
+- **Preferences, image, session.** Memory and processors go to the launchers (`RAM_MB`, `OS9_RAM`, `SMP`).
+  **Sharp Image** multiplies the pixels by an integer through an FBO, then scales in bilinear; **Smooth**
+  is bilinear. **Try Without Saving** passes `SNAPSHOT=1` for this session only.
 - **Quit and restarts.** Closing the window, or **Machine ▸ Quit**, asks first while the guest runs:
   **Shut Down** sends the power key (`send-key power`), the guest shows its own dialog, and the front
   end closes when QEMU exits. `system_powerdown` has no effect on mac99. Sound, gamepad, system and
@@ -202,7 +209,7 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   pointer mode; **Log** records launches, CDs, scanout changes, switches and left clicks
   (host point → guest pixel).
 
-`glshot <file.ppm>` captures the window alone, without screen-recording rights, and `close` acts like
+`drop <path>` acts like a file dropped on the window. `glshot <file.ppm>` captures the window alone, without screen-recording rights, and `close` acts like
 the window's close button. `POMPPC_FE_SCRIPT` plays a test script through ImGui's input queue (same path as the real
 mouse and keyboard, no macOS Accessibility permission needed) and takes captures, e.g.:
 

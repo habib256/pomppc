@@ -27,6 +27,9 @@ struct FrontendSettings {
     bool showBilan = false;
     bool showJournal = false;
     bool showDisks = false;
+    int memoryTiger = 0, memoryOs9 = 0;   // Mo ; 0 = le défaut du lanceur
+    int coresTiger = 0;                   // 0 = le défaut du lanceur
+    bool sharpImage = true;               // agrandissement net, ou lissé
     bool autoFit = true;         // la fenêtre suit la taille de l'invité, jusqu'à un redimensionnement
     DiskSelection tigerDisks, os9Disks;   // panneau Disks ; vides = les disques par défaut
     bool fullscreen = false;

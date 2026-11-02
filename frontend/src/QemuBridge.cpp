@@ -1226,6 +1226,32 @@ int QemuBridge::selectMouse(bool absolute) {
     return qmpCommand(cmd) ? pick : -1;
 }
 bool QemuBridge::reset() { return qmpCommand("{\"execute\":\"system_reset\"}"); }
+// Un disque USB branché à chaud : le moyen d'échanger des fichiers sans pilote côté invité.
+// [A] Mesuré sous Tiger 10.4.11 (M4, 02/11) : monté sur le bureau, lu et écrit, relu ensuite sur le Mac.
+bool QemuBridge::attachUsbDisk(const std::string& path, bool readOnly, const std::string& id) {
+    if (!qmpCommand("{\"execute\":\"blockdev-add\",\"arguments\":{\"driver\":\"raw\",\"node-name\":\"" + id +
+                    "n\",\"read-only\":" + (readOnly ? "true" : "false") +
+                    ",\"file\":{\"driver\":\"file\",\"filename\":\"" + jsonEsc(path) + "\"}}}")) {
+        return false;
+    }
+    if (!qmpCommand("{\"execute\":\"device_add\",\"arguments\":{\"driver\":\"usb-storage\",\"id\":\"" + id +
+                    "\",\"drive\":\"" + id + "n\",\"removable\":true}}")) {
+        qmpCommand("{\"execute\":\"blockdev-del\",\"arguments\":{\"node-name\":\"" + id + "n\"}}");
+        return false;
+    }
+    return true;
+}
+bool QemuBridge::detachUsbDisk(const std::string& id) {
+    return qmpCommand("{\"execute\":\"device_del\",\"arguments\":{\"id\":\"" + id + "\"}}");
+}
+// Rendu une fois le périphérique parti : le fichier n'est libre qu'après.
+bool QemuBridge::releaseUsbDisk(const std::string& id) {
+    return qmpCommand("{\"execute\":\"blockdev-del\",\"arguments\":{\"node-name\":\"" + id + "n\"}}");
+}
+bool QemuBridge::saveScreenshot(const std::string& pngPath) {
+    return qmpCommand("{\"execute\":\"screendump\",\"arguments\":{\"filename\":\"" +
+                      jsonEsc(pngPath) + "\",\"format\":\"png\"}}");
+}
 // [A] Mesuré sous Tiger 10.4.11 et Mac OS 9.2.2 (M4, 02/11) : la touche ouvre le dialogue d'arrêt de
 // l'invité, et QEMU sort une fois l'invité éteint. system_powerdown n'a, lui, aucun effet sur mac99.
 bool QemuBridge::pressPowerKey() {
@@ -1239,6 +1265,8 @@ bool QemuBridge::ejectCd(const std::string& id) {
     return qmpCommand("{\"execute\":\"eject\",\"arguments\":{\"device\":\"" +
                       id + "\",\"force\":true}}");
 }
+// Mac OS verrouille le lecteur quand un CD y est monté : refusé tant qu'il ne l'a pas éjecté. Forcer ne
+// sert à rien : [A] mesuré sous Tiger 10.4.11 (M4, 02/11), QEMU change le média et Tiger ne le voit pas.
 bool QemuBridge::changeCd(const std::string& path, const std::string& id) {
     return qmpCommand(
         "{\"execute\":\"blockdev-change-medium\",\"arguments\":{\"device\":\"" +

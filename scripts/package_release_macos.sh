@@ -111,6 +111,7 @@ TP="$OUT/THIRD-PARTY-LICENSES"; mkdir -p "$TP"
   echo "OpenBIOS (GPL-2.0): patches/smp-mac99/openbios-smp-screamer.elf, source in"
   echo "  patches/smp-mac99/openbios-smp-screamer-source.patch."
   echo "Dear ImGui (MIT, https://github.com/ocornut/imgui), statically linked in bin/pomppc."
+  echo "Roboto (Apache-2.0, https://github.com/googlefonts/roboto), embedded in bin/pomppc."
   echo
   echo "Dynamic libraries in lib/, built from the upstream sources of these versions, as listed by"
   echo "Homebrew (scripts/build_release_deps_macos.sh; license texts in this folder):"

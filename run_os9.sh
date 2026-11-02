@@ -37,7 +37,7 @@ source "$ROOT/scripts/caps.sh"
 source "$ROOT/scripts/os9_cpu.sh"
 
 # OS9_DISK / OS9_CD viennent de config.env (surchargeables par l'environnement).
-RAM=512
+RAM="${OS9_RAM:-512}"   # Preferences du frontal
 MODE="${1:-${POMPPC_OS9_MODE:-auto}}"   # POMPPC_OS9_MODE : le frontal lance ce script sans argument
 
 # --- Souris absolue/fluide via USB tablet (extension invité kanjitalk755) ---

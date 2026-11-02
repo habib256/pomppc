@@ -70,6 +70,13 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
 
+# ─── Police de l'interface, embarquée dans l'exécutable ──────────────────
+# Roboto (Apache-2.0), fournie avec Dear ImGui : vectorielle, donc nette à toute densité d'écran.
+set(FONT_HEADER ${CMAKE_CURRENT_BINARY_DIR}/roboto_font.h)
+file(READ ${IMGUI_DIR}/misc/fonts/Roboto-Medium.ttf FONT_HEX HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," FONT_BYTES "${FONT_HEX}")
+file(WRITE ${FONT_HEADER} "static const unsigned char kRobotoFont[] = {${FONT_BYTES}};\n")
+
 # ─── Frontend executable ─────────────────────────────────────────────────
 add_executable(pomppc
     src/main.cpp
@@ -79,8 +86,9 @@ add_executable(pomppc
     src/DiskConfig.cpp
     src/SetupFlow.cpp
     src/SetupUi.cpp
+    src/AppExtras.cpp
     ${IMGUI_SOURCES})
-target_include_directories(pomppc PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
+target_include_directories(pomppc PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
 if(APPLE)
     enable_language(OBJCXX)
     set_property(TARGET pomppc PROPERTY OBJCXX_STANDARD 17)
@@ -124,6 +132,11 @@ if(BUILD_TESTING)
     target_include_directories(disks_test PRIVATE src)
     target_compile_options(disks_test PRIVATE -UNDEBUG)
     add_test(NAME disk_choice COMMAND disks_test)
+    add_executable(extras_test tests/extras_test.cpp src/AppExtras.cpp src/SetupFlow.cpp src/DiskConfig.cpp)
+    target_include_directories(extras_test PRIVATE src)
+    target_compile_options(extras_test PRIVATE -UNDEBUG)
+    target_link_libraries(extras_test PRIVATE Threads::Threads)
+    add_test(NAME app_extras COMMAND extras_test)
     add_executable(setup_test tests/setup_test.cpp src/SetupFlow.cpp src/DiskConfig.cpp)
     target_include_directories(setup_test PRIVATE src)
     target_compile_options(setup_test PRIVATE -UNDEBUG)

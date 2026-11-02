@@ -91,6 +91,10 @@ public:
 
     // ── Machine control over QMP (thread-safe; runs on the caller thread) ──
     bool reset();                         // system_reset
+    bool saveScreenshot(const std::string& pngPath);
+    bool attachUsbDisk(const std::string& path, bool readOnly, const std::string& id);
+    bool detachUsbDisk(const std::string& id);
+    bool releaseUsbDisk(const std::string& id);
     bool pressPowerKey();                 // la touche d'alimentation : l'invité propose de s'éteindre
     bool exitedCleanly() const { return qemuReaped_ && exitedCleanly_; }
     bool setPaused(bool paused);          // stop / cont

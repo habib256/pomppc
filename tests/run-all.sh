@@ -108,6 +108,11 @@ else
   noop "disks_test non construit (cmake --build frontend/build)"
 fi
 if ./tests/disques_test.sh >/dev/null 2>&1; then ok "disques des lanceurs"; else ko "disques des lanceurs"; fi
+if [ -x frontend/build/extras_test ]; then
+  if frontend/build/extras_test >/dev/null; then ok "fichiers déposés, mémoire, versions"; else ko "fichiers déposés, mémoire, versions"; fi
+else
+  noop "extras_test non construit (cmake --build frontend/build)"
+fi
 if [ -x frontend/build/setup_test ]; then
   if frontend/build/setup_test >/dev/null; then ok "assistant de premier lancement"; else ko "assistant de premier lancement"; fi
 else
