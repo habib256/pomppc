@@ -30,6 +30,10 @@ OS9_NOM="Mac OS 9.2.2"
 OS9_PAGE="https://macintoshgarden.org/apps/mac-os-922-universal"
 OS9_FICHIER="macos-922-uni.zip"
 OS9_MD5="5ba031dfd678a74b9dee414af93ea514"
+# [B] Apple publie ce fichier gratuitement, et son SHA-1 : https://support.apple.com/kb/dl170.
+# L'assistant peut donc le télécharger lui-même, contrairement au système complet.
+COMBO_URL="https://download.info.apple.com/Mac_OS_X/061-3461.20071114.8Uy45/MacOSXUpdCombo10.4.11PPC.dmg"
+COMBO_SHA1="3d403bfa769424c61a3cfac173f8527658f9d4af"
 
 SCRIPT_DIALOGUE='on run argv
   set b to items 2 thru -1 of argv
@@ -127,6 +131,9 @@ creer_disque() {
   fi
   "$SRC/bin/qemu-img" create -f qcow2 "$(disque_de "$os")" "${go}G" >>"$D/.run/app.log" 2>&1 ||
     erreur "Creating the disk failed: see $D/.run/app.log"
+  # Avant le combo, Tiger n'a pas la marge de tablette de 10.4.11 : le pointeur serait décalé
+  # (docs/tablette-tiger-10.4.11.md). preparer_combo la rétablit une fois le combo passé.
+  if [ "$os" = tiger ]; then echo 0 > "$(disque_de tiger).tablet-margin"; fi
 }
 
 importer_disque() {
@@ -287,8 +294,83 @@ reprendre_installation() {
   local os
   os="$(cat "$D/.run/installation-en-cours")"
   case "$(dialogue "Has the $(nom_de "$os") installation finished?" "Quit" "Resume Installing" "Yes, Start It")" in
-    "Yes, Start It") rm -f -- "${D:?}/.run/installation-en-cours" ;;
+    "Yes, Start It")
+      rm -f -- "${D:?}/.run/installation-en-cours"
+      if [ "$os" = tiger ]; then : > "$D/.run/combo-a-proposer"; fi ;;
     "Resume Installing") lancer_installateur "$os" ;;
+    *) exit 0 ;;
+  esac
+}
+
+# telecharger_combo sortie : le combo d'Apple, avec une fenêtre pour annuler. 1 si annulé ou raté.
+telecharger_combo() {
+  local sortie="$1" pc pd
+  curl -fsSL --retry 3 -o "$sortie.tmp" "$COMBO_URL" 2>>"$D/.run/app.log" &
+  pc=$!
+  osascript -e "$SCRIPT_DIALOGUE" -- "Downloading the Mac OS X 10.4.11 update from Apple (181 MB)..." "Cancel" >/dev/null 2>&1 &
+  pd=$!
+  while kill -0 "$pc" 2>/dev/null; do
+    if ! kill -0 "$pd" 2>/dev/null; then
+      kill "$pc" 2>/dev/null
+      wait "$pc" 2>/dev/null
+      rm -f -- "${sortie:?}.tmp"
+      return 1
+    fi
+    sleep 1
+  done
+  kill "$pd" 2>/dev/null
+  wait "$pd" 2>/dev/null
+  wait "$pc" || { rm -f -- "${sortie:?}.tmp"; return 1; }
+  if [ "$(shasum -a 1 "$sortie.tmp" | cut -d' ' -f1)" != "$COMBO_SHA1" ]; then
+    rm -f -- "${sortie:?}.tmp"
+    return 1
+  fi
+  mv "$sortie.tmp" "$sortie"
+}
+
+# preparer_combo : 0 si le combo est prêt à installer ; 1 si l'utilisateur le saute.
+preparer_combo() {
+  local dmg="$D/disks/MacOSXUpdCombo10.4.11PPC.dmg" iso="$D/disks/combo-10.4.11.iso"
+  case "$(dialogue "Tiger needs its last update, 10.4.11, for POMPPC's 3D games and mouse to work as tested. Apple offers it for free.
+
+Install it before the 3D driver." "Quit" "Skip" "Download from Apple")" in
+    "Download from Apple") ;;
+    Skip) return 1 ;;
+    *) exit 0 ;;
+  esac
+  until [ -s "$dmg" ] || telecharger_combo "$dmg"; do
+    case "$(dialogue "The download didn't finish, or the file doesn't match Apple's checksum." "Quit" "Try Again")" in
+      "Try Again") ;;
+      *) exit 0 ;;
+    esac
+  done
+  ranger_media "$dmg" "$iso" lien || erreur "Preparing the update failed: see $D/.run/app.log"
+  rm -f -- "${dmg:?}"
+  : > "$D/.run/combo-en-cours"
+  return 0
+}
+
+dire_combo() {
+  dialogue "Tiger will now start with the update's CD on its desktop.
+
+1. Open the CD and double-click MacOSXUpdCombo10.4.11PPC.pkg.
+2. Follow the installer, then restart Tiger when it asks. It takes a while under emulation.
+3. Once Tiger is back, quit POMPPC and open it again." "OK" >/dev/null || exit 0
+}
+
+# etape_combo : 0 si Tiger doit démarrer avec le CD du combo, 1 sinon.
+etape_combo() {
+  if [ -f "$D/.run/combo-a-proposer" ]; then
+    rm -f -- "${D:?}/.run/combo-a-proposer"
+    if preparer_combo; then dire_combo; return 0; fi
+    return 1
+  fi
+  [ -f "$D/.run/combo-en-cours" ] || return 1
+  case "$(dialogue "Has the 10.4.11 update finished, and has Tiger restarted?" "Quit" "Not Yet" "Yes")" in
+    Yes)
+      rm -f -- "${D:?}/.run/combo-en-cours" "${D:?}/disks/combo-10.4.11.iso" "${D:?}/disks/tiger.qcow2.tablet-margin"
+      return 1 ;;
+    "Not Yet") dire_combo; return 0 ;;
     *) exit 0 ;;
   esac
 }
@@ -323,7 +405,10 @@ principal() {
                 exit(flock($f, LOCK_EX | LOCK_NB) ? 0 : 1)' "$D/.run/$verrou"; then
     erreur "POMPPC is already running."
   fi
-  [ "$lanceur" = run_tiger.sh ] && dire_pilote
+  # Le combo avant le pilote : POMPPCFsqrt est lié à la version exacte du noyau.
+  if [ "$lanceur" = run_tiger.sh ]; then
+    if etape_combo; then export POMPPC_CD="$D/disks/combo-10.4.11.iso"; else dire_pilote; fi
+  fi
   # Sans outils de développement, /usr/bin/python3 ouvrirait une fenêtre d'installation. Le relais
   # web de Tiger est le seul à en dépendre au démarrage : il attend ces outils.
   xcode-select -p >/dev/null 2>&1 || export WEBPROXY=0

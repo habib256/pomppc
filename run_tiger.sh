@@ -142,6 +142,7 @@
 #                             # x-abs-margin, patches/usbhid/0001) — pour un invité ≤ 10.4.10 ;
 #                             # ou une fois pour toutes : echo 0 > disks/tiger.qcow2.tablet-margin
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
+#   POMPPC_CD=<image> ./run_tiger.sh  # cette image dans 'gamecd' à la place du CD de l'invité
 #   GLISO=0 ./run_tiger.sh    # omet le CD de l'invité dans 'gamecd' : pomppc-guest.iso du
 #                             # paquet publié s'il est là, sinon l'ISO des sources du plugin
 #                             # GL (disks/pomppc-src.iso) ; implicite avec le GPU (GLISO=1 pour forcer)
@@ -1269,7 +1270,10 @@ fi
 #     correspond toujours au dépôt. Dans l'invité, il apparaît comme POMPPCSRC.
 GLISO_WANT="${GLISO:-}"
 [ -z "$GLISO_WANT" ] && [ -n "$GPU_ON" ] && GLISO_WANT=1
-if [ "$GLISO_WANT" = 1 ] && [ -f "$ROOT/pomppc-guest.iso" ]; then
+if [ -n "${POMPPC_CD:-}" ] && [ -f "$POMPPC_CD" ]; then
+  # POMPPC.app : le CD du combo 10.4.11, à installer avant le pilote
+  CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom,format=raw,readonly=on,file=$POMPPC_CD")
+elif [ "$GLISO_WANT" = 1 ] && [ -f "$ROOT/pomppc-guest.iso" ]; then
   # paquet publié : binaires invités déjà compilés (scripts/make_guest_iso.sh)
   CD_ARGS=(-drive "id=gamecd,if=ide,media=cdrom,format=raw,readonly=on,file=$ROOT/pomppc-guest.iso")
   echo "  💿 CD POMPPC_GUEST inserted. In Tiger (once, Terminal), then reboot:"

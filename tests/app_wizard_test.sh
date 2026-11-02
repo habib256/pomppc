@@ -170,5 +170,48 @@ rep "$T/autre.bin" "OK"
 sortie_de importer_disque tiger
 verifie "autre format refusé" absent "$D/disks/tiger.qcow2"
 
+echo "== combo 10.4.11"
+curl() { # écrit le fichier demandé : -o chemin
+  while [ $# -gt 0 ]; do
+    if [ "$1" = -o ]; then printf '%s' "${CONTENU:-combo}" > "$2"; fi
+    shift
+  done
+}
+# shellcheck disable=SC2034 # lu par telecharger_combo
+COMBO_SHA1="$(printf combo | shasum -a 1 | cut -d' ' -f1)"
+ranger_media() { echo cd > "$2"; }
+marge="$D/disks/tiger.qcow2.tablet-margin"
+rep "16 GB (recommended)"; creer_disque tiger
+verifie "disque neuf : marge de tablette à 0" grep -q '^0$' "$marge"
+: > "$D/.run/installation-en-cours"; echo tiger > "$D/.run/installation-en-cours"
+rep "Yes, Start It"; reprendre_installation
+verifie "fin d'installation : combo à proposer" test -f "$D/.run/combo-a-proposer"
+rep "Skip" "OK"
+sans_combo() { ! etape_combo; }
+verifie "combo sauté : pas de CD du combo" sans_combo
+verifie "combo sauté : marge gardée" test -f "$marge"
+: > "$D/.run/combo-a-proposer"
+rep "Download from Apple" "OK"
+verifie "combo téléchargé : Tiger démarre avec son CD" etape_combo
+verifie "combo : CD prêt" test -s "$D/disks/combo-10.4.11.iso"
+verifie "combo : dmg retiré" absent "$D/disks/MacOSXUpdCombo10.4.11PPC.dmg"
+verifie "combo : en cours" test -f "$D/.run/combo-en-cours"
+rep "Not Yet" "OK"
+verifie "pas fini : CD gardé" etape_combo
+verifie "pas fini : marge gardée" test -f "$marge"
+rep "Yes"
+verifie "fini : le pilote peut suivre" sans_combo
+verifie "fini : marge de 10.4.11 rétablie" absent "$marge"
+verifie "fini : CD retiré" absent "$D/disks/combo-10.4.11.iso"
+verifie "fini : plus de marqueur" absent "$D/.run/combo-en-cours"
+CONTENU=faux
+: > "$D/.run/combo-a-proposer"
+rep "Download from Apple" "Quit"
+sortie_de etape_combo
+verifie "SHA-1 faux : rien de gardé" absent "$D/disks/MacOSXUpdCombo10.4.11PPC.dmg"
+verifie "SHA-1 faux : rien de temporaire" absent "$D/disks/MacOSXUpdCombo10.4.11PPC.dmg.tmp"
+verifie "SHA-1 faux : pas de CD" absent "$D/disks/combo-10.4.11.iso"
+pkill -f 'sleep 30' 2>/dev/null
+
 echo "$echoues échec(s)"
 [ "$echoues" = 0 ]

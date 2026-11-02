@@ -76,9 +76,12 @@ get the installation disc.
       copyrighted software, so only download it if you're entitled to use it.
    4. In the installer, use Disk Utility to erase the disk as *Mac OS Extended*, then install on it.
       When it finishes, close the window and open POMPPC again.
-4. **Tiger only:** once it has started, install the 3D driver. Open Terminal inside Tiger (in
-   Applications, Utilities) and type the line below, then restart Tiger. Do this again after each
-   POMPPC update.
+4. **Tiger only, in this order:**
+   1. Open POMPPC again and choose **Download from Apple** to get the free 10.4.11 update. Tiger
+      starts with its CD: open it, double-click `MacOSXUpdCombo10.4.11PPC.pkg`, install and restart
+      Tiger, then quit POMPPC and open it again.
+   2. Install the 3D driver. Open Terminal inside Tiger (in Applications, Utilities) and type the
+      line below, then restart Tiger. Do this again after each POMPPC update.
 
    ```sh
    sudo sh /Volumes/POMPPC_GUEST/install.sh

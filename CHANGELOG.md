@@ -18,7 +18,9 @@ Terminal sur le Mac (`scripts/package_app_macos.sh`). Sans disque au premier lan
 fait choisir Tiger ou OS 9, crée un disque de la taille voulue ou importe un disque existant, puis
 obtient le CD d'installation : média de l'utilisateur, ou page de Macintosh Garden ouverte dans le
 navigateur, fichier repris tout seul dans Téléchargements et contrôlé par MD5. L'app ne télécharge
-rien elle-même. Les données vivent dans `~/POMPPC`. Signature ad hoc, faute de certificat Apple
+pas le système elle-même. Pour Tiger, elle télécharge ensuite le combo 10.4.11 chez Apple, qui le
+distribue gratuitement (SHA-1 contrôlé), le fait installer avant le pilote et règle la marge de la
+tablette selon la version. Les données vivent dans `~/POMPPC`. Signature ad hoc, faute de certificat Apple
 Developer : macOS demande un accord au premier lancement. Le frontal et l'assistant passent en
 anglais ; le menu OS grise un système sans disque ; `run_os9.sh` ne dépend plus de python3 au
 démarrage. README refondu autour de l'app. QEMU et les binaires invités sont ceux de la 0.4.
