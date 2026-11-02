@@ -214,7 +214,7 @@ sans Homebrew** (les 25 binaires, garde-fou `MIN_MACOS`) ; recette et arbres dan
 `docs/publier-macos.md`. Archive éprouvée sous macOS 27 sur un M4 seulement, les notes le disent.
 
 **0.4.1 préparée, non publiée (21 h).** `POMPPC.app` dans `dist/POMPPC-0.4.1-macos-arm64.dmg`, commit
-`54416f8` : assistant de premier lancement, combo 10.4.11 téléchargé chez Apple avant le pilote, données dans `~/POMPPC`, frontal en anglais. Essayée
+`f5ea5a4` : assistant de premier lancement, combo 10.4.11 téléchargé chez Apple avant le pilote, données dans `~/POMPPC`, frontal en anglais. Essayée
 ici depuis le `.dmg` avec Tiger et OS 9 ; assistant couvert par `tests/app_wizard_test.sh`, réponses
 simulées. L'assistant ouvre la page de Macintosh Garden et attend le fichier : il ne télécharge rien
 lui-même. **Pas éprouvé :** accord de Gatekeeper sur une app réellement téléchargée, clics réels dans
@@ -230,7 +230,7 @@ dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une c
 
 **Ergonomie, lot 3 (23 h, dans la 0.4.1).** Assistant unique dans le frontal (`SetupFlow`, `SetupUi`), reprise
 par `.run/setup.state` ; `-no-reboot` enchaîne les étapes d'installation ; installateur `Install POMPPC.app`
-compilé dans Tiger (job `prebuilt`) ; propriété `guest-driver` de qgpu-pci. **`patches/qgpu/qgpu-pci.c` a changé :
+compilé dans Tiger (job `prebuilt`) ; propriété `guest-driver` de qgpu-pci. Essayé au clic (`POMPPC_FE_SCRIPT`) depuis le `.dmg` : pages, reprise, faux CD (Open Firmware), étape écourtée, vrai combo téléchargé chez Apple et son CD dans Tiger, puis pilote retiré d'un clone, **Install POMPPC**, mot de passe, redémarrage, détection. **Pas éprouvé : un vrai installateur de Tiger ou d'OS 9 (pas de média ici : le démarrage `cd:,\\\\:tbxi`, le `-no-reboot` à la fin réelle), l'application réelle du combo sur une 10.4.6, la fenêtre de fichiers de macOS (remplacée par `POMPPC_SETUP_CHOOSE`), le vrai navigateur. **`patches/qgpu/qgpu-pci.c` a changé :
 le PC reconstruit `build/` et `build-fast/`.** Reste le lot 4.
 
 **Panneau Disks (21 h 30, dans la 0.4.1).** Démarrage + 2 disques au plus, HD ou SSD, création.
