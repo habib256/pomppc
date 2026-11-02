@@ -9,6 +9,11 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **M4 : l'attente d'UT identifiée dans `delay_idle`, 02/11.** Mappage des piles arm64
+  vers les instructions invitées, puis registre LR à `mach_absolute_time` : boucle
+  d'attente active SMP du noyau xnu-792.24.17, source Apple concordante. Pas de raccourci
+  invité ajouté ; identité du noyau à vérifier sur le PC (`re/ut-attente-m4.md`).
+  `samplejit.py` conserve les ambiguïtés, six tests et deux mutants détectés.
 - **M4 : variante d'attente sous la milliseconde mesurée et écartée, 02/11.** `tcg/0065`,
   `POLLNS=2` : `select` uniquement pour 0 < délai < 1 ms ; le mode 1 reste entier,
   aucun allumage. 56 contrôles du contrat/routage, deux mutants de frontière détectés ;

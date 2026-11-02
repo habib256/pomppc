@@ -129,8 +129,10 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      des cinq jeux clos à 4 h 30 : écartée**, zen −8,20 % mais UT +10,06 % (mode 1
      corrigé : −9,60 / +10,59 %) ; autres écarts sous 3 % et inconclusifs, cmr inclus.
      `archive/m4-pollns-court-0211`, `tcg-g4.md` §42.2. Le levier reste éteint. Sur UT,
-     travail d'horloge 0,013→0,18 cœur et charge vCPU 1,07→1,63 : appelant invité encore
-     à identifier avant de conclure à une simple contention de verrou.
+     travail d'horloge 0,013→0,18 cœur et charge vCPU 1,07→1,63 : **appelant identifié**
+     sur le M4 dans `delay_idle` (noyau xnu-792.24.17, attente active SMP),
+     `docs/re/ut-attente-m4.md`. Répartir la perte entre réveils, attente et verrou avant
+     un nouveau levier ; aucune attente du noyau n'est supprimée.
   4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
      sur un goulot L1i propre au PC.
   5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle
@@ -175,12 +177,14 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      ~2 000 écritures de BAT par seconde de cmr (32 pages chacune), puis essayer **x8 +
      `tcg/0063`** (plus de vidage du cache de sauts sur un DBAT) ; l'un sans l'autre a été
      mesuré, pas les deux.
-  4. **Base de temps** : `helper_load_tbu/tbl` 14 % du vCPU sur ut, 3 % sur zen. D'abord
-     identifier la boucle chaude du noyau `0x33f3c-0x33fec` (11,7 % du vCPU d'ut, près de
-     `_idle_thread` : `mach_absolute_time`, `timer_event`) : si c'est une attente active du
-     noyau, le levier est d'endormir le fil hôte (ut occupe 1,9 cœur) plutôt que d'accélérer
-     `mftb` ; sinon `mftb` en ligne (sans helper), gain modeste (−2,4 % mesuré pour helper
-     lent → rapide).
+  4. **Base de temps** : `helper_load_tbu/tbl` 14 % du vCPU sur ut, 3 % sur zen. La boucle
+     `0x33f3c-0x33fec` est identifiée le 02/11 **sur le M4** dans `delay_idle`, attente
+     active SMP de xnu-792.24.17 (noyau MD5 `def99c6e…`, `docs/re/ut-attente-m4.md`).
+     **Vérifier l'empreinte et les octets du noyau sur le PC** avant d'y transférer ce
+     résultat (ancien profil : 11,7 % du vCPU d'ut). Instruire alors un sommeil hôte
+     respectant les réveils (ut occupe 1,9 cœur sur le PC), puis juger `mftb` en ligne :
+     accélérer cette boucle n'est pas en soi un gain utile au jeu (−2,4 % mesuré pour
+     helper lent → rapide).
   **Fermeture de chaque levier :** preuve, A/B des cinq jeux, allumé ou archivé avec le chiffre.
 
 ## Ensuite

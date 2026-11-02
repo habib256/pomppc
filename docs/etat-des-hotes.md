@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 4 h 31 (A/B 0058 clos ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 4 h 48 (attente UT identifiée ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -312,6 +312,23 @@ des anciennes références**.
   Relevé séparé `m4-ut-mappage-0211` démarré à 4 h 31 : `in_asm,out_asm` filtré sur
   noyau/libSystem et `sample` hôte, pour identifier l'appelant des horloges. Aucun chiffre
   de vitesse de ce relevé instrumenté n'est ajouté à l'A/B.
+- **Attente d'UT identifiée à 4 h 43**, `re/ut-attente-m4.md` : 96,8 % des coûts
+  propres des helpers d'horloge du relevé diagnostique court vont aux trois lectures de
+  `mach_absolute_time`. Traces LR séparées : appels dans `delay_idle`, fonction statique
+  0x33e8c–0x3401c, boucle 0x33f3c–0x33fec ; source Apple xnu-792.24.17 identique à la
+  version du noyau MD5 `def99c6e…`. Le PC vérifie son noyau avant de reprendre cette
+  identification. Aucune attente supprimée, aucun levier allumé.
+- `samplejit.py` relie `sample` au journal `out_asm` du même processus et vérifie
+  `BL`/`BLR` avant d'attribuer un helper ; cartes réutilisées ou adresses groupées
+  ambiguës restent inconnues. Six tests et deux mutants réussis.
+- **VM normale relancée à 4 h 43** sous ImGuiDock, QEMU et frontal vivants. Le contrôle
+  visuel du curseur reste à confirmer : l'exécutable sans bundle du frontal n'est pas
+  exposé à l'outil UI (échecs d'accès par chemin et par nom, absent de l'inventaire).
+  Le test de souris fenêtre/plein écran du frontal reste dans le contrôle général ;
+  il ne remplace pas cette validation à l'œil.
+- **Contrôle général après le mappage : 408 OK**, mêmes 49 signalements ShellCheck
+  préexistants (liste de fichiers comparée), 5 ignorés ; test de souris du frontal réussi.
+  `.run/tests-samplejit-0211.log`.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`

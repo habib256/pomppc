@@ -5660,6 +5660,14 @@ dans le code généré et les lectures de base de temps (`tbf_load`,
 au verrou global sur cette seule observation : l'appelant invité des horloges
 reste à identifier. Données : `ut-profils-somme.json` et profils bruts à côté.
 
+**Complément à 4 h 43 : appelant identifié sur le M4**,
+[`re/ut-attente-m4.md`](re/ut-attente-m4.md). Mappage `sample`/`out_asm`, puis
+LR relevé à `mach_absolute_time` : boucle statique `delay_idle`, 0x33e8c–0x3401c,
+du noyau MD5 `def99c6e…`, source Apple xnu-792.24.17 concordante. L'attente
+active du planificateur est établie ; sa contribution causale exacte à la perte
+et l'identité du noyau sur le PC restent à mesurer. `samplejit.py` laisse les
+attributions ambiguës inconnues ; six tests et deux mutants détectés.
+
 ## 43. vperm en une opération vectorielle : `tcg/0059` (`x-vperm-inline`), PC x86-64, 30/10
 
 **Idée.** `vperm` passe aujourd'hui par un helper (`x-vperm-fast`, table, allumé depuis le
