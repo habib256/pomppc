@@ -213,5 +213,22 @@ verifie "SHA-1 faux : rien de temporaire" absent "$D/disks/MacOSXUpdCombo10.4.11
 verifie "SHA-1 faux : pas de CD" absent "$D/disks/combo-10.4.11.iso"
 pkill -f 'sleep 30' 2>/dev/null
 
+echo "== système à ouvrir"
+rm -f "$D/disks/"*.qcow2 "$D/.run/imguidock.conf"
+sans_disque() { ! un_disque_existe; }
+verifie "aucun disque : assistant" sans_disque
+echo qcow > "$D/disks/Autre Nom.qcow2"
+verifie "disque d'un autre nom : pas d'assistant" un_disque_existe
+lance() { [ "$(lanceur_a_ouvrir)" = "$1" ]; }
+verifie "autre nom seul : Tiger" lance run_tiger.sh
+echo qcow > "$D/disks/os9.qcow2"
+verifie "OS 9 seul au nom attendu : OS 9" lance run_os9.sh
+echo qcow > "$D/disks/tiger.qcow2"
+verifie "les deux : Tiger par défaut" lance run_tiger.sh
+echo "os = os9" > "$D/.run/imguidock.conf"
+verifie "les deux, OS 9 en dernier : OS 9" lance run_os9.sh
+rm -f "$D/disks/os9.qcow2"
+verifie "OS 9 en dernier, disque parti : Tiger" lance run_tiger.sh
+
 echo "$echoues échec(s)"
 [ "$echoues" = 0 ]

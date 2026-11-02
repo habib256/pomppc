@@ -162,7 +162,7 @@ static std::vector<std::string> listCdImages(const std::string& root) {
 // macOS) + usb-host gamepad passthrough.
 static QemuBridge::Config makeConfig(const std::string& launcher,
                                      const std::string& runtimeDir, bool sound,
-                                     bool pad) {
+                                     bool pad, const std::vector<std::string>& diskVars) {
     QemuBridge::Config cfg;
     cfg.launcher = launcher;
     cfg.runtimeDir = runtimeDir;
@@ -170,6 +170,7 @@ static QemuBridge::Config makeConfig(const std::string& launcher,
     if (!pad) cfg.env.push_back("NOPAD=1");
     if (const char* res = std::getenv("RES")) cfg.env.push_back(std::string("RES=") + res);
     if (const char* smp = std::getenv("SMP")) cfg.env.push_back(std::string("SMP=") + smp);
+    cfg.env.insert(cfg.env.end(), diskVars.begin(), diskVars.end());
     return cfg;
 }
 
@@ -302,6 +303,7 @@ static const char* kWinScreen  = "Screen";
 static const char* kWinLibrary = "Library";
 static const char* kWinBilan   = "Status";
 static const char* kWinJournal = "Log";
+static const char* kWinDisks   = "Disks";
 
 // Ctrl+C ou SIGTERM : quitter par la fin de main (réglages écrits, QEMU
 // arrêté proprement) au lieu de mourir sur place. Le gestionnaire ne fait que
@@ -322,6 +324,7 @@ static void buildDefaultLayout(ImGuiID dsId, const ImGuiViewport* vp) {
     ImGuiID bottomRight = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Right, 0.45f, nullptr, &bottom);
     ImGui::DockBuilderDockWindow(kWinScreen, center);
     ImGui::DockBuilderDockWindow(kWinLibrary, right);
+    ImGui::DockBuilderDockWindow(kWinDisks, right);
     ImGui::DockBuilderDockWindow(kWinJournal, bottom);
     ImGui::DockBuilderDockWindow(kWinBilan, bottomRight);
     ImGui::DockBuilderFinish(dsId);
@@ -380,7 +383,17 @@ int main(int argc, char** argv) {
     bool pad = fe.pad;      // usb-host passthrough; the run script self-guards
     auto bridge = std::make_unique<QemuBridge>();
     std::string err;
-    if (!bridge->start(makeConfig(curLauncher, runtimeDir, sound, pad), &err)) {
+    // Choix du panneau Disks, par système. DISK ou OS9_DISK posés à la main priment : le panneau
+    // ne les écrase pas (voir diskVarsFor).
+    auto diskVarsFor = [&](const std::string& launcher) {
+        const bool tiger = launcher == tigerSh;
+        if (std::getenv(tiger ? "DISK" : "OS9_DISK")) return std::vector<std::string>{};
+        DiskSelection& sel = tiger ? fe.tigerDisks : fe.os9Disks;
+        sel = normalizeSelection(sel, listDisks(root), tiger ? "tiger.qcow2" : "os9.qcow2",
+                                 maxExtraDisks(root, tiger));
+        return diskEnv(root, tiger, sel);
+    };
+    if (!bridge->start(makeConfig(curLauncher, runtimeDir, sound, pad, diskVarsFor(curLauncher)), &err)) {
         std::fprintf(stderr, "QemuBridge start failed: %s\n", err.c_str());
         return 1;
     }
@@ -509,7 +522,7 @@ int main(int argc, char** argv) {
         bridge->stop();
         bridge = std::make_unique<QemuBridge>();
         std::string e;
-        if (!bridge->start(makeConfig(launcher, runtimeDir, sound, pad), &e))
+        if (!bridge->start(makeConfig(launcher, runtimeDir, sound, pad, diskVarsFor(launcher)), &e))
             journal("restart failed: %s", e.c_str());
         else {
             curLauncher = launcher;
@@ -846,8 +859,10 @@ int main(int argc, char** argv) {
             if (ImGui::BeginMenu("OS")) {
                 bool onTiger = (curLauncher == tigerSh);
                 // Sans disque, le lanceur échouerait sans rien montrer : pas de choix à offrir.
-                const bool hasTiger = std::getenv("DISK") || fs::exists(root + "/disks/tiger.qcow2");
-                const bool hasOs9 = std::getenv("OS9_DISK") || fs::exists(root + "/disks/os9.qcow2");
+                const bool hasTiger = std::getenv("DISK") || fs::exists(root + "/disks/tiger.qcow2") ||
+                                      (!fe.tigerDisks.boot.empty() && fs::exists(root + "/disks/" + fe.tigerDisks.boot));
+                const bool hasOs9 = std::getenv("OS9_DISK") || fs::exists(root + "/disks/os9.qcow2") ||
+                                    (!fe.os9Disks.boot.empty() && fs::exists(root + "/disks/" + fe.os9Disks.boot));
                 if (ImGui::MenuItem("Mac OS X 10.4 (Tiger)", nullptr, onTiger, !onTiger && hasTiger))
                     relaunch(tigerSh);
                 bool onOs9 = (curLauncher == os9Sh);
@@ -899,6 +914,7 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 ImGui::MenuItem(kWinBilan, nullptr, &showBilan);
                 ImGui::MenuItem(kWinJournal, nullptr, &showJournal);
+                ImGui::MenuItem(kWinDisks, nullptr, &fe.showDisks);
                 if (ImGui::MenuItem("Default Layout")) resetLayout = true;
                 ImGui::EndMenu();
             }
@@ -966,6 +982,114 @@ int main(int argc, char** argv) {
                     }
                 }
                 ImGui::EndChild();
+            }
+            ImGui::End();
+        }
+
+        // ── Disks : disque de démarrage, disques en plus, création ───────
+        if (fe.showDisks) {
+            if (ImGui::Begin(kWinDisks, &fe.showDisks)) {
+                const bool tiger = curLauncher == tigerSh;
+                DiskSelection& sel = tiger ? fe.tigerDisks : fe.os9Disks;
+                static DiskSelection running;
+                static std::string runningFor;
+                static std::vector<DiskEntry> disks;
+                static std::string runningTypes, diskError;
+                static bool disksStale = true;
+                static char newName[65] = "";
+                static int newGb = 16, newType = 0;
+                auto typesOf = [](const std::vector<DiskEntry>& l) {
+                    std::string t;
+                    for (const DiskEntry& d : l) if (d.ssd) t += d.name + ";";
+                    return t;
+                };
+                if (disksStale) { disks = listDisks(root); disksStale = false; }
+                if (runningFor != curLauncher) {
+                    running = sel;
+                    runningFor = curLauncher;
+                    runningTypes = typesOf(disks);
+                }
+                const int maxExtras = maxExtraDisks(root, tiger);
+                if (std::getenv(tiger ? "DISK" : "OS9_DISK")) {
+                    ImGui::TextWrapped("The disk is set by the %s variable.", tiger ? "DISK" : "OS9_DISK");
+                } else {
+                    ImGui::TextWrapped("Choose the startup disk, and up to %d more disk%s to use at the same time.",
+                                       maxExtras, maxExtras > 1 ? "s" : "");
+                    if (ImGui::BeginTable("disks", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+                        ImGui::TableSetupColumn("Start");
+                        ImGui::TableSetupColumn("Use");
+                        ImGui::TableSetupColumn("Disk", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableSetupColumn("Size");
+                        ImGui::TableSetupColumn("Type");
+                        ImGui::TableHeadersRow();
+                        for (DiskEntry& d : disks) {
+                            ImGui::PushID(d.name.c_str());
+                            ImGui::TableNextRow();
+                            const bool isBoot = sel.boot == d.name;
+                            auto it = std::find(sel.extras.begin(), sel.extras.end(), d.name);
+                            bool used = isBoot || it != sel.extras.end();
+                            ImGui::TableNextColumn();
+                            if (ImGui::RadioButton("##boot", isBoot)) {
+                                if (it != sel.extras.end()) sel.extras.erase(it);
+                                sel.boot = d.name;
+                            }
+                            ImGui::TableNextColumn();
+                            ImGui::BeginDisabled(isBoot || (!used && (int)sel.extras.size() >= maxExtras));
+                            if (ImGui::Checkbox("##use", &used)) {
+                                if (used) sel.extras.push_back(d.name);
+                                else sel.extras.erase(it);
+                            }
+                            ImGui::EndDisabled();
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(d.name.substr(0, d.name.size() - 6).c_str());
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(formatDiskSize(d.bytes).c_str());
+                            ImGui::TableNextColumn();
+                            ImGui::SetNextItemWidth(58);
+                            int type = d.ssd ? 1 : 0;
+                            if (ImGui::Combo("##type", &type, "HD\0SSD\0") && setDiskSsd(root, d.name, type == 1))
+                                d.ssd = type == 1;
+                            ImGui::PopID();
+                        }
+                        ImGui::EndTable();
+                    }
+                    const bool changed = sel != running || typesOf(disks) != runningTypes;
+                    ImGui::BeginDisabled(!changed);
+                    if (ImGui::Button("Apply and Restart")) ImGui::OpenPopup("Restart the machine?");
+                    ImGui::EndDisabled();
+                    if (ImGui::BeginPopupModal("Restart the machine?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                        ImGui::TextUnformatted("The new disks need a restart. Shut the system down first:\nany unsaved work will be lost.");
+                        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                        ImGui::SameLine();
+                        if (ImGui::Button("Restart")) {
+                            relaunch(curLauncher);
+                            running = sel;
+                            runningTypes = typesOf(disks);
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::EndPopup();
+                    }
+                    ImGui::SeparatorText("New Disk");
+                    ImGui::InputText("Name", newName, sizeof(newName));
+                    ImGui::SetNextItemWidth(110);
+                    ImGui::InputInt("GB", &newGb);
+                    ImGui::SameLine();
+                    ImGui::SetNextItemWidth(70);
+                    ImGui::Combo("##newtype", &newType, "HD\0SSD\0");
+                    if (ImGui::Button("Create")) {
+                        if (createDisk(root, newName, newGb, newType == 1, &diskError)) {
+                            journal("disk created: %s (%d GB)", newName, newGb);
+                            diskError.clear();
+                            newName[0] = '\0';
+                            disksStale = true;
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Refresh##disks")) disksStale = true;
+                    if (!diskError.empty()) ImGui::TextWrapped("%s", diskError.c_str());
+                    ImGui::TextDisabled("Format a new disk with Disk Utility in the guest.");
+                    ImGui::TextDisabled("SSD is a label for the guest: speed doesn't change.");
+                }
             }
             ImGui::End();
         }

@@ -76,6 +76,7 @@ add_executable(pomppc
     src/QemuBridge.cpp
     src/StartupChime.cpp
     src/FrontendSettings.cpp
+    src/DiskConfig.cpp
     ${IMGUI_SOURCES})
 target_include_directories(pomppc PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
 if(APPLE)
@@ -117,7 +118,11 @@ if(BUILD_TESTING)
     target_include_directories(chime_test PRIVATE src)
     target_compile_options(chime_test PRIVATE -UNDEBUG)
     add_test(NAME startup_chime COMMAND chime_test)
-    add_executable(settings_test tests/settings_test.cpp src/FrontendSettings.cpp)
+    add_executable(disks_test tests/disks_test.cpp src/DiskConfig.cpp)
+    target_include_directories(disks_test PRIVATE src)
+    target_compile_options(disks_test PRIVATE -UNDEBUG)
+    add_test(NAME disk_choice COMMAND disks_test)
+    add_executable(settings_test tests/settings_test.cpp src/FrontendSettings.cpp src/DiskConfig.cpp)
     target_include_directories(settings_test PRIVATE src)
     target_compile_options(settings_test PRIVATE -UNDEBUG)
     add_test(NAME frontend_settings COMMAND settings_test)

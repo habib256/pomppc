@@ -143,6 +143,8 @@
 #                             # ou une fois pour toutes : echo 0 > disks/tiger.qcow2.tablet-margin
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   POMPPC_CD=<image> ./run_tiger.sh  # cette image dans 'gamecd' à la place du CD de l'invité
+#   POMPPC_EXTRA_DISKS="a.qcow2;b.qcow2" DISK=c.qcow2 ./run_tiger.sh  # disques en plus du démarrage,
+#                             # 2 au plus ; <disque>.type = ssd (panneau Disks, scripts/disques.sh)
 #   GLISO=0 ./run_tiger.sh    # omet le CD de l'invité dans 'gamecd' : pomppc-guest.iso du
 #                             # paquet publié s'il est là, sinon l'ISO des sources du plugin
 #                             # GL (disks/pomppc-src.iso) ; implicite avec le GPU (GLISO=1 pour forcer)
@@ -1392,9 +1394,13 @@ if [ "${TABLET:-$TABLET_DEFAULT}" = 1 ]; then
   echo "  Souris absolue : tablette USB ($([ -n "${TABLET:-}" ] && echo "TABLET=$TABLET" || echo "sélectionnée par ImGuiDock"), marge $TABLET_MARGIN %)"
 fi
 
+# Disques choisis dans ImGuiDock : 4 emplacements IDE, moins celui de démarrage et celui du CD.
+source "$ROOT/scripts/disques.sh"
+disques_args "$DISK" $((3 - ${#CD_ARGS[@]} / 2))
 exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \
   -display "$DISP" -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} ${CD_ARGS[@]+"${CD_ARGS[@]}"} \
+  ${DISQUES_ARGS[@]+"${DISQUES_ARGS[@]}"} \
   ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} ${AUDIO[@]+"${AUDIO[@]}"} \
   ${TABLET_ARGS[@]+"${TABLET_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} ${QFB_ARGS[@]+"${QFB_ARGS[@]}"} ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} ${USER_EXTRA[@]+"${USER_EXTRA[@]}"} \
   -prom-env 'auto-boot?=true' \

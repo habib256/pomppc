@@ -102,6 +102,12 @@ if [ -x frontend/build/pointer_test ]; then
 else
   noop "pointer_test non construit (cmake --build frontend/build)"
 fi
+if [ -x frontend/build/disks_test ]; then
+  if frontend/build/disks_test >/dev/null; then ok "choix des disques du frontal"; else ko "choix des disques du frontal"; fi
+else
+  noop "disks_test non construit (cmake --build frontend/build)"
+fi
+if ./tests/disques_test.sh >/dev/null 2>&1; then ok "disques des lanceurs"; else ko "disques des lanceurs"; fi
 if [ -x frontend/build/chime_test ]; then
   if frontend/build/chime_test; then ok "carillon : déclenchement et préférences"; else ko "carillon frontend"; fi
 else

@@ -59,6 +59,11 @@ bool FrontendSettings::load(const std::string& path) {
         } else if (k == "ludotheque") parseBool(v, showLibrary);
         else if (k == "bilan") parseBool(v, showBilan);
         else if (k == "journal") parseBool(v, showJournal);
+        else if (k == "panneau_disques") parseBool(v, showDisks);
+        else if (k == "disque_tiger") tigerDisks.boot = v;
+        else if (k == "disques_tiger") tigerDisks.extras = splitNames(v);
+        else if (k == "disque_os9") os9Disks.boot = v;
+        else if (k == "disques_os9") os9Disks.extras = splitNames(v);
         else if (k == "plein_ecran") parseBool(v, fullscreen);
         else if (k == "fenetre_x") parseInt(v, winX);
         else if (k == "fenetre_y") parseInt(v, winY);
@@ -87,6 +92,11 @@ bool FrontendSettings::save(const std::string& path) const {
             << "ludotheque = " << showLibrary << '\n'
             << "bilan = " << showBilan << '\n'
             << "journal = " << showJournal << '\n'
+            << "panneau_disques = " << showDisks << '\n'
+            << "disque_tiger = " << tigerDisks.boot << '\n'
+            << "disques_tiger = " << joinNames(tigerDisks.extras) << '\n'
+            << "disque_os9 = " << os9Disks.boot << '\n'
+            << "disques_os9 = " << joinNames(os9Disks.extras) << '\n'
             << "plein_ecran = " << fullscreen << '\n';
         if (winW > 0 && winH > 0)
             out << "fenetre_x = " << winX << '\n'

@@ -387,6 +387,26 @@ Then restart Tiger." "OK" >/dev/null || exit 0
   printf '%s\n' "$VERSION" > "$D/.run/pilote-annonce"
 }
 
+# 0 si disks/ contient au moins un disque, quel que soit son nom (panneau Disks).
+un_disque_existe() {
+  local f
+  for f in "$D"/disks/*.qcow2; do
+    [ -f "$f" ] && return 0
+  done
+  return 1
+}
+
+# Le dernier système utilisé, s'il a son disque ; sinon Tiger, sauf s'il n'y a qu'OS 9.
+lanceur_a_ouvrir() {
+  local os
+  os="$(sed -n 's/^os = //p' "$D/.run/imguidock.conf" 2>/dev/null | head -1)"
+  if [ -f "$D/disks/os9.qcow2" ] && { [ "$os" = os9 ] || [ ! -f "$D/disks/tiger.qcow2" ]; }; then
+    echo run_os9.sh
+  else
+    echo run_tiger.sh
+  fi
+}
+
 principal() {
   # Une app téléchargée garde sa quarantaine sur chaque fichier : l'accord donné à l'app ne
   # couvre pas QEMU, lancé ensuite par un script. Sans effet si l'app n'est pas modifiable.
@@ -394,11 +414,13 @@ principal() {
   preparer_donnees
   if [ -f "$D/.run/installation-en-cours" ]; then
     reprendre_installation
-  elif [ ! -f "$D/disks/tiger.qcow2" ] && [ ! -f "$D/disks/os9.qcow2" ]; then
+  elif ! un_disque_existe; then
     assistant
   fi
-  local lanceur=run_os9.sh verrou=os9.lock
-  if [ -f "$D/disks/tiger.qcow2" ]; then lanceur=run_tiger.sh; verrou=tiger.lock; fi
+  local lanceur verrou
+  lanceur="$(lanceur_a_ouvrir)"
+  verrou=tiger.lock
+  if [ "$lanceur" = run_os9.sh ]; then verrou=os9.lock; fi
   # La fenêtre du frontal n'a plus de terminal pour dire ce refus du lanceur.
   : >> "$D/.run/$verrou"
   if ! perl -e 'use Fcntl ":flock"; open(my $f, "<", $ARGV[0]) or exit 0;

@@ -12,6 +12,8 @@
 
 #include <string>
 
+#include "DiskConfig.h"
+
 struct FrontendSettings {
     std::string os = "os9";      // "os9" ou "tiger" ; ignoré si un lanceur est passé en argument
     bool sound = true;
@@ -23,6 +25,8 @@ struct FrontendSettings {
     bool showLibrary = true;
     bool showBilan = true;
     bool showJournal = true;
+    bool showDisks = true;
+    DiskSelection tigerDisks, os9Disks;   // panneau Disks ; vides = les disques par défaut
     bool fullscreen = false;
     // Géométrie de la fenêtre (mode fenêtré), valide si winW/winH > 0.
     int winX = 0, winY = 0, winW = 0, winH = 0;

@@ -207,8 +207,11 @@ QMP_ARGS=()
 SNAP_ARGS=(); [ -n "${SNAPSHOT:-}" ] && SNAP_ARGS=(-snapshot)
 
 echo "  CPU OS9 : profil=$OS9_PROFILE cpu=$CPU_SPEC accel=$TCG_ACCEL"
+# Disques choisis dans ImGuiDock : 4 emplacements IDE, moins ceux déjà pris par DRIVES.
+source "$ROOT/scripts/disques.sh"
+disques_args "$OS9_DISK" $((4 - ${#DRIVES[@]} / 2))
 exec "$BIN" -M "mac99,via=$VIA" -cpu "$CPU_SPEC" -accel "$TCG_ACCEL" -m "$RAM" -smp 1 \
   -display "$DISP" -g "$RES" ${BIOS_ARGS[@]+"${BIOS_ARGS[@]}"} ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} \
-  ${DRIVES[@]+"${DRIVES[@]}"} -nic none ${AUDIO[@]+"${AUDIO[@]}"} ${TABLET_DEV[@]+"${TABLET_DEV[@]}"} ${VIRTIO_ARGS[@]+"${VIRTIO_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} \
+  ${DRIVES[@]+"${DRIVES[@]}"} ${DISQUES_ARGS[@]+"${DISQUES_ARGS[@]}"} -nic none ${AUDIO[@]+"${AUDIO[@]}"} ${TABLET_DEV[@]+"${TABLET_DEV[@]}"} ${VIRTIO_ARGS[@]+"${VIRTIO_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} \
   -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" ${BOOTCMD_ARGS[@]+"${BOOTCMD_ARGS[@]}"} \
   -name "MacOS9" ${QMP_ARGS[@]+"${QMP_ARGS[@]}"} -monitor "unix:$MON,server,nowait"
