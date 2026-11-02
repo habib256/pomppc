@@ -189,8 +189,10 @@ disk on the desktop of Mac OS, each time the system starts. The disk is a copy, 
 
 ### Settings
 
-**Machine ▸ Preferences...** sets the memory and, for Tiger, the number of processors. Tiger gets at most
-768 MB with sound on, because the emulated sound chip needs less than 1 GB.
+**Machine ▸ Preferences...** sets the memory, sound, the USB gamepad and, for Tiger, the number of processors.
+Tiger gets at most 768 MB with sound on, because the emulated sound chip needs less than 1 GB.
+The screen resolution belongs to Mac OS: use **System Preferences ▸ Displays** in Tiger, or **Control Panels ▸
+Monitors** in Mac OS 9.
 
 **Machine ▸ Try Without Saving** restarts the system so that nothing it does is kept: handy to try
 something risky. **Machine ▸ Save Screenshot** saves the screen in `~/POMPPC/Screenshots`. **View** sets

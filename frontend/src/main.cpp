@@ -1695,7 +1695,8 @@ int main(int argc, char** argv) {
                 if (ImGui::SmallButton("Refresh")) cdImagesStale = true;
                 if (cdImagesStale) { cdImages = listCdImages(root); cdImagesStale = false; }
                 ImGui::Separator();
-                if (cdImages.empty()) ImGui::TextWrapped("Put .iso, .cdr, .img or .toast files in %s/disks, then click Refresh.", root.c_str());
+                if (cdImages.empty() && ImGui::SmallButton("Show Folder")) openFile(root + "/disks");
+                if (cdImages.empty()) ImGui::TextWrapped("Put .iso, .cdr, .img or .toast files in %s/disks, then click Refresh. Or drop a disc on the window.", root.c_str());
                 ImGui::BeginChild("games");
                 for (const std::string& g : cdImages) {
                     bool sel = (g == currentCd);
@@ -2006,12 +2007,16 @@ int main(int argc, char** argv) {
             if (ImGui::Begin("Preferences", &showPrefs, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse)) {
                 const bool tiger = curLauncher == tigerSh;
                 static int draftMem = -1, draftCores = -1;
-                static bool draftTiger = true;
+                static bool draftTiger = true, draftSound = true, draftPad = false;
+                static bool lastSound = sound, lastPad = pad;   // changés aussi par le menu Devices
                 const int savedMem = tiger ? fe.memoryTiger : fe.memoryOs9;
-                if (draftMem < 0 || draftTiger != tiger) {
+                if (draftMem < 0 || draftTiger != tiger || lastSound != sound || lastPad != pad ||
+                    ImGui::IsWindowAppearing()) {
                     draftMem = savedMem;
                     draftCores = fe.coresTiger;
                     draftTiger = tiger;
+                    draftSound = lastSound = sound;
+                    draftPad = lastPad = pad;
                 }
                 const int defaultMem = tiger ? 1024 : 512;
                 static const int memTiger[] = {512, 768, 1024};
@@ -2027,9 +2032,9 @@ int main(int argc, char** argv) {
                     }
                     ImGui::EndCombo();
                 }
-                if (tiger && sound && effectiveMemoryMb(shownMem, true) < shownMem) {
+                if (tiger && draftSound && effectiveMemoryMb(shownMem, true) < shownMem) {
                     ImGui::TextWrapped("With sound on, Tiger gets 768 MB: the emulated sound chip needs less than 1 GB. "
-                                       "Turn sound off in the Devices menu to use all of it.");
+                                       "Turn sound off to use all of it.");
                 }
                 if (tiger) {
                     const int shownCores = draftCores > 0 ? draftCores : 2;
@@ -2042,19 +2047,30 @@ int main(int argc, char** argv) {
                 } else {
                     ImGui::TextDisabled("Mac OS 9 always uses one processor.");
                 }
+                ImGui::Checkbox("Sound", &draftSound);
+                ImGui::SameLine();
+                ImGui::Checkbox("USB gamepad", &draftPad);
                 ImGui::Spacing();
-                const bool changed = draftMem != savedMem || (tiger && draftCores != fe.coresTiger);
+                const bool changed = draftMem != savedMem || (tiger && draftCores != fe.coresTiger) ||
+                                     draftSound != sound || draftPad != pad;
                 ImGui::BeginDisabled(!changed);
                 if (ImGui::Button("Apply and Restart")) {
                     confirmRestart("Apply the new settings?", [&, tiger] {
                         (tiger ? fe.memoryTiger : fe.memoryOs9) = draftMem;
                         if (tiger) fe.coresTiger = draftCores;
+                        sound = draftSound;
+                        pad = draftPad;
                         relaunch(curLauncher);
                     });
                 }
                 ImGui::EndDisabled();
                 ImGui::Separator();
-                ImGui::TextDisabled("Sound and gamepad: Devices menu. Image: View menu.");
+                // [A] Mesuré (M4, 03/11) : RES=800x600x32 laisse Tiger à 1024x768, et OS 9 reste à 640x480
+                //     sous RES=1024x768x32. La définition du bureau appartient à l'invité : pas de réglage ici.
+                if (guestW > 0)
+                    ImGui::TextWrapped("Screen: %d x %d. To change it, use %s in Mac OS.", guestW, guestH,
+                                       tiger ? "System Preferences > Displays" : "Control Panels > Monitors");
+                ImGui::TextDisabled("Image smoothing: View menu.");
             }
             ImGui::End();
         }

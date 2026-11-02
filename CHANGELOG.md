@@ -9,7 +9,8 @@ de commit et dans `docs/`.
 
 ## Non publié
 
-(rien pour l'instant)
+**Preferences.** Son et manette USB s'y règlent aussi, sous le même bouton, et la fenêtre dit la définition
+courante et où la changer dans Mac OS. Une Library vide a un bouton **Show Folder**.
 
 ## 0.4.1 (03/11/2026)
 

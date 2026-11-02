@@ -196,7 +196,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 03/11/2026, 00 h 30 (0.4.1 publiée, dossier partagé, aucune VM ne tourne)
+## 3. Mac M4 : état au 03/11/2026, 00 h 47 (0.4.1 publiée, lot 4 fini sur main, aucune VM ne tourne)
 
 **Soir du 02/11, demande de l'utilisateur : QE doit tenir toutes les résolutions.** Corrigé
 (`docs/quartz-extreme.md`, journal du 02/11) : kext (VRAM entière), plugin `20261102-modes`, cœur
@@ -231,6 +231,12 @@ power` ; `system_powerdown` sans effet sur mac99), confirmations, écran d'arrê
 et fenêtre à l'invité, pomme d'Apple dans l'app (`POMPPC_BOOT_ARGS`). `POMPPC_FE_SCRIPT` joue de vrais clics
 dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une capture de l'écran. Reste le lot 3
 (assistant unique, installateur à double-cliquer, détection du pilote), puis le 4.
+
+**Ergonomie, lot 4 (3/11, après la 0.4.1, non publié).** Le lot 4 de l'étude (dossier partagé, glisser-déposer,
+Preferences) était déjà livré pour l'essentiel. Restait : son et manette dans Preferences, sous le même
+**Apply and Restart**, la définition courante avec l'endroit où la changer, et **Show Folder** dans une Library
+vide. Pas de réglage de résolution côté hôte : `RES` n'atteint pas le bureau des invités [A]. Reste hors lot : point 1
+(veille pendant l'installation), barre de menus native.
 
 **Dossier partagé (3/11, dans la 0.4.1).** Demande de l'utilisateur : un disque correspondant à un dossier du Mac.
 `vvfat` essayé puis écarté (503 Mo, fichiers vus vides). Image HFS+ et retour à l'éjection ou à l'arrêt
