@@ -9,6 +9,19 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+(rien pour l'instant)
+
+## 0.4 (02/11/2026)
+
+Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.4`) au commit de la version,
+**macOS 27 ou plus** : cinq bibliothèques Homebrew embarquées l'exigent. Principaux changements
+pour ce paquet : Quartz Extreme allumé et valable à toutes les résolutions, série TCG du PC
+allumée sur arm64, plugin allégé, Tiger 10.4.11. Temps du M4 au 02/11 contre la 0.3, en ms/image :
+DOOM 3 28,9 contre 48,0, UT2004 19,3 contre 25,3, Zenerchi 2,6 contre 4,3, Colin McRae 41,7 en
+1920×1080 contre 50,5 en 1024×768. Dernier tour complet de la matrice : 17 vertes sur 17 le 28/10 ;
+cinq jeux le 02/11 au matin, sans le correctif des résolutions du soir (journal de
+`docs/quartz-extreme.md`). Détail ci-dessous.
+
 - **Quartz Extreme à toutes les résolutions, 02/11 soir.** Passer en 1920×1080 donnait un écran
   rayé, et le défaut revenait à chaque démarrage : la VRAM restait mappée à la taille du mode de
   démarrage (kext). En 2560×1080, bureau comprimé à 2048 de large (`GL_MAX_VIEWPORT_DIMS`) et

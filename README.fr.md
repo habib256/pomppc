@@ -22,7 +22,7 @@ L'état courant détaillé (vitesse, matrice, défauts allumés, binaires de cha
 | Écran paravirtuel QFB | fait (`kext/POMPPCQFB/`, `patches/qfb/`) |
 | **GPU 3D paravirtuel qgpu** | protocole **v22** : pipeline fixe et combineurs ATI, OpenGL 1.5 annoncé, programmes ARB et GLSL, VBO lus par l'hôte, copies GPU et présentation directe |
 | Vitesse du G4 émulé | série `patches/tcg/` (allumée par hôte dans `run_tiger.sh`) ; binaire rapide PGO sur le PC (`docs/binaire-rapide-x86.md`) |
-| Bureau accéléré (Quartz Extreme) | allumé par défaut sur les deux hôtes (M4 depuis le 29/10, PC depuis le 30/10 ; `QE=0` l'éteint), `docs/quartz-extreme.md` ; Core Image non fait |
+| Bureau accéléré (Quartz Extreme) | allumé par défaut sur les deux hôtes (M4 depuis le 29/10, PC depuis le 30/10), à toutes les résolutions depuis la 0.4 ( `QE=0` l'éteint), `docs/quartz-extreme.md` ; Core Image non fait |
 
 Jeux : chacun est vérifié par une matrice automatique (`tools/matrice/`, `docs/matrice-jeux.md`) :
 les images affichées par l'invité sont vidées, **rejouées nativement sur l'hôte et comparées au
@@ -49,9 +49,9 @@ ailleurs. Return to Castle
 Wolfenstein n'a pas encore été lancé avec succès.
 
 Ces temps ont baissé depuis (série TCG et allègement du plugin allumés par défaut sur les deux
-hôtes). Au 01/11/2026, hôte au repos, ms/image, M4 / PC x86-64 : DOOM 3 en fenêtre 29 / 78-80,
-UT2004 en fenêtre 19,6 / 40, Marble Blast en fenêtre 6,1 / 8,3, Zenerchi en fenêtre 2,8 / 4,6,
-Colin McRae en plein écran **en course** 42 / 82. Dernier tour complet de la matrice sur le M4 :
+hôtes). Hôte au repos, ms/image, M4 (02/11/2026) / PC x86-64 (01/11/2026) : DOOM 3 en fenêtre
+28,9 / 78-80, UT2004 en fenêtre 19,3 / 40, Marble Blast en fenêtre 6,2 / 8,3, Zenerchi en fenêtre
+2,6 / 4,6, Colin McRae en plein écran **en course** 41,7 / 82. Dernier tour complet de la matrice sur le M4 :
 17 vertes sur 17 (28/10/2026) ; tableau courant dans `TODO.md`. La version Linux x86-64 n'est
 pas publiée tant que sa vitesse n'est pas acceptable (cible : DOOM 3 à 50 ms/image).
 
@@ -123,8 +123,9 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
 ### Paquet publié (macOS sur Apple Silicon)
 
 Sans construire : l'archive `pomppc-<version>-macos-arm64.tar.xz` des
-[publications](https://github.com/habib256/pomppc/releases) demande **macOS 26 (Tahoe) ou
-plus récent** (les bibliothèques Homebrew embarquées sont construites pour lui). C'est le dépôt
+[publications](https://github.com/habib256/pomppc/releases) demande **macOS 27 ou
+plus récent** depuis la 0.4 (les bibliothèques Homebrew embarquées sont construites pour lui ; la 0.3
+tourne sous macOS 26). C'est le dépôt
 au tag de la publication, plus `bin/` (`qemu-system-ppc`, `qemu-system-ppc64`, `qemu-img`
 patchés, frontal `pomppc`), `lib/`, `share/qemu/` et `pomppc-guest.iso` (paquet de l'invité) ;
 `config.env` prend `bin/` de lui-même. Binaires signés ad hoc, non notariés :

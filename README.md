@@ -38,9 +38,9 @@ that mode; both for Marble Blast); elsewhere the two modes differ by 2 % at most
 Castle Wolfenstein has not been made to work yet.
 
 These times have dropped since (TCG series and lighter guest plugin enabled by default on both
-hosts). On 01/11/2026, idle host, ms/frame, Apple Silicon M4 / Linux x86-64 PC: DOOM 3 windowed
-29 / 78–80, UT2004 windowed 19.6 / 40, Marble Blast windowed 6.1 / 8.3, Zenerchi windowed
-2.8 / 4.6, Colin McRae full screen *during the race* 42 / 82. Last full matrix run on Apple Silicon: 17/17 green (28/10/2026);
+hosts). Idle host, ms/frame, Apple Silicon M4 (02/11/2026) / Linux x86-64 PC (01/11/2026): DOOM 3
+windowed 28.9 / 78–80, UT2004 windowed 19.3 / 40, Marble Blast windowed 6.2 / 8.3, Zenerchi windowed
+2.6 / 4.6, Colin McRae full screen *during the race* 41.7 / 82. Last full matrix run on Apple Silicon: 17/17 green (28/10/2026);
 current table in `TODO.md`. The Linux x86-64 build is not released until its speed is
 acceptable (target: DOOM 3 at 50 ms/frame).
 
@@ -49,14 +49,14 @@ x86), so the whole project is about taking work *away* from the emulated CPU: ge
 textures, presentation and vertex-buffer conversion run on the host. Expect demo-grade frame
 rates in the heavy titles, not native speed.
 
-Quartz Extreme (the desktop composited through the host GPU) is on by default in the
-repository since 29/10/2026 (Apple Silicon) and 30/10/2026 (Linux x86-64), after release 0.3;
-`QE=0 ./run_tiger.sh` turns it off. What is **not** done: Core Image.
+Quartz Extreme (the desktop composited through the host GPU) is on by default since release 0.4
+on Apple Silicon, at every display mode Tiger offers (640×480 to 2560×1080), and in the repository
+on Linux x86-64; `QE=0 ./run_tiger.sh` turns it off. What is **not** done: Core Image.
 
 ## Quick start (prebuilt release, macOS on Apple Silicon)
 
-Requirements: an Apple Silicon Mac running **macOS 26 (Tahoe) or later** (the bundled Homebrew
-libraries are built for it), and **Mac OS X 10.4 Tiger PowerPC installation media that you
+Requirements: an Apple Silicon Mac running **macOS 27 or later** since release 0.4 (the bundled
+Homebrew libraries are built for it; release 0.3 runs on macOS 26), and **Mac OS X 10.4 Tiger PowerPC installation media that you
 own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distributed here.
 
 1. Download `pomppc-<version>-macos-arm64.tar.xz` from the
