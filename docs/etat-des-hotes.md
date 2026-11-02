@@ -458,8 +458,9 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 
 - **Venu du PC le 01/11 (pour le M4), dans l'ordre** — reprend les entrées du 30/10 et du
   31/10, réduites le 01/11 à ce qui n'y figure pas :
-  (01/11 : points 1 et 2 faits, la VM **quotidienne** servant de VM de dev ; points 3-4 en
-  cours, §3.)
+  (Bilan du 02/11 : points 1-2 faits, la VM **quotidienne** servant de VM de dev ; preuves
+  et mesures neuves faites, profils et variante courte clos. Restent le curseur à l'œil,
+  le coût d'un avis d'ombre effectivement actif et le portage complet de la zone froide ; §3.)
   1. `git pull` ; **reconstruire QEMU** (`qgpu-core.c` du 31/10 : reflets de cmr ; `tcg/0059`
      nommé depuis le 30/10) ; ni le protocole ni l'ABI n'ont changé. Vérifier que la série se
      compile sur arm64 avec `tcg/0059` (l'opcode générique n'y est jamais émis ; rien ne change
@@ -468,22 +469,22 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
      avec la méthode 6 ; plugin `20261101-ombre` qui contient aussi PACKBITS et UVWIDE),
      `install.sh` sans `QE`, puis **redémarrer l'invité**. Les kext du 30/10 (`805f504`, curseur
      immobile) et plugins du 30/10 (`f01d2d7`, `pomppc_qe_same` ; `tex_bind_id`) y sont inclus.
-  3. À l'œil : bande sous l'ombre du Terminal sur un jeu en fenêtre pendant qu'il change
-     (DOOM 3 au chargement, Marble Blast), curseur net en plein écran, reflets de carrosserie
-     de cmr.
-  4. A/B au repos, ancien bundle contre nouveau : mb-fen, mb-pe, cmr-pe et d3-fen au moins
-     (PACKBITS attendu −1 à −4 % ; l'avis d'ombre coûte sur mb-fen seulement quand une fenêtre
-     est posée sur le jeu, +6 % sur le PC) ; cmr-pe rejoué avec la fenêtre de mesure **en
-     course** (`6054367` ; le M4 mesurait peut-être déjà la course : le voir sur ses
-     `frames.csv`) et sa référence reprise si elle porte le faux reflet. `references.csv` du M4
-     ne se touche que là-bas.
-  5. Profil croisé des cinq jeux avec `sample` (part du JIT, recherche de blocs, `mftb`,
-     helpers, et part du fil `qgpu-render` sur d3) : c'est lui qui ordonne les leviers du M4
-     (TODO, chantier M4). Puis `tcg/0058` limité aux délais courts (`select` sous la
-     milliseconde, profil d'UT) ; parité de la zone froide **tcg/0056** en dernier (un saut long
-     vers le chemin lent sur aarch64 : le `b.cond` imm19 n'a qu'1 Mio de portée, pour une région
-     de 64 Mio).
-  6. Une tranche d'endurance avec le nouveau kext, puis cette page.
+  3. Ombre de DOOM 3 confirmée par l'utilisateur à 22 h 39, reflets de cmr validés sur la
+     nouvelle preuve en course. **Reste : curseur net en plein écran à l'œil** ; son test
+     hors VM passe, accès UI au frontal indisponible dans cette séance.
+  4. **Mesures neuves faites**, `m4-bundle-0111n-{fen,pe}` : trois bras du même plugin
+     séparent PACKBITS et chemin non-simple, pas une ancienne compilation du bundle
+     (artefacts antérieurs absents). PACKBITS UT −3,19 %, cmr −7,08 %, autres écarts
+     inconclusifs ; mb-fen et mb-pe inclus. **Reste : coût d'un avis d'ombre actif sous
+     une fenêtre posée sur le jeu**, ces relevés ne le prouvent pas. cmr mesuré en course,
+     référence sans faux reflet, `references.csv` du M4 renouvelé. `profil-m4-0211.md`.
+  5. **Profils des cinq jeux faits**, puis variante courte `tcg/0065` mesurée et écartée
+     (UT +10,06 %, `tcg-g4.md` §42.2). Attente active `delay_idle` identifiée sur ce noyau
+     (`re/ut-attente-m4.md`), empreinte du PC à vérifier. **Suite : zone froide 0056** :
+     revue et 36 portes longues exécutées sur le M4, mais implantation/A/B encore à faire ;
+     traiter aussi FP, tlbb, régions SMP=1 et pools littéraux (`tcg-zone-froide-arm64.md`).
+  6. Première tranche d'endurance faite : 15 démarrages de contrôle et 4 jeux sains ;
+     tranche finale du nouveau binaire en cours, résultats au §3 et dans `endurance.md`.
 
 - **Avant de quitter un hôte** : arrêter les campagnes en cours, remettre la VM quotidienne
   (`tools/tcg/matab.sh --restore`), mettre à jour cette page, puis commit et push.
