@@ -81,7 +81,7 @@ bool FrontendSettings::save(const std::string& path) const {
         std::ofstream out(tmp);
         if (!out) return false;
         out << "# Réglages d'ImGuiDock (POMPPC), écrits à l'arrêt du frontend.\n"
-               "# Modifiables à la main ; la disposition des fenêtres est dans imgui.ini.\n"
+               "# Modifiables à la main ; la disposition des fenêtres est dans imgui2.ini.\n"
             << "os = " << os << '\n'
             << "son = " << sound << '\n'
             << "manette = " << pad << '\n'

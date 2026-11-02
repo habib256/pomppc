@@ -25,6 +25,12 @@ Developer : macOS demande un accord au premier lancement. Le frontal et l'assist
 anglais ; le menu OS grise un système sans disque ; `run_os9.sh` ne dépend plus de python3 au
 démarrage. README refondu autour de l'app. QEMU et les binaires invités sont ceux de la 0.4.
 
+**Choix des disques.** Onglet **Disks** du frontal, par système : disque de démarrage, jusqu'à deux
+autres en même temps (un sous OS 9 avec `disks/games.iso` : 4 emplacements IDE, partagés avec les
+CD), création de disques, type HD ou SSD. Tiger n'a pas de notion de SSD : le type pose
+`rotation_rate=1` et un modèle lisible, sans changer la vitesse. Les fenêtres ayant changé de nom, la
+disposition vit dans `imgui2.ini` et repart une fois par défaut.
+
 ## 0.4 (02/11/2026)
 
 Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.4`) au commit de la version, construit

@@ -167,6 +167,22 @@ Your Tiger disk is the single file `disks/tiger.qcow2`: copy it while the VM is 
 The front end's menus are **Machine**, **Games**, **OS**, **Devices** and **View**. In this archive,
 the scripts' Terminal messages are in French.
 
+### Choosing your disks
+
+The **Disks** tab, next to **Library** on the right of the POMPPC window, lets you:
+
+- choose the startup disk with **Start**,
+- add up to two more disks at the same time with **Use**,
+- create a new disk with **New Disk**: a blank disk must then be formatted in the guest, with Disk
+  Utility in Tiger or Drive Setup in Mac OS 9,
+- mark a disk **HD** or **SSD**.
+
+Then click **Apply and Restart**, after shutting the guest down. Each system keeps its own choice.
+
+**SSD is only a label.** The guest sees a non-rotating drive named *POMPPC SSD*, but Tiger has no
+notion of SSD, and speed doesn't change. Mac OS 9 allows one extra disk, not two, while
+`disks/games.iso` exists: the machine has four IDE slots, shared with the CDs.
+
 ### Changing the display resolution
 
 Use Tiger's **System Preferences ▸ Displays**, while Tiger runs. Every listed mode works, from

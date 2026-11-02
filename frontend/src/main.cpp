@@ -8,7 +8,7 @@
 //
 // F1 : the guest screen is an ImGui window docked in the middle of a
 // full-frame DockSpace (menus, Ludothèque, Bilan, Journal around it; layout
-// built once with DockBuilder, then saved in .run/imgui.ini). The guest image
+// built once with DockBuilder, then saved in .run/imgui2.ini). The guest image
 // is always drawn at the largest rectangle keeping the scanout's aspect ratio
 // (black bands, never stretched), unless a fixed zoom is picked in Vue.
 // Vue ▸ Plein écran (Alt+Enter, Ctrl+Cmd+F or F11 to enter/leave; Escape goes to the guest)
@@ -311,7 +311,7 @@ static const char* kWinDisks   = "Disks";
 static volatile std::sig_atomic_t gQuitSignal = 0;
 static void onQuitSignal(int) { gQuitSignal = 1; }
 
-// Default layout, built only when imgui.ini has no node for the dockspace
+// Default layout, built only when imgui2.ini has no node for the dockspace
 // (first launch, or after Vue ▸ Disposition par défaut): guest in the
 // central node, Ludothèque on the right, Bilan + Journal below.
 static void buildDefaultLayout(ImGuiID dsId, const ImGuiViewport* vp) {
@@ -346,7 +346,10 @@ int main(int argc, char** argv) {
     std::string tigerSh = root + "/run_tiger.sh";
     std::string os9Sh = root + "/run_os9.sh";
     // Docking layout persists next to the QMP socket, whatever the cwd.
-    static std::string iniPath = runtimeDir + "/imgui.ini";
+    // imgui2.ini depuis que les fenêtres ont des noms anglais (02/11) : un ancien imgui.ini ne les
+    // reconnaît pas, et l'écran de l'invité en sortait flottant et minuscule. La disposition
+    // repart donc une fois par défaut.
+    static std::string iniPath = runtimeDir + "/imgui2.ini";
     const std::string chimeSettingsPath = runtimeDir + "/chime.conf";
     // Réglages d'ImGuiDock : relus ici, écrits à l'arrêt (fin de main).
     const std::string feSettingsPath = runtimeDir + "/imguidock.conf";
@@ -988,6 +991,9 @@ int main(int argc, char** argv) {
 
         // ── Disks : disque de démarrage, disques en plus, création ───────
         if (fe.showDisks) {
+            // Pour vérifier le panneau par une capture : un onglet derrière un autre n'y paraît pas.
+            static bool focusDisks = std::getenv("POMPPC_FE_DISKS") != nullptr;
+            if (focusDisks) { ImGui::SetNextWindowFocus(); focusDisks = false; }
             if (ImGui::Begin(kWinDisks, &fe.showDisks)) {
                 const bool tiger = curLauncher == tigerSh;
                 DiskSelection& sel = tiger ? fe.tigerDisks : fe.os9Disks;
@@ -1042,6 +1048,7 @@ int main(int argc, char** argv) {
                             ImGui::EndDisabled();
                             ImGui::TableNextColumn();
                             ImGui::TextUnformatted(d.name.substr(0, d.name.size() - 6).c_str());
+                            ImGui::SetItemTooltip("%s", d.name.c_str());
                             ImGui::TableNextColumn();
                             ImGui::TextUnformatted(formatDiskSize(d.bytes).c_str());
                             ImGui::TableNextColumn();
@@ -1087,8 +1094,10 @@ int main(int argc, char** argv) {
                     ImGui::SameLine();
                     if (ImGui::Button("Refresh##disks")) disksStale = true;
                     if (!diskError.empty()) ImGui::TextWrapped("%s", diskError.c_str());
-                    ImGui::TextDisabled("Format a new disk with Disk Utility in the guest.");
-                    ImGui::TextDisabled("SSD is a label for the guest: speed doesn't change.");
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+                    ImGui::TextWrapped("Format a new disk with Disk Utility in Tiger, or Drive Setup in Mac OS 9.");
+                    ImGui::TextWrapped("SSD is only a label for the guest: speed doesn't change.");
+                    ImGui::PopStyleColor();
                 }
             }
             ImGui::End();

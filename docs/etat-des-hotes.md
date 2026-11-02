@@ -222,6 +222,12 @@ l'assistant, installation complète (pas de média ici), macOS 15 et M1 (M1 de l
 15.8), Colin McRae, matrice. Sans système installé, l'autre système ne s'ajoute pas depuis le
 frontal : son entrée du menu OS reste grisée.
 
+**Panneau Disks (21 h 30, dans la 0.4.1).** Démarrage + 2 disques au plus, HD ou SSD, création.
+Essayé ici : Tiger voit 3 disques, formate le SSD, le volume revient au redémarrage ; démarrage en SSD
+seul ; lancement d'OS 9 avec un disque attaché (QEMU l'attache, sa vue dans OS 9 n'est pas contrôlée).
+Sélections posées par `imguidock.conf` : **aucun clic réel dans le panneau** (pas d'outil d'interface
+sur ce frontal), à essayer à l'œil. Le SSD n'est qu'une étiquette, Tiger n'en a pas la notion.
+
 **Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
 plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente
 courte corrigée par un budget progressif. Matrice des cinq jeux close, **60 cellules

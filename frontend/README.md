@@ -63,7 +63,7 @@ ImGuiDock écrit `.run/imguidock.conf` — OS, son, manette, clavier et souris, 
 fenêtres affichées, plein écran, géométrie de la fenêtre — et le relit au lancement suivant
 (un lanceur passé en argument prime sur l'OS retenu ; le plein écran est écrit pour
 information seulement, ImGuiDock démarre toujours en fenêtre depuis le 26/10). Texte « clé = valeur », modifiable à la
-main ; la disposition des fenêtres reste dans `.run/imgui.ini`, le carillon dans
+main ; la disposition des fenêtres reste dans `.run/imgui2.ini`, le carillon dans
 `.run/chime.conf`. Une épreuve `POMPPC_FE_SCRIPT` ne le lit ni ne l'écrit.
 
 The *default* launcher is derived from the binary's own location (`build/` → repo root), so it
@@ -137,8 +137,7 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
 
 - The guest screen (**Screen**) is docked in the centre of a full-frame DockSpace, with
   **Library** on the right and **Log** / **Status** below; every panel can be
-  re-docked, the layout is saved in `<repo>/.run/imgui.ini` and **View ▸ Disposition par
-  défaut** rebuilds it.
+  re-docked, the layout is saved in `<repo>/.run/imgui2.ini` and **View ▸ Default Layout** rebuilds it.
 - The guest is always drawn at the largest rectangle with **its own aspect ratio**, centred,
   black bands around it — never stretched (**View ▸ Fit to Window**, the default).
   **View ▸ 50/100/150/200 %** still fixes the size in window mode (scrollbars if larger).
@@ -154,6 +153,13 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   full-screen behaviour is disabled — the green button zooms instead.
 - The pointer is mapped on the **rectangle actually drawn** (`SetAbsPosition` in guest pixels,
   relative motion scaled by the same factor, remainders carried); the bands send nothing.
+- **Disks** (tab next to Library, **View ▸ Disks**) chooses the guest's disks, per system: the
+  startup disk, and up to two more at the same time (one under Mac OS 9 when `disks/games.iso`
+  exists: the machine has 4 IDE slots, shared with the CDs). It lists the qcow2 images of `disks/`,
+  creates new ones, and marks each disk HD or SSD. **Apply and Restart** restarts the VM. The choice
+  is kept in `.run/imguidock.conf`; `DISK` or `OS9_DISK` set by hand take priority. SSD only sets
+  `rotation_rate=1` and a model name in the guest: Tiger has no notion of SSD, and speed doesn't
+  change. The launchers receive the choice through `POMPPC_EXTRA_DISKS` (`scripts/disques.sh`).
 - **Machine ▸ Absolute Mouse in Window** (on by default): mac99 has both a tablet
   (virtio-tablet from `run_os9.sh`, usb-tablet with `TABLET=1`) and a USB HID mouse; the HID
   mouse becomes QEMU's *current* pointer as soon as the guest polls it, which made OS 9's

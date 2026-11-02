@@ -2,7 +2,7 @@
 // Copyright (c) 2026 VERHILLE Arnaud
 // FrontendSettings — réglages d'ImGuiDock gardés d'un lancement à l'autre.
 //
-// Écrits à l'arrêt dans .run/imguidock.conf (à côté d'imgui.ini, qui garde la
+// Écrits à l'arrêt dans .run/imguidock.conf (à côté d'imgui2.ini, qui garde la
 // disposition des fenêtres, et de chime.conf), relus au lancement. Format
 // texte « clé = valeur », une par ligne, lisible et modifiable à la main : une
 // clé inconnue ou une valeur illisible est ignorée (la valeur par défaut
