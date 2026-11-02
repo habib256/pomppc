@@ -18,6 +18,6 @@ NX_ARGS="-benchmark demos/demo1"
 [ -f /Users/tiger/nexuiz.env ] && . /Users/tiger/nexuiz.env
 echo "start $(date) $NX_ARGS" >> $D/log.txt
 env | grep POMPPC >> $D/log.txt
-cd "$APP/Contents/MacOS"
+cd "$APP/Contents/MacOS" || exit 1
 ./nexuiz-osx-agl -basedir /Users/tiger/Nexuiz -nosound +vid_fullscreen 0 +vid_width 800 +vid_height 600 +developer 1 $NX_ARGS < /dev/null > $D/stdout.txt 2>&1
 echo "exit $? $(date)" >> $D/log.txt

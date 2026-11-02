@@ -24,6 +24,7 @@ mkdir -p "$BENCH"
 # Options QEMU communes à l'install et au run. $1 = mode boot ('d'=cdrom, 'c'=disque).
 qemu_common() {
   local bootdev="$1"
+  # shellcheck disable=SC2034 # Résultat renvoyé au script appelant.
   QEMU_ARGS=(
     -M "$MACHINE"
     -cpu "$CPU"

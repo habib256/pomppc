@@ -19,7 +19,7 @@ set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 R="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
 R="${R:-$WT}"
-cd "$WT"
+cd "$WT" || exit 1
 TAG=${1:?étiquette}
 EXTRA=${2:-}
 DISK="${DEVDISK:?DEVDISK=<image raw de dev> requis}"
@@ -62,7 +62,7 @@ cp -f "/tmp/perf-$PID.map" "$OUT/" 2>/dev/null
 d=$(sed -n 's/^→ //p' "$OUT/job.log" | tail -1)
 [ -n "$d" ] && [ -d "$d" ] && cp -rf "$d" "$OUT/out" 2>/dev/null
 DEVDISK="$DISK" python3 tools/guest/devloop.py shutdown >> "$OUT/run.log" 2>&1
-for i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
+for _i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
 if kill -0 "$PID" 2>/dev/null; then
   echo "⚠ QEMU encore vivant après shutdown : devloop.py stop" | tee -a "$OUT/run.log"
   DEVDISK="$DISK" python3 tools/guest/devloop.py stop >> "$OUT/run.log" 2>&1

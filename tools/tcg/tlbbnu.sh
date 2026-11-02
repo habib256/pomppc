@@ -27,7 +27,7 @@ CPU="$CPU,x-lmw-inline=on,x-dcbz-inline=on,x-dirty-skip=on,x-pteg-map=on,x-lfs-k
     2> "$T/err" &
 QP=$!
 ok=""
-for i in $(seq 1 60); do
+for _i in $(seq 1 60); do
   sleep 1
   [ -S "$T/mon" ] || continue
   if python3 "$HERE/hmp.py" "$T/mon" "xp /1wx 0x400ffc" 2>/dev/null | grep -q 600dcafe; then

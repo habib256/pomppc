@@ -43,7 +43,7 @@ stop_vm() {
 }
 
 wait_ssh() {
-  for i in $(seq 1 60); do
+  for _i in $(seq 1 60); do
     $TS true >/dev/null 2>&1 && return 0
     sleep 5
   done
@@ -55,7 +55,7 @@ for P in $PASSES; do
   mkdir -p "$OUT"
   echo "▶ passe QGPU_GPU_COPY=$P ($QB) → $OUT"
   stop_vm
-  for essai in 1 2; do
+  for _essai in 1 2; do
     ( cd "$R" && QEMU_BIN="$QB" QGPU_GPU_COPY=$P nohup ./run_tiger.sh > "$OUT/run_tiger.log" 2>&1 & )
     sleep 20
     wait_ssh && break

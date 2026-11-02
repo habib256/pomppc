@@ -9,6 +9,21 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Contrôle général remis au vert, 02/11 matin.** Les 49 scripts en échec
+  ShellCheck sont corrigés : retours de `cd`, arguments littéraux, variables
+  réellement inutilisées et nettoyages par noms complets. Trois nettoyages
+  testés avec espaces, retour à la ligne et tiret initial. Réactivation du
+  différentiel softfloat sur l'objet QEMU 11, avec ses règles PPC de NaN :
+  1 673 079 cas sans divergence. Harnais isolé `--slow` : **470 OK, zéro échec,
+  une exclusion Linux sur le M4** ; QFB, QGPU et pont D-Bus passent.
+- **Zone froide arm64 implantée, 02/11 matin.** `tcg/0066` : cinq callbacks,
+  relais chauds conservant le chemin rapide, régions bornées en SMP=1/2,
+  pools froids séparés et état chaud restauré sur erreur. 53 cas exécutés
+  nativement sur le M4, cinq mutants ; tests invités mémoire/FP/vecteurs,
+  fautes PC/DAR, tlbb et code réécrit, sorties identiques au témoin. Six
+  preuves d'image vertes avec l'attente à budget. A/B des cinq jeux en cours,
+  aucun allumage à ce stade (`tcg-zone-froide-arm64.md`).
+
 - **Restauration : la VM survit à son lanceur, 02/11.** `matab.sh` utilise une
   vraie session détachée ; sur macOS sans `setsid(1)`, `host_detach` passe par
   `os.setsid` et `exec`, car `nohup` gardait le groupe parent. Deux tests échouent

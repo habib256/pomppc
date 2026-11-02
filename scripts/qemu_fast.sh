@@ -126,7 +126,8 @@ pomppc_fast_ok() {
 
 # Étiquette lisible d'un binaire rapide, d'après son relevé.
 pomppc_fast_label() {
-  local st="$(dirname "$1")/pomppc-build.txt" var
+  local st var
+  st="$(dirname "$1")/pomppc-build.txt"
   var="$(sed -n 's/^variante=//p' "$st" 2>/dev/null)"
   case ",$var," in
     *,pgo,*) echo "binaire rapide (PGO, -O3, -march=native)" ;;
@@ -157,7 +158,9 @@ pomppc_pick_qemu() { # pomppc_pick_qemu <smp>
   # Pas de binaire rapide construit : silence, c'est le cas de tout le monde.
   [ -e "$b" ] || [ "${QEMU_FAST:-}" = 1 ] || return 0
   if pomppc_fast_ok "$b" "$n"; then
+    # shellcheck disable=SC2034 # Résultat renvoyé au script appelant.
     QEMU_BIN="$b"
+    # shellcheck disable=SC2034 # Résultat renvoyé au script appelant.
     QEMU_BIN_LABEL="$(pomppc_fast_label "$b")"
     return 0
   fi

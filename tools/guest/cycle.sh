@@ -37,6 +37,6 @@ step "capture avant kill"; python3 "$ROOT/scripts/moncmd.py" "$MON" "screendump 
 # sudo kill -9 : killgame.py (stub GDB) a échoué une fois (26/09) ; KILLGAME=1 pour l'ancien geste
 if [ "${KILLGAME:-}" = 1 ]; then step "kill"; python3 "$ROOT/tools/guest/killgame.py"
 else step "kill -9"; $T "echo tiger974 | sudo -S killall -9 'Colin McRae Rally Mac' 2>&1 | grep -v Password; true"; fi; sleep 15
-step "journal"; for i in 1 2 3 4 5 6; do $T "cat ~/cmr-dump2/note.txt" > "$R/dump2-note.txt" 2>/dev/null && break; sleep 15; done
+step "journal"; for _i in 1 2 3 4 5 6; do $T "cat ~/cmr-dump2/note.txt" > "$R/dump2-note.txt" 2>/dev/null && break; sleep 15; done
 grep -n 'SONDE\|slot\|vbo \|DRAW_RAW\|fallback\|broken\|VAO' "$R/dump2-note.txt" | head -80; $T "cat ~/cmr-dump2/log.txt; ls ~/cmr-dump2/dump | wc -l; tail -1 ~/cmr-dump2/frames.csv"
 step "fin"

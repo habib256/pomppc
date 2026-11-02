@@ -24,7 +24,7 @@ set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 R="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
 R="${R:-$WT}"
-cd "$WT"
+cd "$WT" || exit 1
 TAG=${1:?étiquette}; shift
 GUI=""
 [ "${1:-}" = --gui ] && { GUI=--gui; shift; }
@@ -82,7 +82,7 @@ for spec in "$@"; do
   [ -n "$d" ] && [ -d "$d" ] && cp -rf "$d" "$J/out" 2>/dev/null
 done
 python3 tools/guest/devloop.py shutdown $GUI >> "$OUT/run.log" 2>&1
-for i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
+for _i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
 if kill -0 "$PID" 2>/dev/null; then
   echo "⚠ QEMU encore vivant après shutdown : devloop.py stop" | tee -a "$OUT/run.log"
   python3 tools/guest/devloop.py stop >> "$OUT/run.log" 2>&1

@@ -13,7 +13,7 @@ while :; do
     [ -f "$d/started" ] && continue
     touch "$d/started"
     echo "job $d" >> $LOG
-    ( cd "$d" && sh ./gui.sh > gui-log.txt 2>&1; echo "rc=$?" >> gui-log.txt; touch done )
+    ( cd "$d" || exit 1; sh ./gui.sh > gui-log.txt 2>&1; echo "rc=$?" >> gui-log.txt; touch "done" )
   done
   sleep 1
 done

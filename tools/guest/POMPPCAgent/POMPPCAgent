@@ -9,7 +9,8 @@ StartService()
     if [ -r /pomppc/agent.conf ]; then
         ConsoleMessage "Starting POMPPC dev agent"
         mkdir -p /tmp/pomppc-gui && chmod 1777 /tmp/pomppc-gui
-        nohup sh /pomppc/agent.sh $(cat /pomppc/agent.conf) > /var/log/pomppc-agent.log 2>&1 &
+        read -r in_sector out_sector < /pomppc/agent.conf || return 1
+        nohup sh /pomppc/agent.sh "$in_sector" "$out_sector" > /var/log/pomppc-agent.log 2>&1 &
     fi
 }
 

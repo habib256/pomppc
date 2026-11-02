@@ -1,0 +1,278 @@
+POMPPC tcg/0066 : zone froide arm64, relais chauds et pools separes
+
+[D] QEMU v11.1.2 + serie POMPPC jusqu'a 0065/0064. Les branches imm19
+vers les callbacks memoire/FP passent par un B imm26 en fin de corps
+chaud. raddr reste dans le corps ; les labels tlbb ajoutes dans le froid
+gardent leurs branches imm19. Regions nominales <=64 Mio meme en SMP=1,
+controle des bornes reelles <128 Mio ; pools froids finalises dans le
+froid, et curseurs chauds restaures sur tous les retours d'erreur.
+[A] M4 : tools/tcg/coldzoneproof.py extrait les fonctions de cet arbre ;
+relais/pools executes sur MAP_JIT, erreurs et mutants controles.
+Pas d'allumage : preuves invitees et A/B des cinq jeux requis.
+
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -6678,6 +6678,61 @@
+     tcg_out_helper_load_common_args(s, ldst, parm, info, next_arg);
+ }
+ 
++/* POMPPC tcg/0066: cold code and its literal pool share a region, but
++ * not the hot pool. Restore every hot cursor/list even on overflow or a
++ * failed relocation; a failed TB must not publish a partial cold tail. */
++static int tcg_out_cold_finalize(TCGContext *s)
++{
++    tcg_insn_unit *hot, *cold;
++    void *hot_highwater, *hot_data;
++    TCGLabelPoolData *hot_pool;
++    int i;
++
++    if (!s->code_cold_ptr || QSIMPLEQ_EMPTY(&s->ldst_labels)) {
++        return tcg_out_ldst_finalize(s);
++    }
++#ifdef TCG_TARGET_COLD_VENEERS
++    i = tcg_out_cold_veneers(s);
++    if (i < 0) {
++        if (i == -1) {
++            qatomic_set(&s->code_gen_ptr, s->code_gen_highwater);
++        }
++        return i;
++    }
++#endif
++    hot = s->code_ptr;
++    hot_highwater = s->code_gen_highwater;
++    hot_data = s->data_gen_ptr;
++    hot_pool = s->pool_labels;
++    s->code_ptr = s->code_cold_ptr;
++    s->code_gen_highwater = s->code_cold_highwater;
++    s->data_gen_ptr = NULL;
++    s->pool_labels = NULL;
++
++    i = tcg_out_ldst_finalize(s);
++    if (i >= 0) {
++        i = tcg_out_pool_finalize(s);
++    }
++    cold = s->code_ptr;
++    s->code_ptr = hot;
++    s->code_gen_highwater = hot_highwater;
++    s->data_gen_ptr = hot_data;
++    s->pool_labels = hot_pool;
++    if (i == -1) {
++        qatomic_set(&s->code_gen_ptr, hot_highwater);
++    }
++    if (i < 0) {
++        return i;
++    }
++#ifndef CONFIG_TCG_INTERPRETER
++    flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_cold_ptr),
++                        (uintptr_t)s->code_cold_ptr,
++                        tcg_ptr_byte_diff(cold, s->code_cold_ptr));
++#endif
++    s->code_cold_ptr = cold;
++    return 0;
++}
++
+ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
+ {
+     int i, num_insns;
+@@ -6879,40 +6934,9 @@
+     s->gen_insn_end_off[num_insns] = tcg_current_code_size(s);
+ 
+     /* Generate TB finalization at the end of block */
+-    if (s->code_cold_ptr && !QSIMPLEQ_EMPTY(&s->ldst_labels)) {
+-        /*
+-         * POMPPC tcg/0056: the slow paths go to the cold zone of the
+-         * region.  They reach the body by rel32 jumps and pass it as the
+-         * return address, so the TB keeps only its body (tb->tc.size).
+-         */
+-        tcg_insn_unit *hot = s->code_ptr;
+-        void *hot_highwater = s->code_gen_highwater;
+-        tcg_insn_unit *cold = s->code_cold_ptr;
+-
+-        s->code_ptr = cold;
+-        s->code_gen_highwater = s->code_cold_highwater;
+-        i = tcg_out_ldst_finalize(s);
+-        cold = s->code_ptr;
+-        s->code_ptr = hot;
+-        s->code_gen_highwater = hot_highwater;
+-        if (i == -1) {
+-            /* cold zone full: tcg_tb_alloc must move to a new region */
+-            qatomic_set(&s->code_gen_ptr, hot_highwater);
+-        }
+-        if (i < 0) {
+-            return i;
+-        }
+-#ifndef CONFIG_TCG_INTERPRETER
+-        flush_idcache_range((uintptr_t)tcg_splitwx_to_rx(s->code_cold_ptr),
+-                            (uintptr_t)s->code_cold_ptr,
+-                            tcg_ptr_byte_diff(cold, s->code_cold_ptr));
+-#endif
+-        s->code_cold_ptr = cold;
+-    } else {
+-        i = tcg_out_ldst_finalize(s);
+-        if (i < 0) {
+-            return i;
+-        }
++    i = tcg_out_cold_finalize(s);
++    if (i < 0) {
++        return i;
+     }
+     i = tcg_out_pool_finalize(s);
+     if (i < 0) {
+--- a/tcg/region.c
++++ b/tcg/region.c
+@@ -953,6 +953,13 @@
+ }
+ #endif /* USE_STATIC_CODE_GEN_BUFFER, WIN32, POSIX */
+ 
++#if defined(__aarch64__) && !defined(CONFIG_TCG_INTERPRETER)
++static size_t tcg_cold_region_count(size_t tb_size, size_t n_regions)
++{
++    return MAX(n_regions, DIV_ROUND_UP(tb_size, 64 * MiB));
++}
++#endif
++
+ /*
+  * Initializes region partitioning.
+  *
+@@ -979,7 +986,7 @@
+  */
+ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_threads)
+ {
+-#if defined(__x86_64__)
++#if defined(__x86_64__) || (defined(__aarch64__) && !defined(CONFIG_TCG_INTERPRETER) && !defined(CONFIG_USER_ONLY))
+     if (tcg_cold_split) {
+         fprintf(stderr, "tcg: chemins lents en zone froide (x-tcg-cold, tcg/0056)\n");
+     }
+@@ -1028,6 +1035,15 @@
+      * the buffer; we will assign those to the last region.
+      */
+     region.n = tcg_n_regions(tb_size, max_threads);
++#if defined(__aarch64__) && !defined(CONFIG_TCG_INTERPRETER)
++    if (tcg_cold_split) {
++        /* [D] QEMU v11.1.2 reloc_pc26: signed 26-bit word displacement.
++         * POMPPC tcg/0066: <=64 MiB nominal regions keep hot/cold B in
++         * range also with one vCPU (which otherwise gets one GiB region).
++         * The last region may include the page-alignment remainder. */
++        region.n = tcg_cold_region_count(tb_size, region.n);
++    }
++#endif
+     region_size = tb_size / region.n;
+     region_size = QEMU_ALIGN_DOWN(region_size, page_size);
+ 
+@@ -1065,6 +1081,11 @@
+         void *start, *end;
+ 
+         tcg_region_bounds(i, &start, &end);
++#if defined(__aarch64__) && !defined(CONFIG_TCG_INTERPRETER)
++        if (tcg_cold_split) {
++            g_assert((uintptr_t)end - (uintptr_t)start < 128 * MiB);
++        }
++#endif
+         if (have_prot != need_prot) {
+             int rc;
+ 
+--- a/tcg/aarch64/tcg-target.c.inc
++++ b/tcg/aarch64/tcg-target.c.inc
+@@ -114,6 +114,19 @@
+         return true;
+     }
+     return false;
++}
++
++/*
++ * [D] QEMU v11.1.2: the five ldst/FP callbacks originally use imm19.
++ * POMPPC tcg/0066: a hot veneer is an unconditional B (imm26); labels
++ * appended while emitting cold tlbb slow paths retain their imm19 branch.
++ */
++static bool reloc_ldst(tcg_insn_unit *label, const tcg_insn_unit *target)
++{
++    if ((*label & 0xfc000000u) == 0x14000000u) {
++        return reloc_pc26(label, target);
++    }
++    return reloc_pc19(label, target);
+ }
+ 
+ static bool reloc_pc14(tcg_insn_unit *src_rw, const tcg_insn_unit *target)
+@@ -1396,6 +1409,26 @@
+     tcg_out_insn(s, branch, B, offset);
+ }
+ 
++/* POMPPC tcg/0066: prepare imm26 veneers in the hot TB tail.  The
++ * original B.cond/CBNZ and its fast fall-through stay unchanged.  raddr
++ * stays in the body, so memory and deferred FP faults retain their PC. */
++static int tcg_out_cold_veneers(TCGContext *s)
++{
++    TCGLabelQemuLdst *lb;
++
++    QSIMPLEQ_FOREACH(lb, &s->ldst_labels, next) {
++        if ((void *)(s->code_ptr + 1) > s->code_gen_highwater) {
++            return -1;
++        }
++        if (!reloc_pc19(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++            return -2;
++        }
++        lb->label_ptr[0] = s->code_ptr;
++        tcg_out_insn(s, branch, B, 0);
++    }
++    return 0;
++}
++
+ static void tcg_out_call_int(TCGContext *s, const tcg_insn_unit *target)
+ {
+     ptrdiff_t offset = tcg_pcrel_diff(s, target) >> 2;
+@@ -1613,7 +1646,7 @@
+ {
+     MemOp opc = get_memop(lb->oi);
+ 
+-    if (!reloc_pc19(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++    if (!reloc_ldst(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+         return false;
+     }
+ 
+@@ -1632,7 +1665,7 @@
+ {
+     MemOp opc = get_memop(lb->oi);
+ 
+-    if (!reloc_pc19(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++    if (!reloc_ldst(lb->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+         return false;
+     }
+ 
+@@ -1929,7 +1962,7 @@
+     TCGLabelQemuLdst *ld;
+     HostAddress h;
+ 
+-    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++    if (!reloc_ldst(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+         return false;
+     }
+     ld = prepare_host_addr(s, &h, l->addr_reg, l->oi, true);
+@@ -2561,7 +2594,7 @@
+  */
+ static bool tcg_out_ppc_fp32_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+ {
+-    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++    if (!reloc_ldst(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+         return false;
+     }
+     tcg_out_mov(s, TCG_TYPE_I64, TCG_REG_TMP0, l->fp_in[0]);
+@@ -2936,7 +2969,7 @@
+ /* The stub: helper(env, &vD, &vA, &vB, &vC) in x0-x4; no exception raised */
+ static bool tcg_out_ppc_vfp_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+ {
+-    if (!reloc_pc19(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
++    if (!reloc_ldst(l->label_ptr[0], tcg_splitwx_to_rx(s->code_ptr))) {
+         return false;
+     }
+     tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
+--- a/tcg/aarch64/tcg-target.h
++++ b/tcg/aarch64/tcg-target.h
+@@ -14,6 +14,8 @@
+ #define AARCH64_TCG_TARGET_H
+ 
+ #define TCG_TARGET_INSN_UNIT_SIZE  4
++/* POMPPC tcg/0066: cold slow paths use hot branch veneers. */
++#define TCG_TARGET_COLD_VENEERS 1
+ #define MAX_CODE_GEN_BUFFER_SIZE  ((size_t)-1)
+ 
+ typedef enum {

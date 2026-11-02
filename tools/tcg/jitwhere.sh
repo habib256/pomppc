@@ -13,7 +13,7 @@ set -u
 N=${1:-10}; BIN=${2:-$HOME/src/qemu-tcg19/build/qsr1564}; shift 2 2>/dev/null || shift $#
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-for i in $(seq "$N"); do
+for _i in $(seq "$N"); do
   "$BIN" -M mac99,via=pmu -cpu g4 -m 768 -smp 2 -accel tcg,thread=multi${JITOPT:+,$JITOPT} -S \
     -display none -monitor none -serial none -nic none "$@" > "$TMP/log" 2>&1 &
   pid=$!

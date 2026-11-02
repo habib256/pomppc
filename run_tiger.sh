@@ -994,10 +994,19 @@ fi
 # POMPPC_POLL_NS=1 à QEMU (select à la microseconde). Éteint par défaut tant
 # que l'A/B n'est pas fait ; un QEMU sans 0058 ignore la variable.
 # POLLNS=2 : tcg/0065, seulement 0 < délai < 1 ms ; sinon g_poll.
+# POLLNS=3 : tcg/0067, budget de réveils précis et repli temporaire sur g_poll.
+# BEGIN POLLNS BUDGET GUARD
+if [ "${POLLNS:-0}" = 3 ] && ! qemu_has_poll_budget "$BIN"; then
+  echo "⚠ POLLNS=3 exige le budget de réveils tcg/0067 dans $BIN ; reconstruire QEMU." >&2
+  exit 1
+fi
+# END POLLNS BUDGET GUARD
 if [ "${POLLNS:-0}" != 0 ]; then
   export POMPPC_POLL_NS="$POLLNS"
   if [ "$POLLNS" = 2 ]; then
     MODE="$MODE + ATTENTE µs SOUS 1 ms"
+  elif [ "$POLLNS" = 3 ]; then
+    MODE="$MODE + ATTENTE µs À CADENCE BORNÉE"
   else
     MODE="$MODE + ATTENTE À LA MICROSECONDE"
   fi

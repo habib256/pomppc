@@ -10,7 +10,7 @@ D="${1:-bench/tcg/res}"; shift
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 files() {
   case "$1" in
-    *:*) ls "$D/${1%%:*}"-mb-"${1#*:}"-[0-9].txt 2>/dev/null | paste -sd, - ;;
+    *:*) ls "$D/${1%%:*}-mb-${1#*:}"-[0-9].txt 2>/dev/null | paste -sd, - ;;
     *)   ls "$D"/*-mb-"$1"-[0-9].txt 2>/dev/null | paste -sd, - ;;
   esac
 }

@@ -138,13 +138,20 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      `archive/m4-pollns-court-0211`, `tcg-g4.md` §42.2. Le levier reste éteint. Sur UT,
      travail d'horloge 0,013→0,18 cœur et charge vCPU 1,07→1,63 : **appelant identifié**
      sur le M4 dans `delay_idle` (noyau xnu-792.24.17, attente active SMP),
-     `docs/re/ut-attente-m4.md`. Répartir la perte entre réveils, attente et verrou avant
-     un nouveau levier ; aucune attente du noyau n'est supprimée.
-  4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
-     sur un goulot L1i propre au PC. **Revue et preuve préparatoire faites le 02/11** :
-     36 portes longues exécutées sur le M4, deux mutants détectés ; familles mémoire,
-     FP et tlbb à couvrir, régions SMP=1 et pools littéraux à traiter. Implantation et
-     A/B restent à faire (`docs/tcg-zone-froide-arm64.md`), levier toujours sans effet.
+     `docs/re/ut-attente-m4.md`. Reprise du matin : diagnostic de cadence
+     (UT ~11 000 expirations/s en mode 2, zen ~2 000), deux prototypes écartés
+     et archivés. **0067, `POLLNS=3`** : budget par fil, retour temporaire au
+     poll courant en rafale ; 587 contrôles de contrat et cinq mutants. Pilote
+     encourageant, A/B complet des cinq jeux avec témoin en cours. Aucun
+     raccourci du noyau ni changement d'horloge ; éteint par défaut.
+  4. **Zone froide arm64 implantée le 02/11 matin (`tcg/0066`)** : relais chauds
+     imm26 pour les cinq familles mémoire/FP/tlbb, régions nominales ≤64 Mio
+     même en SMP=1, pools froids séparés. 53 cas natifs et cinq mutants ;
+     preuves invitées SMP=1/JIT éloigné et SMP=2/tampon 64 Mio réussies,
+     sorties identiques au témoin, fautes au PC/DAR exact. Six preuves d'image
+     vertes avec 0066+0067. A/B complet en cours ; **`TCGCOLD=1` agit sur le M4,
+     mais reste éteint par défaut** (`docs/tcg-zone-froide-arm64.md`). Le gain
+     PC de 1–2 % ne présume pas du résultat M4.
   5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle
      et 4 cycles, puis 55 démarrages et 4 cycles avec le binaire final : **70 démarrages
      et 8 jeux sains** (`endurance.md` §16–17). Restauration détachée corrigée et vérifiée.

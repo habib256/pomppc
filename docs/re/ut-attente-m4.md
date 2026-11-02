@@ -93,3 +93,51 @@ La même adresse chaude figurait dans l'étude du PC, mais son noyau doit avoir
 son empreinte et ses octets vérifiés **sur le PC** avant de transférer cette
 identification. Accélérer uniquement `mftb` ferait aussi tourner cette attente
 plus vite : le gain utile sur le jeu reste à prouver.
+
+## 5. Reprise du matin : compter la cadence, puis la borner
+
+[A — hôte, diagnostic] Deux parties séparées, `m4-attente-diag2-0211`, même
+binaire diagnostique, même scène ; compteur local au fil autour du vrai poll,
+traces des signaux du décrémenteur. Les temps de jeu instrumentés ne sont pas
+utilisés comme preuve de vitesse. Médianes de relevés d'environ une seconde :
+
+| scène et mode | attentes positives expirées / s | signaux DEC levés / s |
+|---|---:|---:|
+| zen, référence | 220 | 763 |
+| zen, mode 2 précis | 1 977 | 1 546 |
+| UT, référence | 563 | 917 |
+| UT, mode 2 précis | 11 261 | 11 135 |
+
+Intervalles et sources dans `bench/tcg/attente-correction-0211/cadence.json` ;
+11–15 secondes par cellule, un seul fil observé dans ces relevés. Un poll
+non bloquant n'est pas compté comme une expiration de délai ; un signal DEC
+levé n'est pas assimilé à une interruption déjà traitée par le noyau.
+
+Deux premiers essais sont archivés :
+`archive/m4-pollns-plancher-250us-0211` (diagnostic avec plancher de 250 µs,
+la perte UT reste présente), et `archive/m4-pollns-idle-0211` (précision seulement
+quand QEMU voit tous les vCPU inactifs ; son pilote ne retrouve pas le gain zen).
+Leurs pilotes à une partie par bras ne prouvent ni gain ni neutralité.
+
+**0067, `POLLNS=3`** : budget local au fil, 128 expirations précises dans une
+fenêtre de 32 ms, puis retour au `g_poll` courant pendant 250 ms. Les E/S prêtes,
+erreurs, replis FD_SETSIZE et polls non bloquants ne consomment pas le budget.
+Une fenêtre écoulée réinitialise le compte. Les modes 0/1/2 sont conservés,
+le mode est initialisé par `g_once`, aucune horloge ni instruction invitée
+n'est modifiée. [F — choix de politique] Ces seuils sont à juger par l'A/B
+complet, pas par une propriété supposée du G4.
+
+**587 cas de contrat/routage réussis**, dont temps simulé pour les frontières
+32/250 ms, fenêtres séparées et indépendance des fils. Cinq mutants détectés
+(repli supprimé, état partagé, E/S comptées, frontière 1 ms, fenêtre stricte).
+`.run/pollns-budget-proof-0211.log`, `mutants-budget/` dans le dossier d'étude.
+
+Pilote sans traces, une partie par bras : zen 2,8686→2,3553 ms/image ;
+UT 20,1304→19,7263. **Signal encourageant, pas de conclusion de vitesse** sur
+un seul passage. L'A/B entrelacé des cinq jeux avec témoin reste à faire.
+
+Le binaire expose le point de trace `pomppc_poll_budget_backoff`, désactivé
+par défaut. Le lanceur exige cette capacité avant `POLLNS=3` : un ancien 0058
+interprétait toute chaîne non nulle comme le mode 1. La sonde n'amorce pas de
+VM ; absence et échec sont refusés. Tests du vrai garde avec chemin contenant
+des espaces, et de la vraie sonde (présent, absent, échec).

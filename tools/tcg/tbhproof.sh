@@ -26,14 +26,14 @@ NPH=100
 run() {   # run NOM THREAD TBHEAD DÉLAI [ENV...] → « marque nb A B C E/S faute » sur stdout
     local name=$1 thr=$2 th=$3 lim=$4; shift 4
     # socket relative (chemin AF_UNIX < 108 octets quel que soit TMPDIR)
-    local sock="$name.sock" res="" t
+    local sock="$name.sock" res="" _t
     cd "$OUT" || return
     env "$@" "$QB" -M mac99 -cpu g4 -m 256 -smp 1 -accel "tcg,thread=$thr,x-tb-head=$th" \
         -bios "$OUT/t.bin" -display none -serial none -parallel none \
         -nodefaults -audio none -monitor "unix:$sock,server=on,wait=off" \
         > "$OUT/$name.out" 2> "$OUT/$name.err" &
     local pid=$!
-    for t in $(seq 1 $((lim * 2))); do
+    for _t in $(seq 1 $((lim * 2))); do
         sleep 0.5
         [ -S "$sock" ] || continue
         local r
@@ -48,7 +48,7 @@ run() {   # run NOM THREAD TBHEAD DÉLAI [ENV...] → « marque nb A B C E/S fau
     timeout 10 python3 "$HERE/hmp.py" "$sock" "quit" > /dev/null 2>&1
     kill $pid 2>/dev/null; sleep 0.5; kill -9 $pid 2>/dev/null
     wait $pid 2>/dev/null
-    cd - > /dev/null
+    cd - > /dev/null || exit 1
     echo "${res:-AUCUNE}"
 }
 

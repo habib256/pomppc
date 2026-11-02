@@ -10,6 +10,7 @@
 # sortie et la fin dans $D/log.txt ; l'hôte attend « exit » pour conclure.
 C=/Users/tiger/matrice/cellule.sh
 [ -f "$C" ] || { echo "pas de $C"; exit 1; }
+# shellcheck source=/dev/null
 . "$C"
 mkdir -p "$D" ${POMPPC_GL_DUMP:+"$POMPPC_GL_DUMP"}
 echo "start $(date '+%Y-%m-%d %H:%M:%S')" >> "$D/log.txt"

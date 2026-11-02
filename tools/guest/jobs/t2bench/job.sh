@@ -16,7 +16,7 @@ if [ "${BUILD:-1}" = 1 ] || [ ! -x /tmp/gltest-t2 ]; then
   cp $SRC/guest/gltest/gltest /tmp/gltest-t2
 fi
 t() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
-cd /tmp
+cd /tmp || exit 1
 # chauffe (une passe courte, non comptée)
 env GLTEST_NOWS=1 GLTEST_REQUIRE=POMPPC GLTEST_D3FR=20 /tmp/gltest-t2 d3inter 256 256 /tmp/t2.ppm > $OUT/warm.txt 2>&1
 k=0

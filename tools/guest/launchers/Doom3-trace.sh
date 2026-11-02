@@ -14,5 +14,5 @@ if [ -f /Users/tiger/libexitwatch.dylib ]; then
   POMPPC_EXITWATCH=$T/exitwatch.txt; export POMPPC_EXITWATCH
   DYLD_INSERT_LIBRARIES=/Users/tiger/libexitwatch.dylib; export DYLD_INSERT_LIBRARIES
 fi
-cd "/Users/tiger/Desktop/Doom 3 Demo/Doom 3 Demo.app/Contents/MacOS"
+cd "/Users/tiger/Desktop/Doom 3 Demo/Doom 3 Demo.app/Contents/MacOS" || exit 1
 exec "./Doom 3 Demo" +set com_showFPS 1 > $T/stdout.txt 2>&1
