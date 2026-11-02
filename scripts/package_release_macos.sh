@@ -112,7 +112,8 @@ TP="$OUT/THIRD-PARTY-LICENSES"; mkdir -p "$TP"
   echo "  patches/smp-mac99/openbios-smp-screamer-source.patch."
   echo "Dear ImGui (MIT, https://github.com/ocornut/imgui), statically linked in bin/pomppc."
   echo
-  echo "Dynamic libraries in lib/, copied from Homebrew (license texts in this folder):"
+  echo "Dynamic libraries in lib/, built from the upstream sources of these versions, as listed by"
+  echo "Homebrew (scripts/build_release_deps_macos.sh; license texts in this folder):"
   sort "$ORIG" | while read -r base real; do
     keg="${real%/lib/*}"
     echo "  $base  ←  $(basename "$(dirname "$keg")") $(basename "$keg")"
