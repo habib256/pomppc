@@ -212,8 +212,15 @@ jouer. Matrice, A/B et DOOM 3/UT2004/cmr à ces résolutions **pas faits** (TODO
 (https://github.com/habib256/pomppc/releases/tag/0.4, tag `0.4` sur `c7cd63a`). Cible **macOS 15.0,
 sans Homebrew** (les 25 binaires, garde-fou `MIN_MACOS`) ; recette et arbres dans
 `docs/publier-macos.md`. Archive éprouvée sous macOS 27 sur un M4 seulement, les notes le disent.
-**Reste à éprouver :** macOS 15 et M1 (M1 de l'utilisateur sous 15.8 ; `x-tb-fast` lit `cntfrq_el0`,
-repli possible à vérifier), installation neuve de Tiger (pas de média ici), Colin McRae, matrice.
+
+**0.4.1 préparée, non publiée (21 h).** `POMPPC.app` dans `dist/POMPPC-0.4.1-macos-arm64.dmg`, commit
+`5173664` : assistant de premier lancement, données dans `~/POMPPC`, frontal en anglais. Essayée
+ici depuis le `.dmg` avec Tiger et OS 9 ; assistant couvert par `tests/app_wizard_test.sh`, réponses
+simulées. L'assistant ouvre la page de Macintosh Garden et attend le fichier : il ne télécharge rien
+lui-même. **Pas éprouvé :** accord de Gatekeeper sur une app réellement téléchargée, clics réels dans
+l'assistant, installation complète (pas de média ici), macOS 15 et M1 (M1 de l'utilisateur sous
+15.8), Colin McRae, matrice. Sans système installé, l'autre système ne s'ajoute pas depuis le
+frontal : son entrée du menu OS reste grisée.
 
 **Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
 plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente
