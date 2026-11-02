@@ -196,7 +196,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 18 h 25 (QE à toutes les résolutions, VM normale en service)
+## 3. Mac M4 : état au 02/11/2026, 23 h 55 (0.4.1 préparée et non publiée, aucune VM ne tourne)
 
 **Soir du 02/11, demande de l'utilisateur : QE doit tenir toutes les résolutions.** Corrigé
 (`docs/quartz-extreme.md`, journal du 02/11) : kext (VRAM entière), plugin `20261102-modes`, cœur
@@ -233,6 +233,12 @@ garde-fou `ED_LINK_LIMIT` comptait les paquets ; **QEMU à reconstruire sur le P
 à chaud (`AppExtras`), police Roboto, rappel de capture, menu Help, Preferences, filtre net, Try Without Saving,
 capture. Le lecteur CD IDE ne convient pas au dépôt : Tiger le verrouille, et un échange forcé lui échappe. Le
 point 1 (veille pendant l'installation) n'a pas été demandé : toujours ouvert.
+Éprouvé au clic sur l'app du `.dmg` (commit `43ea833`, sur des clones de disque) : dépôt USB dans Tiger (lecture,
+écriture, relecture sur le Mac) et OS 9 (« From Mac » sur le bureau), 10 Mio sur l'OHCI sans erreur, Preferences
+(`-m 512` après Apply, réglages relus au lancement), Try Without Saving (`-snapshot`), Sharp/Smooth, capture,
+détection de mise à jour, toast plein écran ; 484 tests OK. Une épreuve `POMPPC_FE_SCRIPT` n'écrit pas
+`imguidock.conf` : y vérifier un réglage dans la même exécution. **Pas éprouvé :** écran Retina, M1 sous macOS 15,
+vrai installateur, A/B de vitesse non rejoué.
 
 **Ergonomie, lot 3 (23 h, dans la 0.4.1).** Assistant unique dans le frontal (`SetupFlow`, `SetupUi`), reprise
 par `.run/setup.state` ; `-no-reboot` enchaîne les étapes d'installation ; installateur `Install POMPPC.app`
