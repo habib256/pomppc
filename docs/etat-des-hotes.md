@@ -208,16 +208,12 @@ preuve y sortirait d'un autre réglage que ses références ; revenir au réglag
 jouer. Matrice, A/B et DOOM 3/UT2004/cmr à ces résolutions **pas faits** (TODO, « Maintenant »).
 **Curseur en plein écran : réglé, confirmé par l'utilisateur le 02/11.**
 
-**Version 0.4 préparée, non publiée (19 h 55).** Paquet `dist/pomppc-0.4-macos-arm64.tar.xz` au
-commit `c7cd63a` : tag à poser sur ce commit. Cible **macOS 15.0, sans Homebrew** (les 25 binaires,
-garde-fou `MIN_MACOS`), demande de l'utilisateur ; recette et arbres dans `docs/publier-macos.md`
-(`~/src/qemu-rel04`, `~/src/pomppc-frontend-rel04`, `~/src/pomppc-deps`). Archive extraite puis
-éprouvée sous macOS 27 sur un clone du disque : bibliothèques toutes dans le paquet, `install.sh`
-du CD, Quartz Extreme actif, `glwin` en 1024×768, 2560×1080 et 1920×1080×16, DOOM 3, réseau. Le
-paquet à macOS 26 avait aussi passé UT2004 et Marble Blast. **Pas éprouvé :** macOS 15 réel (M1
-de l'utilisateur sous 15.8, à faire avant de publier), installation neuve de Tiger (pas de média
-ici), Colin McRae, matrice. `x-tb-fast` lit `cntfrq_el0` : attendu en repli sur M1 s'il y vaut
-24 MHz, message au lancement, à vérifier. Branches déjà propres (`main` seule, `archive/*` gardées).
+**Version 0.4 publiée le 02/11 à 20 h 10** à la demande de l'utilisateur
+(https://github.com/habib256/pomppc/releases/tag/0.4, tag `0.4` sur `c7cd63a`). Cible **macOS 15.0,
+sans Homebrew** (les 25 binaires, garde-fou `MIN_MACOS`) ; recette et arbres dans
+`docs/publier-macos.md`. Archive éprouvée sous macOS 27 sur un M4 seulement, les notes le disent.
+**Reste à éprouver :** macOS 15 et M1 (M1 de l'utilisateur sous 15.8 ; `x-tb-fast` lit `cntfrq_el0`,
+repli possible à vérifier), installation neuve de Tiger (pas de média ici), Colin McRae, matrice.
 
 **Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
 plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente
