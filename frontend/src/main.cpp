@@ -998,6 +998,13 @@ int main(int argc, char** argv) {
             else if (driverState == 1 && appVersion && driverMarkRead != appVersion)
                 driverHint = "POMPPC was updated. Install its 3D driver again: open the POMPPC_GUEST CD on the desktop, double-click Install POMPPC, then restart.";
         }
+        // Une bande qui paraît ou disparaît ne doit pas rendre l'image floue : la fenêtre la suit.
+        static bool hintWasShown = false;
+        if ((driverHint != nullptr) != hintWasShown) {
+            hintWasShown = driverHint != nullptr;
+            fitDone = false;
+            fitSince = 0;
+        }
         // La fenêtre suit l'invité, à 100 %, tant que l'utilisateur ne l'a pas redimensionnée.
         if (fe.autoFit && !fullscreen) {
             int ww = 0, wh = 0;
@@ -1471,12 +1478,12 @@ int main(int argc, char** argv) {
             ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
             const std::string title = restartTitle + "###restart";
             if (ImGui::BeginPopupModal(title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-                ImGui::Text("%s restarts at once: anything not saved in it will be lost.",
+                ImGui::Text("%s will stop at once: anything not saved in it will be lost.",
                             osNameOf(curLauncher).c_str());
                 ImGui::Spacing();
                 if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
                 ImGui::SameLine();
-                if (ImGui::Button("Restart")) {
+                if (ImGui::Button("Continue")) {
                     if (restartAction) restartAction();
                     restartAction = nullptr;
                     ImGui::CloseCurrentPopup();
