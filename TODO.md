@@ -109,8 +109,8 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 ## Maintenant
 
 - [ ] **[QE — les deux hôtes] Résolutions : finir la preuve** (corrigé le 02/11,
-  `docs/quartz-extreme.md`, journal). Restent : DOOM 3, UT2004 et Colin McRae à 1920×1080 et
-  2560×1080 ; matrice de preuve et A/B du plugin `20261102-modes` sur un disque au réglage des
+  `docs/quartz-extreme.md`, journal). DOOM 3, UT2004 et Marble Blast passent depuis un bureau en 1920×1080 ou
+  2560×1080 (paquet 0.4). Restent : Colin McRae ; matrice de preuve et A/B du plugin `20261102-modes` sur un disque au réglage des
   références ; balayage `guest/gltest/setmode.c` sur le PC (EGL/NVIDIA). **Fermeture :** ces
   essais justes, ou leur écart écrit.
 

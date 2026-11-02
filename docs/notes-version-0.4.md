@@ -42,7 +42,7 @@ Full instructions and troubleshooting are in the [README](https://github.com/hab
 ## Known limitations
 
 - Extract the archive somewhere with a short path, like `~/pomppc`: QEMU's monitor socket path must stay under 104 bytes.
-- DOOM 3, UT2004 and Colin McRae haven't been tried above their usual display modes since the resolution fix.
+- Colin McRae hasn't been retried since the resolution fix. DOOM 3, UT2004, Marble Blast and Zenerchi were, from a 1920×1080 or 2560×1080 desktop.
 - Warcraft III sometimes fails to reach its first scene at launch; starting it again works.
 - Return to Castle Wolfenstein does not work yet. Core Image is not implemented.
 - Project docs and code comments are in French. The README and these notes are in English.

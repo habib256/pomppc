@@ -208,6 +208,16 @@ preuve y sortirait d'un autre réglage que ses références ; revenir au réglag
 jouer. Matrice, A/B et DOOM 3/UT2004/cmr à ces résolutions **pas faits** (TODO, « Maintenant »).
 **Curseur en plein écran : réglé, confirmé par l'utilisateur le 02/11.**
 
+**Version 0.4 préparée, non publiée (19 h 30).** Paquet `dist/pomppc-0.4-macos-arm64.tar.xz` au
+commit `48c4d5c`, cible macOS 26.0 (25 binaires à 26.0, garde-fou `MIN_MACOS`), recette et arbres
+dans `docs/publier-macos.md` (`~/src/qemu-rel04`, `~/src/pomppc-deps`). Archive extraite puis
+éprouvée sous macOS 27 sur un clone du disque : bibliothèques toutes dans le paquet, `install.sh`
+du CD, Quartz Extreme actif, `glwin` en 1024×768, 1920×1080, 2560×1080, DOOM 3, UT2004, Marble Blast
+justes. **Pas éprouvé :** macOS 26 réel, installation neuve de Tiger (pas de média ici), Colin
+McRae, matrice. Reste à décider : tag `0.4` sur `48c4d5c` et publication
+(`docs/notes-version-0.4.md`). Les branches étaient déjà propres (`main` seule, étiquettes
+`archive/*` gardées).
+
 **Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
 plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente
 courte corrigée par un budget progressif. Matrice des cinq jeux close, **60 cellules
