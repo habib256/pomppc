@@ -65,27 +65,24 @@ get the installation disc.
 2. Open POMPPC from Applications. **macOS blocks it the first time**, because the app isn't
    notarized by Apple. Go to **System Settings ▸ Privacy & Security**, scroll down, click
    **Open Anyway** next to POMPPC, and confirm. You only do this once per version.
-3. Follow the setup, which appears when POMPPC has no disk:
-   1. Choose **Mac OS X 10.4 Tiger** or **Mac OS 9.2.2**.
-   2. Choose **Create a New Disk** and its size, or **Use an Existing Disk** (`.qcow2`).
-   3. Get the installation disc. **I Have the Disc** takes your own `.iso`, `.toast`, `.cdr`, `.dmg`
-      or `.zip`. **Open Macintosh Garden** opens the disc's page on
-      [Macintosh Garden](https://macintoshgarden.org), an independent archive not linked to Apple:
-      click a download link there, and POMPPC continues by itself when the file reaches your
-      Downloads folder, after checking it against the site's checksum. Mac OS remains Apple's
-      copyrighted software, so only download it if you're entitled to use it.
-   4. In the installer, use Disk Utility to erase the disk as *Mac OS Extended*, then install on it.
-      When it finishes, close the window and open POMPPC again.
-4. **Tiger only, in this order:**
-   1. Open POMPPC again and choose **Download from Apple** to get the free 10.4.11 update. Tiger
-      starts with its CD: open it, double-click `MacOSXUpdCombo10.4.11PPC.pkg`, install and restart
-      Tiger, then quit POMPPC and open it again.
-   2. Install the 3D driver. Open Terminal inside Tiger (in Applications, Utilities) and type the
-      line below, then restart Tiger. Do this again after each POMPPC update.
+3. Follow the setup in the POMPPC window. It moves on by itself, and if you quit, it continues where
+   you left off:
+   1. **Disk.** Choose **Mac OS X 10.4 Tiger** or **Mac OS 9.2.2**, then create a new disk and choose
+      its size, or use an existing `.qcow2` disk.
+   2. **Disc.** **I Have the Disc** takes your own `.iso`, `.toast`, `.cdr`, `.dmg` or `.zip`. **Open
+      Macintosh Garden** opens the disc's page on [Macintosh Garden](https://macintoshgarden.org), an
+      independent archive not linked to Apple: click a download link there, and POMPPC continues when
+      the file reaches your Downloads folder, after checking it against the site's checksum. Mac OS
+      remains Apple's copyrighted software, so only download it if you're entitled to use it.
+   3. **Install.** The installer starts. Use Disk Utility (Drive Setup in Mac OS 9) to erase the disk as
+      *Mac OS Extended*, then install on it. The next step starts when the installer restarts.
+   4. **Update (Tiger).** **Download from Apple** gets the free 10.4.11 update. Create your account if
+      Tiger asks, open the CD on the desktop and double-click `MacOSXUpdCombo10.4.11PPC.pkg`.
+   5. **3D driver (Tiger).** Open the `POMPPC_GUEST` CD on the desktop, double-click **Install POMPPC**,
+      enter your password and restart. POMPPC sees the driver running and ends the setup.
 
-   ```sh
-   sudo sh /Volumes/POMPPC_GUEST/install.sh
-   ```
+After an update of POMPPC, a bar above Tiger reminds you to install the driver again, the same way.
+**OS ▸ Set Up Another System...** adds the other system later.
 
 Your data is in the **`POMPPC` folder of your home folder** (`~/POMPPC`): your disks are
 `disks/tiger.qcow2` and `disks/os9.qcow2`. The app itself holds no data, so updating means replacing it in Applications.
@@ -142,8 +139,8 @@ own Tiger installation media.
    a [steadier audio profile](docs/audio-stabilite.md) (`POMPPC_AUDIO_PROFILE=default` restores
    QEMU's settings).
 
-5. Install the 3D driver **once**, inside Tiger: the `POMPPC_GUEST` CD is already inserted.
-   Open Terminal and type
+5. Install the 3D driver **once**, inside Tiger: the `POMPPC_GUEST` CD is already inserted. Double-click
+   **Install POMPPC** on it and enter your password, or open Terminal and type
 
    ```sh
    sudo sh /Volumes/POMPPC_GUEST/install.sh
@@ -204,8 +201,8 @@ the mode saved by Tiger applies once its desktop starts.
 
 ### Upgrading from an earlier release
 
-**With the app:** shut Tiger down, replace POMPPC in Applications, open it, install the driver again
-and restart Tiger. Moving from the archive to the app: move your `disks/tiger.qcow2` to
+**With the app:** shut Tiger down, replace POMPPC in Applications and open it. A bar reminds you to
+install the driver again. Moving from the archive to the app: move your `disks/tiger.qcow2` to
 `~/POMPPC/disks/` before opening the app, or choose it when the app asks.
 
 **With the archive:** shut Tiger down and extract the new archive next to the old one. Move your
@@ -223,7 +220,7 @@ wrongly sized desktop. Your applications and settings stay on the disk.
 | The app quits or nothing appears | Read `~/POMPPC/.run/app.log` and attach it to your report. |
 | `Tiger tourne déjà` ("Tiger is already running") | Close the other VM. Never delete `.run/tiger.lock`: two VMs writing to the same disk corrupt it. |
 | Open Firmware `0 >` prompt | `boot cd:,\\:tbxi` while installing, `boot hd:,\\:tbxi` afterwards. |
-| No 3D, or a striped desktop after an upgrade | Run the guest CD's `install.sh` again and restart Tiger. Check with the commands below. |
+| No 3D, or a striped desktop after an upgrade | Double-click **Install POMPPC** on the `POMPPC_GUEST` CD and restart Tiger. Check with the commands below. |
 | The mouse is offset in the window | On Tiger 10.4.10 or older, start the archive with `TABLET_MARGIN=0 ./run_tiger.sh`. |
 | A game wants relative mouse motion | Untick **Machine ▸ Absolute Mouse in Window**, or play in full screen. |
 | You need to type in a front-end field | Use **Machine ▸ Keyboard to Guest**. |

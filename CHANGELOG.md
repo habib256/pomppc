@@ -14,16 +14,19 @@ de commit et dans `docs/`.
 ## 0.4.1 (02/11/2026)
 
 **Une vraie application macOS.** `POMPPC.app` dans un `.dmg`, à glisser dans Applications, sans
-Terminal sur le Mac (`scripts/package_app_macos.sh`). Sans disque au premier lancement, un assistant
-fait choisir Tiger ou OS 9, crée un disque de la taille voulue ou importe un disque existant, puis
-obtient le CD d'installation : média de l'utilisateur, ou page de Macintosh Garden ouverte dans le
-navigateur, fichier repris tout seul dans Téléchargements et contrôlé par MD5. L'app ne télécharge
-pas le système elle-même. Pour Tiger, elle télécharge ensuite le combo 10.4.11 chez Apple, qui le
-distribue gratuitement (SHA-1 contrôlé), le fait installer avant le pilote et règle la marge de la
-tablette selon la version. Les données vivent dans `~/POMPPC`. Signature ad hoc, faute de certificat Apple
-Developer : macOS demande un accord au premier lancement. Le frontal et l'assistant passent en
-anglais ; le menu OS grise un système sans disque ; `run_os9.sh` ne dépend plus de python3 au
-démarrage. README refondu autour de l'app. QEMU et les binaires invités sont ceux de la 0.4.
+Terminal sur le Mac (`scripts/package_app_macos.sh`). Les données vivent dans `~/POMPPC`. Signature ad hoc,
+faute de certificat Apple Developer : macOS demande un accord au premier lancement. Le frontal passe en
+anglais ; `run_os9.sh` ne dépend plus de python3 au démarrage. README refondu autour de l'app. Binaires
+invités et QEMU de la 0.4, plus `guest-driver` (ci-dessous).
+
+**Un seul assistant, dans la fenêtre.** Système, disque, CD, installation, combo 10.4.11 et pilote
+s'enchaînent sans rouvrir l'app, et reprennent si on quitte (`SetupFlow`, `SetupUi`). `-no-reboot` termine
+les étapes d'installation quand l'invité redémarre. Le CD vient du média de l'utilisateur, ou de la page de
+Macintosh Garden ouverte dans le navigateur, le fichier étant repris dans Téléchargements et contrôlé par MD5 :
+l'app ne télécharge pas le système elle-même. Elle télécharge le combo chez Apple, qui le distribue
+gratuitement (SHA-1 contrôlé). Installateur **Install POMPPC** à double-cliquer sur le CD de l'invité, sans
+Terminal. Propriété QOM `guest-driver` du device (IRQ_MASK armé par le kext, sans changer le protocole) : la fin
+de l'étape du pilote et un rappel dans l'app s'y appuient. **OS ▸ Set Up Another System...** ajoute l'autre système.
 
 **Ne plus perdre de travail.** Fermer POMPPC propose d'éteindre le système : **Shut Down** envoie la
 touche d'alimentation, Mac OS pose sa question, et POMPPC se ferme quand il s'est arrêté. Son, manette,

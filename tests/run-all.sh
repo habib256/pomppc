@@ -108,6 +108,11 @@ else
   noop "disks_test non construit (cmake --build frontend/build)"
 fi
 if ./tests/disques_test.sh >/dev/null 2>&1; then ok "disques des lanceurs"; else ko "disques des lanceurs"; fi
+if [ -x frontend/build/setup_test ]; then
+  if frontend/build/setup_test >/dev/null; then ok "assistant de premier lancement"; else ko "assistant de premier lancement"; fi
+else
+  noop "setup_test non construit (cmake --build frontend/build)"
+fi
 if [ -x frontend/build/chime_test ]; then
   if frontend/build/chime_test; then ok "carillon : déclenchement et préférences"; else ko "carillon frontend"; fi
 else
@@ -499,11 +504,11 @@ PY
 then ok "GLD_LIST alignée sur le générateur"; else ko "GLD_LIST de pomppc_gld.h désalignée"; fi
 
 echo
-echo "=== 5 quinquies. assistant de POMPPC.app ==="
+echo "=== 5 quinquies. démarrage de POMPPC.app ==="
 if [ "$(uname -s)" = Darwin ]; then
-  if ./tests/app_wizard_test.sh >/dev/null 2>&1; then ok "assistant de premier lancement"
-  else ko "assistant de premier lancement ($(./tests/app_wizard_test.sh 2>&1 | grep -m1 ÉCHEC))"; fi
-else noop "assistant de POMPPC.app (macOS seulement)"; fi
+  if ./tests/app_wizard_test.sh >/dev/null 2>&1; then ok "démarrage de POMPPC.app"
+  else ko "démarrage de POMPPC.app ($(./tests/app_wizard_test.sh 2>&1 | grep -m1 ÉCHEC))"; fi
+else noop "démarrage de POMPPC.app (macOS seulement)"; fi
 
 echo "=== 6. device QFB de bout en bout (Open Firmware, sans invité) ==="
 if [ "$SLOW" = 1 ]; then

@@ -38,7 +38,7 @@ script de QEMU écrase `bench/build-capabilities.txt` : le sauvegarder puis le r
 
 Compilés dans la VM quotidienne par ssh, depuis `git archive HEAD`, dans `~/pomppc-rel<version>` :
 `POMPPCGPU.kext`, `POMPPCFsqrt.kext`, `GLDriver-POMPPC.bundle`, `POMPPCGA.plugin`, `gltest`, `glwin`,
-`accelprobe`, plus un fichier `VERSION`. `disks/prebuilt` ne suffit pas : il n'a pas `POMPPCFsqrt.kext`.
+`accelprobe`, `Install POMPPC.app` (`osacompile`, job `prebuilt`), plus un fichier `VERSION`. `disks/prebuilt` ne suffit pas : il n'a pas `POMPPCFsqrt.kext`.
 
 ## 4. Empaqueter
 
@@ -57,10 +57,10 @@ Sortie : `dist/POMPPC.app`, `dist/POMPPC-0.4-macos-arm64.dmg` et son `.sha256`. 
 Apple Developer ici : signature ad hoc, sans notarisation, d'où l'accord demandé au premier lancement.
 L'icône se refait par `scripts/app-macos/icone.swift`.
 
-L'assistant de premier lancement (`scripts/app-macos/pomppc-app.sh`) ouvre les pages de Macintosh
-Garden et attend le fichier dans Téléchargements : il ne télécharge rien lui-même. Mac OS reste sous
-droit d'auteur d'Apple, et le dépôt continue de ne rien distribuer d'Apple : le geste reste celui de
-l'utilisateur. Si le site change ses fichiers, mettre à jour noms et MD5 en tête du script
+L'assistant de premier lancement (`frontend/src/SetupFlow.*`) ouvre les pages de Macintosh Garden et attend le
+fichier dans Téléchargements : il ne télécharge pas le système lui-même. Mac OS reste sous droit d'auteur
+d'Apple, et le dépôt continue de ne rien distribuer d'Apple : le geste reste celui de l'utilisateur. Si le
+site change ses fichiers, mettre à jour noms et MD5 en tête de `SetupFlow.cpp`
 (`https://macintoshgarden.org/arch_md5.php?filename=<fichier>`). Le CD seul, `pomppc-guest.iso`, se
 publie à part, renommé `pomppc-0.4-guest.iso`.
 

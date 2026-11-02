@@ -1521,6 +1521,11 @@ static void qgpu_pci_exit(PCIDevice *dev)
     qemu_free_irq(s->irq);
 }
 
+static bool qgpu_get_guest_driver(Object *obj, Error **errp)
+{
+    return QGPU_PCI(obj)->regs[QGPU_REG_IRQ_MASK >> 2] != 0;
+}
+
 static void qgpu_pci_reset_handler(DeviceState *d)
 {
     qgpu_soft_reset(QGPU_PCI(d));
@@ -1644,6 +1649,10 @@ static void qgpu_pci_instance_init(Object *obj)
        (`qom-set /machine/peripheral/gpu0 x-test-stall-ms 600000`). La ligne
        de commande (-device qgpu-pci,x-test-stall-ms=…) et -global les
        acceptent de même. */
+    /* 02/11 : le pilote de l'invité répond-il ? Le kext arme IRQ_MASK à son démarrage et le remet à
+       0 en s'arrêtant, et le reset du device l'efface. L'assistant et le bandeau du frontal
+       viennent le lire (qom-get) au lieu de demander à l'utilisateur. */
+    object_property_add_bool(obj, "guest-driver", qgpu_get_guest_driver, NULL);
     object_property_add(obj, "x-test-stall-ms", "uint32",
                         qgpu_get_test_stall, qgpu_set_test_stall, NULL, NULL);
     object_property_set_description(obj, "x-test-stall-ms",

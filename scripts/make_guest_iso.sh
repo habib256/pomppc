@@ -38,6 +38,11 @@ mkdir -p "$STAGE/StartupItems/POMPPCFsqrt" "$STAGE/tools"
 cp "$ROOT/kext/POMPPCFsqrt/StartupItem/POMPPCFsqrt" \
    "$ROOT/kext/POMPPCFsqrt/StartupItem/StartupParameters.plist" "$STAGE/StartupItems/POMPPCFsqrt/"
 cp -R "$ROOT/guest/package/StartupItems/POMPPCSshGarde" "$STAGE/StartupItems/"
+if [ -d "$PRE/Install POMPPC.app" ]; then
+  cp -R "$PRE/Install POMPPC.app" "$STAGE/"
+else
+  echo "⚠  $PRE/Install POMPPC.app absent : paquet sans installateur à double-cliquer (job prebuilt)" >&2
+fi
 for t in gltest glwin accelprobe; do [ -f "$PRE/$t" ] && cp "$PRE/$t" "$STAGE/tools/"; done
 if [ -d "$PRE/POMPPCGA.plugin" ]; then
   cp -R "$PRE/POMPPCGA.plugin" "$STAGE/"
@@ -48,11 +53,11 @@ cat > "$STAGE/README.txt" <<EOF
 POMPPC guest package $(head -1 "$PRE/VERSION") — Mac OS X 10.4 Tiger (PowerPC)
 
 Paravirtual 3D GPU (qgpu) and fsqrt support for Tiger running in POMPPC's QEMU.
-In Tiger, open Terminal and type:
+In Tiger, double-click "Install POMPPC" on this CD and enter your password, or open Terminal and type:
 
     sudo sh /Volumes/POMPPC_GUEST/install.sh
 
-then reboot. "sudo sh /Volumes/POMPPC_GUEST/install.sh --remove" uninstalls.
+then restart. "sudo sh /Volumes/POMPPC_GUEST/install.sh --remove" uninstalls.
 tools/gltest, tools/glwin and tools/accelprobe are small OpenGL test programs.
 Source code and documentation: https://github.com/habib256/pomppc (GPL-3.0-or-later).
 EOF

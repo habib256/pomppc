@@ -22,4 +22,5 @@ gltest_build || exit 1
 cp -R $SRC/kext/POMPPCGPU/POMPPCGPU.kext $SRC/guest/gldriver/GLDriver-POMPPC.bundle \
       $SRC/guest/ga/POMPPCGA.plugin $P/
 cp $SRC/guest/gltest/gltest $SRC/guest/gltest/glwin $SRC/guest/gltest/accelprobe $P/
+/usr/bin/osacompile -o "$P/Install POMPPC.app" "$SRC/guest/package/InstallPOMPPC.applescript" || exit 1
 ls -lR $P | head -30

@@ -77,6 +77,8 @@ add_executable(pomppc
     src/StartupChime.cpp
     src/FrontendSettings.cpp
     src/DiskConfig.cpp
+    src/SetupFlow.cpp
+    src/SetupUi.cpp
     ${IMGUI_SOURCES})
 target_include_directories(pomppc PRIVATE ${IMGUI_DIR} ${IMGUI_DIR}/backends src)
 if(APPLE)
@@ -122,6 +124,11 @@ if(BUILD_TESTING)
     target_include_directories(disks_test PRIVATE src)
     target_compile_options(disks_test PRIVATE -UNDEBUG)
     add_test(NAME disk_choice COMMAND disks_test)
+    add_executable(setup_test tests/setup_test.cpp src/SetupFlow.cpp src/DiskConfig.cpp)
+    target_include_directories(setup_test PRIVATE src)
+    target_compile_options(setup_test PRIVATE -UNDEBUG)
+    target_link_libraries(setup_test PRIVATE Threads::Threads)
+    add_test(NAME setup_flow COMMAND setup_test)
     add_executable(settings_test tests/settings_test.cpp src/FrontendSettings.cpp src/DiskConfig.cpp)
     target_include_directories(settings_test PRIVATE src)
     target_compile_options(settings_test PRIVATE -UNDEBUG)

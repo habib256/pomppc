@@ -38,7 +38,7 @@ source "$ROOT/scripts/os9_cpu.sh"
 
 # OS9_DISK / OS9_CD viennent de config.env (surchargeables par l'environnement).
 RAM=512
-MODE="${1:-auto}"
+MODE="${1:-${POMPPC_OS9_MODE:-auto}}"   # POMPPC_OS9_MODE : le frontal lance ce script sans argument
 
 # --- Souris absolue/fluide via USB tablet (extension invité kanjitalk755) ---
 # Voie SECONDAIRE : le partage virtio ci-dessous fournit déjà virtio-tablet-pci, donc la
@@ -212,6 +212,6 @@ source "$ROOT/scripts/disques.sh"
 disques_args "$OS9_DISK" $((4 - ${#DRIVES[@]} / 2))
 exec "$BIN" -M "mac99,via=$VIA" -cpu "$CPU_SPEC" -accel "$TCG_ACCEL" -m "$RAM" -smp 1 \
   -display "$DISP" -g "$RES" ${BIOS_ARGS[@]+"${BIOS_ARGS[@]}"} ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} \
-  ${DRIVES[@]+"${DRIVES[@]}"} ${DISQUES_ARGS[@]+"${DISQUES_ARGS[@]}"} -nic none ${AUDIO[@]+"${AUDIO[@]}"} ${TABLET_DEV[@]+"${TABLET_DEV[@]}"} ${VIRTIO_ARGS[@]+"${VIRTIO_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} \
+  ${DRIVES[@]+"${DRIVES[@]}"} ${DISQUES_ARGS[@]+"${DISQUES_ARGS[@]}"} ${POMPPC_NO_REBOOT:+-no-reboot} -nic none ${AUDIO[@]+"${AUDIO[@]}"} ${TABLET_DEV[@]+"${TABLET_DEV[@]}"} ${VIRTIO_ARGS[@]+"${VIRTIO_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} \
   -prom-env 'auto-boot?=true' -prom-env "boot-device=$BOOTDEV" ${BOOTCMD_ARGS[@]+"${BOOTCMD_ARGS[@]}"} \
   -name "MacOS9" ${QMP_ARGS[@]+"${QMP_ARGS[@]}"} -monitor "unix:$MON,server,nowait"

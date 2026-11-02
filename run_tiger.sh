@@ -143,6 +143,8 @@
 #                             # ou une fois pour toutes : echo 0 > disks/tiger.qcow2.tablet-margin
 #   NOCD=1 ./run_tiger.sh     # omet le lecteur CD amovible vide 'gamecd'
 #   POMPPC_CD=<image> ./run_tiger.sh  # cette image dans 'gamecd' à la place du CD de l'invité
+#   POMPPC_INSTALL_CD=<image> ./run_tiger.sh  # démarre sur ce CD (installateur de Tiger)
+#   POMPPC_NO_REBOOT=1 ./run_tiger.sh  # QEMU sort quand l'invité redémarre (fin d'une étape de l'assistant)
 #   POMPPC_BOOT_ARGS= ./run_tiger.sh  # démarrage sans le texte du noyau (-v par défaut ; POMPPC.app)
 #   POMPPC_EXTRA_DISKS="a.qcow2;b.qcow2" DISK=c.qcow2 ./run_tiger.sh  # disques en plus du démarrage,
 #                             # 2 au plus ; <disque>.type = ssd (panneau Disks, scripts/disques.sh)
@@ -1271,6 +1273,8 @@ fi
 #     Inséré dans le lecteur 'gamecd' (donc éjectable/remplaçable à chaud comme
 #     avant). Régénéré si absent ou plus vieux qu'une source : le CD monté
 #     correspond toujours au dépôt. Dans l'invité, il apparaît comme POMPPCSRC.
+# Installation (assistant de POMPPC.app) : démarrer sur le CD d'installation.
+[ -n "${POMPPC_INSTALL_CD:-}" ] && POMPPC_CD="$POMPPC_INSTALL_CD"
 GLISO_WANT="${GLISO:-}"
 [ -z "$GLISO_WANT" ] && [ -n "$GPU_ON" ] && GLISO_WANT=1
 if [ -n "${POMPPC_CD:-}" ] && [ -f "$POMPPC_CD" ]; then
@@ -1338,6 +1342,7 @@ if [ "${PIN:-0}" != 0 ] && [ "$(uname -s)" = Linux ] && command -v taskset >/dev
 fi
 
 BOOTDEV='hd:10,\System\Library\CoreServices\BootX'
+[ -n "${POMPPC_INSTALL_CD:-}" ] && BOOTDEV='cd:,\\:tbxi'
 MON=$(host_mon_path "$SCR/mon.sock")   # mon.sock pour la VM verrouillée, mon-PID.sock en SNAPSHOT=1
 # .run/tiger.mon et .run/tiger.sshport : ce que lisent la matrice, killgame.py,
 # cycle.sh et tools/guest/tssh.sh (rien en SNAPSHOT=1 : ils visent la VM quotidienne)
@@ -1401,7 +1406,7 @@ disques_args "$DISK" $((3 - ${#CD_ARGS[@]} / 2))
 exec "$BIN" -M "$MACHINE" -cpu "$CPU_SPEC" -m "$RAM" -smp "$SMP_N" \
   -display "$DISP" -g "$RES" \
   -drive "file=$DISK,format=qcow2,media=disk" ${SNAP_ARGS[@]+"${SNAP_ARGS[@]}"} ${CD_ARGS[@]+"${CD_ARGS[@]}"} \
-  ${DISQUES_ARGS[@]+"${DISQUES_ARGS[@]}"} \
+  ${DISQUES_ARGS[@]+"${DISQUES_ARGS[@]}"} ${POMPPC_NO_REBOOT:+-no-reboot} \
   ${NET_ARGS[@]+"${NET_ARGS[@]}"} ${EXTRA[@]+"${EXTRA[@]}"} ${AUDIO[@]+"${AUDIO[@]}"} \
   ${TABLET_ARGS[@]+"${TABLET_ARGS[@]}"} ${PAD_ARGS[@]+"${PAD_ARGS[@]}"} ${QFB_ARGS[@]+"${QFB_ARGS[@]}"} ${GPU_ARGS[@]+"${GPU_ARGS[@]}"} ${USER_EXTRA[@]+"${USER_EXTRA[@]}"} \
   -prom-env 'auto-boot?=true' \

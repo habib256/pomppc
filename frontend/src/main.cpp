@@ -27,6 +27,7 @@
 #include <memory>
 #include <string>
 #include <spawn.h>
+#include <fstream>
 #include <functional>
 #include <vector>
 
@@ -41,6 +42,8 @@ extern char** environ;
 #include "StartupChime.h"
 #include "FrontendSettings.h"
 #include "PointerPolicy.h"
+#include "SetupFlow.h"
+#include "SetupUi.h"
 
 #ifndef IMGUI_HAS_DOCK
 #error "Dear ImGui docking branch required — run ./setup.sh (it fetches the docking tag)"
@@ -392,6 +395,13 @@ int main(int argc, char** argv) {
     bool pad = fe.pad;      // usb-host passthrough; the run script self-guards
     auto bridge = std::make_unique<QemuBridge>();
     std::string err;
+    // L'assistant : repris s'il était en cours, lancé par l'app s'il n'y a encore aucun disque.
+    const bool appMode = std::getenv("POMPPC_APP") != nullptr;
+    SetupFlow setup(root, runtimeDir);
+    if (!setup.load() && appMode && listDisks(root).empty()) setup.begin();
+    if (setup.active()) curLauncher = setup.launcher();
+    std::string setupCancelTo;
+
     // Choix du panneau Disks, par système. DISK ou OS9_DISK posés à la main priment : le panneau
     // ne les écrase pas (voir diskVarsFor).
     auto diskVarsFor = [&](const std::string& launcher) {
@@ -400,14 +410,25 @@ int main(int argc, char** argv) {
         DiskSelection& sel = tiger ? fe.tigerDisks : fe.os9Disks;
         sel = normalizeSelection(sel, listDisks(root), tiger ? "tiger.qcow2" : "os9.qcow2",
                                  maxExtraDisks(root, tiger));
-        return diskEnv(root, tiger, sel);
+        std::vector<std::string> vars = diskEnv(root, tiger, sel);
+        if (setup.active()) {
+            const std::vector<std::string> step = setup.vmEnv();
+            vars.insert(vars.end(), step.begin(), step.end());
+        }
+        return vars;
     };
     // Un échec ici s'affiche dans la fenêtre : lancée par le Finder, l'app n'a pas de terminal.
     std::string startProblem;
-    if (!bridge->start(makeConfig(curLauncher, runtimeDir, sound, pad, diskVarsFor(curLauncher)), &err)) {
+    bool setupVmStarted = false;
+    SetupFlow::Step setupLastStep = setup.step();
+    if (setup.active() && !setup.wantsVm()) {
+        // Pas de VM pour ces étapes : l'assistant la lancera.
+    } else if (!bridge->start(makeConfig(curLauncher, runtimeDir, sound, pad, diskVarsFor(curLauncher)), &err)) {
         std::fprintf(stderr, "QemuBridge start failed: %s\n", err.c_str());
         startProblem = err;
+        setupVmStarted = setup.active();
     } else {
+        setupVmStarted = setup.active();
         journal("QEMU started: %s", curLauncher.c_str());
         chimeTrigger.arm();
     }
@@ -889,7 +910,28 @@ int main(int argc, char** argv) {
 
         // QEMU peut mourir de son côté : sans ce test, le frontend affichait
         // indéfiniment la dernière image en annonçant « en marche ».
-        if (!bridge->checkAlive() && !stoppedSeen && startProblem.empty()) {
+        setup.poll();
+        const bool setupPage = setup.active() && !setup.wantsVm();
+        if (setup.step() != setupLastStep) {
+            setupLastStep = setup.step();
+            setupVmStarted = false;
+            stoppedSeen = false;
+            fitDone = false;
+            fitSince = 0;
+        }
+        // L'invité redémarre à la fin de l'installateur ou du combo : -no-reboot fait sortir QEMU, et
+        // l'étape suivante s'enchaîne. Tout autre arrêt reste un arrêt, avec son écran.
+        const bool stepEndsOnExit = setup.step() == SetupFlow::Step::Installing ||
+                                    setup.step() == SetupFlow::Step::Updating;
+        if (setupVmStarted && stepEndsOnExit && !bridge->checkAlive() && startProblem.empty() &&
+            bridge->exitedCleanly()) {
+            guestW = guestH = 0;
+            setup.onVmExit();
+        } else if (setup.wantsVm() && !setupVmStarted && startProblem.empty()) {
+            setupVmStarted = true;
+            relaunch(setup.launcher());
+        } else if (!setupPage && !bridge->checkAlive() && !stoppedSeen && startProblem.empty() &&
+                   (!setup.active() || setupVmStarted)) {
             stoppedSeen = true;
             guestW = guestH = 0;
             chimePlayer.stop();
@@ -899,6 +941,60 @@ int main(int argc, char** argv) {
                 forceQuit = true;
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
+        }
+        // Le pilote répond-il ? L'étape du pilote s'arrête là ; ensuite, le bandeau le rappelle.
+        static double driverPoll = 0;
+        static int driverState = -1;      // -1 inconnu, 0 absent, 1 présent
+        static double vmSince = 0;
+        static bool vmWasRunning = false;
+        if (bridge->running() && !vmWasRunning) { vmSince = glfwGetTime(); driverState = -1; }
+        vmWasRunning = bridge->running();
+        if (bridge->running() && curLauncher == tigerSh && glfwGetTime() - driverPoll > 2.0) {
+            driverPoll = glfwGetTime();
+            std::string reply;
+            if (bridge->qmpCommand("{\"execute\":\"qom-get\",\"arguments\":{\"path\":"
+                                   "\"/machine/peripheral/gpu0\",\"property\":\"guest-driver\"}}", &reply)) {
+                if (reply.find("true") != std::string::npos) driverState = 1;
+                else if (reply.find("false") != std::string::npos) driverState = 0;
+            }
+        }
+        const char* appVersion = std::getenv("POMPPC_VERSION");
+        const std::string driverMark = runtimeDir + "/pilote-annonce";
+        auto markDriver = [&] { if (appVersion) std::ofstream(driverMark) << appVersion << "\n"; };
+        if (setup.step() == SetupFlow::Step::Driver && driverState == 1) {
+            markDriver();
+            setup.go(SetupFlow::Step::Finished);
+            journal("3D driver detected");
+        }
+        // Hors assistant : un rappel, si le pilote manque ou date d'une autre version de POMPPC.
+        static bool driverHintHidden = false;
+        static std::string driverMarkRead;
+        static bool driverMarkLoaded = false;
+        if (!driverMarkLoaded) {
+            std::ifstream in(driverMark);
+            in >> driverMarkRead;
+            driverMarkLoaded = true;
+        }
+        auto setupScreen = [&]() {
+            SetupActions actions;
+            actions.quit = [&] { forceQuit = true; glfwSetWindowShouldClose(window, GLFW_TRUE); };
+            if (!setupCancelTo.empty()) {
+            actions.cancel = [&] {
+                setup.end();
+                const std::string back = setupCancelTo;
+                setupCancelTo.clear();
+                relaunch(back);
+            };
+            }
+            drawSetupPage(setup, actions);
+        };
+        const char* driverHint = nullptr;
+        if (appMode && !setup.active() && !driverHintHidden && bridge->running() && curLauncher == tigerSh) {
+            // Deux minutes : le kext se charge tard au démarrage d'une machine lente.
+            if (driverState == 0 && glfwGetTime() - vmSince > 120.0)
+                driverHint = "The 3D driver isn't running. Open the POMPPC_GUEST CD on the desktop, double-click Install POMPPC, then restart.";
+            else if (driverState == 1 && appVersion && driverMarkRead != appVersion)
+                driverHint = "POMPPC was updated. Install its 3D driver again: open the POMPPC_GUEST CD on the desktop, double-click Install POMPPC, then restart.";
         }
         // La fenêtre suit l'invité, à 100 %, tant que l'utilisateur ne l'a pas redimensionnée.
         if (fe.autoFit && !fullscreen) {
@@ -917,7 +1013,8 @@ int main(int argc, char** argv) {
                     glfwGetWindowFrameSize(window, nullptr, &ft, nullptr, nullptr);
                     const int menuH = (int)std::ceil(ImGui::GetFrameHeight());
                     const int tw = std::min(fitGuestW, aw);
-                    const int th = std::min(fitGuestH + menuH, ah - ft);
+                    const int barH = (int)std::ceil(setupBarHeight(setup) + (driverHint ? ImGui::GetFrameHeightWithSpacing() + 12 : 0));
+                    const int th = std::min(fitGuestH + menuH + barH, ah - ft);
                     glfwGetWindowPos(window, &wx, &wy);
                     glfwSetWindowSize(window, tw, th);
                     wx = std::max(ax, std::min(wx, ax + aw - tw));
@@ -969,7 +1066,8 @@ int main(int argc, char** argv) {
                          ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking |
                          ImGuiWindowFlags_NoScrollWithMouse |
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
-            guestView(false);
+            if (setup.active() && !setup.wantsVm()) setupScreen();
+            else guestView(false);
             ImGui::End();
             ImGui::PopStyleColor();
             ImGui::PopStyleVar(3);
@@ -1005,6 +1103,7 @@ int main(int argc, char** argv) {
                 ImGui::MenuItem(kWinLibrary, nullptr, &showLibrary);
                 ImGui::EndMenu();
             }
+            ImGui::BeginDisabled(setup.active());
             if (ImGui::BeginMenu("OS")) {
                 bool onTiger = (curLauncher == tigerSh);
                 // Sans disque, le lanceur échouerait sans rien montrer : pas de choix à offrir.
@@ -1017,6 +1116,18 @@ int main(int argc, char** argv) {
                 bool onOs9 = (curLauncher == os9Sh);
                 if (ImGui::MenuItem("Mac OS 9.2.2", nullptr, onOs9, !onOs9 && hasOs9))
                     confirmRestart("Switch to Mac OS 9?", [&] { relaunch(os9Sh); });
+                ImGui::Separator();
+                if (ImGui::MenuItem("Set Up Another System...")) {
+                    confirmRestart("Set up another system?", [&] {
+                        setupCancelTo = curLauncher;
+                        chimePlayer.stop();
+                        bridge->stop();
+                        bridge = std::make_unique<QemuBridge>();
+                        guestW = guestH = 0;
+                        stoppedSeen = false;
+                        setup.begin();
+                    });
+                }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Devices")) {
@@ -1056,6 +1167,7 @@ int main(int argc, char** argv) {
                 }
                 ImGui::EndMenu();
             }
+            ImGui::EndDisabled();
             if (ImGui::BeginMenu("View")) {
                 if (ImGui::MenuItem("Full Screen", "Alt+Return, F11"))
                     toggleFullscreen = true;
@@ -1114,7 +1226,28 @@ int main(int argc, char** argv) {
             if (fitView) f |= ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
             else f |= ImGuiWindowFlags_HorizontalScrollbar;
             ImGui::Begin(kWinScreen, nullptr, f);
-            guestView(true);
+            if (setup.active() && !setup.wantsVm()) {
+                setupScreen();
+            } else {
+                drawSetupBar(setup);
+                if (driverHint) {
+                    ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(32, 58, 100, 255));
+                    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 6));
+                    ImGui::BeginChild("driverhint", ImVec2(0, ImGui::GetFrameHeightWithSpacing() + 12),
+                                      ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+                    if (ImGui::SmallButton("Done")) {
+                        markDriver();
+                        driverMarkRead = appVersion ? appVersion : "";
+                        driverHintHidden = true;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(driverHint);
+                    ImGui::EndChild();
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor();
+                }
+                guestView(true);
+            }
             ImGui::End();
             ImGui::PopStyleColor();
             ImGui::PopStyleVar(2);

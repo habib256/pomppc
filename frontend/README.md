@@ -153,6 +153,11 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   full-screen behaviour is disabled — the green button zooms instead.
 - The pointer is mapped on the **rectangle actually drawn** (`SetAbsPosition` in guest pixels,
   relative motion scaled by the same factor, remainders carried); the bands send nothing.
+- **Setup.** With `POMPPC_APP` set and no disk, or with `.run/setup.state` present, the Screen window
+  shows the setup (`SetupFlow`, `SetupUi`): pages without a VM, then a bar above the guest. Steps with an
+  installer pass `POMPPC_NO_REBOOT=1`, so QEMU exits when the guest restarts and the next step starts.
+  The driver step ends when `qom-get gpu0 guest-driver` is true (IRQ_MASK armed by the kext).
+  `POMPPC_SETUP_CHOOSE=<file>` replaces macOS's file window in a test.
 - **Quit and restarts.** Closing the window, or **Machine ▸ Quit**, asks first while the guest runs:
   **Shut Down** sends the power key (`send-key power`), the guest shows its own dialog, and the front
   end closes when QEMU exits. `system_powerdown` has no effect on mac99. Sound, gamepad, system and

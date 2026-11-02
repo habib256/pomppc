@@ -228,6 +228,11 @@ et fenêtre à l'invité, pomme d'Apple dans l'app (`POMPPC_BOOT_ARGS`). `POMPPC
 dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une capture de l'écran. Reste le lot 3
 (assistant unique, installateur à double-cliquer, détection du pilote), puis le 4.
 
+**Ergonomie, lot 3 (23 h, dans la 0.4.1).** Assistant unique dans le frontal (`SetupFlow`, `SetupUi`), reprise
+par `.run/setup.state` ; `-no-reboot` enchaîne les étapes d'installation ; installateur `Install POMPPC.app`
+compilé dans Tiger (job `prebuilt`) ; propriété `guest-driver` de qgpu-pci. **`patches/qgpu/qgpu-pci.c` a changé :
+le PC reconstruit `build/` et `build-fast/`.** Reste le lot 4.
+
 **Panneau Disks (21 h 30, dans la 0.4.1).** Démarrage + 2 disques au plus, HD ou SSD, création.
 Essayé ici : Tiger voit 3 disques, formate le SSD, le volume revient au redémarrage ; démarrage en SSD
 seul ; lancement d'OS 9 avec un disque attaché (QEMU l'attache, sa vue dans OS 9 n'est pas contrôlée).
