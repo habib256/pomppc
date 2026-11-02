@@ -1,0 +1,54 @@
+POMPPC : essai diagnostique, plancher 250 us, non retenu.
+
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -339,15 +339,15 @@
+     if (mode < 0) {
+         const char *e = getenv("POMPPC_POLL_NS");
+         mode = e && *e && strcmp(e, "0") ? 1 : 0;
+-        if (e && !strcmp(e, "2")) {
+-            mode = 2;
++        if (e && (!strcmp(e, "2") || !strcmp(e, "3"))) {
++            mode = atoi(e);
+         }
+     }
+     /* POMPPC tcg/0065 : mode 2, seulement les delais sous 1 ms.
+      * [F] Hypothese a mesurer sur les cinq jeux : garder l'arrondi de
+      * g_poll pour les delais longs eviterait la perte d'UT du mode 1.
+      * Aucun mode n'est actif sans POMPPC_POLL_NS. */
+-    return mode == 1 || (mode == 2 && timeout < SCALE_MS);
++    return mode == 1 || (mode >= 2 && timeout < SCALE_MS);
+ }
+ 
+ static int qemu_poll_ns_select(GPollFD *fds, guint nfds, int64_t timeout)
+@@ -415,6 +415,30 @@
+  */
+ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout)
+ {
++#ifdef __APPLE__
++    /* Diagnostic temporaire, aucun chiffre de vitesse avec cette variable. */
++    static __thread int diag = -1;
++    static __thread int64_t last;
++    static __thread unsigned hist[9];
++    if (diag < 0) { diag = getenv("POMPPC_POLL_DIAG") != NULL; }
++    if (diag) {
++        int64_t now = g_get_monotonic_time();
++        unsigned b = timeout <= 0 ? 0 : timeout <= 1000 ? 1 :
++            timeout <= 10000 ? 2 : timeout <= 50000 ? 3 :
++            timeout <= 100000 ? 4 : timeout <= 250000 ? 5 :
++            timeout <= 500000 ? 6 : timeout < 1000000 ? 7 : 8;
++        hist[b]++;
++        if (now - last >= 1000000) {
++            fprintf(stderr, "poll-diag dt=%" PRId64 " us hist=%u,%u,%u,%u,%u,%u,%u,%u,%u\n",
++                    now-last,hist[0],hist[1],hist[2],hist[3],hist[4],hist[5],hist[6],hist[7],hist[8]);
++            memset(hist,0,sizeof(hist)); last=now;
++        }
++    }
++    if (timeout > 0 && getenv("POMPPC_POLL_NS") &&
++        !strcmp(getenv("POMPPC_POLL_NS"), "3")) {
++        timeout = MAX(timeout, 250000);
++    }
++#endif
+ #ifdef CONFIG_PPOLL
+     if (timeout < 0) {
+         return ppoll((struct pollfd *)fds, nfds, NULL, NULL);
