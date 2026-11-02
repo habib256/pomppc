@@ -12,7 +12,11 @@
 # Prérequis :
 #   - QEMU construit par scripts/build_qemu_qfb.sh dans $QEMU_SRC au commit courant, de
 #     préférence avec CONFIGURE_EXTRA=--disable-sdl (sdl2-compat charge SDL3 à l'exécution) ;
-#   - frontend/build/pomppc construit (frontend/README.md) ;
+#   - frontal construit (frontend/README.md), FRONTEND=<binaire> s'il est ailleurs que dans
+#     frontend/build/pomppc ;
+#   - QEMU et frontal compilés avec MACOSX_DEPLOYMENT_TARGET=$MIN_MACOS, et les bibliothèques
+#     dont la bouteille Homebrew vise plus haut dans $RELEASE_DEPS
+#     (scripts/build_release_deps_macos.sh) ; tout binaire au-dessus de $MIN_MACOS est refusé ;
 #   - binaires invités dans $PREBUILT (défaut disks/prebuilt), voir scripts/make_guest_iso.sh
 #     (CD toujours regravé ici : pas de GUEST_ISO, contrairement au paquet Linux).
 # Sortie : dist/pomppc-<version>-macos-arm64.tar.xz et son .sha256.
@@ -20,13 +24,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VER="${1:?version attendue, p. ex. v0.1.0}"
 QSRC="${QEMU_SRC:-$HOME/src/qemu-release}"
+FRONTEND="${FRONTEND:-$ROOT/frontend/build/pomppc}"
+MIN_MACOS="${MIN_MACOS:-26.0}"
+RELEASE_DEPS="${RELEASE_DEPS:-$HOME/src/pomppc-deps}"
 NAME="pomppc-$VER-macos-arm64"
 DIST="$ROOT/dist"; OUT="$DIST/$NAME"
 
 [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "macOS arm64 seulement" >&2; exit 1; }
 [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ] ||
   { echo "arbre de travail modifié : commiter d'abord (le paquet est le commit)" >&2; exit 1; }
-for f in "$QSRC/build/qemu-system-ppc" "$QSRC/build/qemu-system-ppc64" "$ROOT/frontend/build/pomppc"; do
+for f in "$QSRC/build/qemu-system-ppc" "$QSRC/build/qemu-system-ppc64" "$FRONTEND"; do
   [ -x "$f" ] || { echo "$f manque" >&2; exit 1; }
 done
 
@@ -40,7 +47,7 @@ DESTDIR="$STAGE" ninja -C "$QSRC/build" install >/dev/null
 mkdir -p "$OUT/bin" "$OUT/lib" "$OUT/share"
 cp "$STAGE/usr/local/bin/"{qemu-system-ppc,qemu-system-ppc64,qemu-img} "$OUT/bin/"
 cp -R "$STAGE/usr/local/share/qemu" "$OUT/share/"
-cp "$ROOT/frontend/build/pomppc" "$OUT/bin/"
+cp "$FRONTEND" "$OUT/bin/pomppc"
 
 # --- dylibs : tout ce qui n'est pas au système, transitivement, dans lib/ ---
 echo "▶ dylibs"
@@ -55,6 +62,10 @@ while [ ${#queue[@]} -gt 0 ]; do
     base="$(basename "$d")"
     if [ ! -e "$OUT/lib/$base" ]; then
       real="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$d")"
+      # recompilée pour $MIN_MACOS : préférée à la bouteille de Homebrew
+      for o in "$RELEASE_DEPS"/*/*/lib/"$base"; do
+        [ -e "$o" ] && real="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$o")"
+      done
       echo "$base $real" >> "$ORIG"
       cp "$real" "$OUT/lib/$base"; chmod u+w "$OUT/lib/$base"
       queue+=("$OUT/lib/$base")
@@ -68,6 +79,16 @@ while [ ${#queue[@]} -gt 0 ]; do
 done
 left="$(for f in "$OUT"/bin/* "$OUT"/lib/*; do deps "$f"; done | sort -u)"
 [ -z "$left" ] || { echo "références hors paquet restantes :" >&2; echo "$left" >&2; exit 1; }
+
+# Le macOS exigé se lit dans les binaires : une mise à jour de l'hôte le fait monter sans bruit
+# (bouteilles Homebrew, cible par défaut du compilateur), comme avant la 0.4.
+echo "▶ macOS minimal ($MIN_MACOS)"
+trop=""
+for f in "$OUT"/bin/* "$OUT"/lib/*; do
+  m="$(vtool -show-build "$f" 2>/dev/null | awk '/minos/{print $2; exit}')"
+  [ "$(printf '%s\n%s\n' "$m" "$MIN_MACOS" | sort -V | tail -1)" = "$MIN_MACOS" ] || trop="$trop $(basename "$f")=$m"
+done
+[ -z "$trop" ] || { echo "au-dessus de macOS $MIN_MACOS :$trop" >&2; exit 1; }
 
 echo "▶ signature ad hoc"
 for f in "$OUT"/lib/*; do codesign --force -s - "$f" 2>/dev/null; done

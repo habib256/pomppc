@@ -55,9 +55,9 @@ on Linux x86-64; `QE=0 ./run_tiger.sh` turns it off. What is **not** done: Core 
 
 ## Quick start (prebuilt release, macOS on Apple Silicon)
 
-Requirements: an Apple Silicon Mac running **macOS 27 or later** since release 0.4 (the bundled
-Homebrew libraries are built for it; release 0.3 runs on macOS 26), and **Mac OS X 10.4 Tiger PowerPC installation media that you
-own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distributed here.
+Requirements: an Apple Silicon Mac running **macOS 26 or later** (release 0.4 is built for macOS
+26.0 and tested on macOS 27), about 20 GB of free disk space, and **Mac OS X 10.4 Tiger PowerPC
+installation media that you own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distributed here.
 
 1. Download `pomppc-<version>-macos-arm64.tar.xz` from the
    [Releases](https://github.com/habib256/pomppc/releases) page, then extract it:
@@ -67,7 +67,8 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
    xattr -dr com.apple.quarantine .      # binaries are ad-hoc signed, not notarized
    ```
 
-   The archive is this repository at the release tag, plus `bin/` (patched `qemu-system-ppc`,
+   Extract it somewhere with a short path, like `~/pomppc`: QEMU's monitor socket path must
+   stay under 104 bytes. The archive is this repository at the release tag, plus `bin/` (patched `qemu-system-ppc`,
    `qemu-system-ppc64`, `qemu-img`, the `pomppc` front end), `lib/` (their libraries),
    `share/qemu/` (firmware) and `pomppc-guest.iso` (the guest package). `config.env` picks up
    `bin/` automatically.
@@ -112,6 +113,56 @@ own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distr
    `GL_RENDERER = "POMPPC qgpu (OpenGL host GPU)"`. `install.sh --remove` uninstalls. No Xcode
    is needed in the guest: the CD holds binaries built with Tiger's gcc 4.0.
 
+6. Check the result. In Tiger's Terminal:
+
+   ```sh
+   kextstat | grep pomppc      # net.pomppc.POMPPCGPU and net.pomppc.POMPPCFsqrt
+   system_profiler SPDisplaysDataType | grep -E "Resolution|Quartz"
+   ```
+
+   The second command should report `Quartz Extreme: Supported`. `/Volumes/POMPPC_GUEST/tools/`
+   also holds small OpenGL test programs (`glwin`, `gltest`).
+
+Your Tiger disk is the single file `disks/tiger.qcow2`: copy it while the VM is off to back it up.
+The front end's menus and most script messages are in French: **Machine** holds the machine
+controls, **Jeux** the game library, **Périphériques** the devices, **Vue** the display.
+
+### Changing the display resolution
+
+Use Tiger's **System Preferences ▸ Displays**, while Tiger runs. Every listed mode works, from
+640×480 to 2560×1080, with Quartz Extreme on. Tiger remembers your choice across reboots. Both
+**Thousands** and **Millions** of colors work.
+
+`RES=1920x1080x32 ./run_tiger.sh` or `WIDE=1 ./run_tiger.sh` sets the firmware's mode at startup;
+the mode saved by Tiger applies once its desktop starts.
+
+### Upgrading from an earlier release
+
+1. Shut Tiger down, then extract the new archive next to the old one.
+2. Move your `disks/tiger.qcow2` into the new folder (and `images/`, if you keep your media there).
+3. Run `./run_tiger.sh`, install the guest CD again as in step 5, and **reboot Tiger**.
+
+**Do not skip the reinstall**: an old guest driver on a new release can show a striped or
+wrongly sized desktop. Your applications and settings stay on the disk.
+
+### Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| macOS refuses to open the binaries | Run the `xattr -dr com.apple.quarantine .` line of step 1 in the extracted folder. |
+| `Tiger tourne déjà` ("Tiger is already running") | Close the other VM. Never delete `.run/tiger.lock`: two VMs writing to the same disk corrupt it. |
+| Open Firmware `0 >` prompt | `boot cd:,\\:tbxi` while installing, `boot hd:,\\:tbxi` afterwards. |
+| No 3D, or a striped desktop after an upgrade | Run the guest CD's `install.sh` again and reboot Tiger (step 5). Check with step 6. |
+| The mouse is offset in the window | On Tiger 10.4.10 or older, start with `TABLET_MARGIN=0 ./run_tiger.sh`. |
+| A game wants relative mouse motion | Untick **Machine ▸ Souris absolue en fenêtre**, or play in full screen. |
+| You need to type in a front-end field | Use **Machine ▸ Clavier → invité**. |
+| Accelerated desktop misbehaves | `QE=0 ./run_tiger.sh` turns Quartz Extreme off for that run. Please report it. |
+| Warcraft III does not reach its first scene | Start it again: this launch failure is intermittent. |
+| Return to Castle Wolfenstein | Not working yet. |
+
+Bug reports: [GitHub issues](https://github.com/habib256/pomppc/issues). Please include the host
+macOS version, the guest display mode and the output of step 6.
+
 Each launcher documents its variables in its header (`head -160 run_tiger.sh`): `GPU=0`,
 `FASTFP=0`, `NET=0`, `SNAPSHOT=1` (throw-away disk), `QFB=1` (second monitor), and more.
 Mac OS 9.2.2 runs with `./run_os9.sh` (single core, no 3D); `./run_os9.sh install` installs it
@@ -144,10 +195,8 @@ QEMU's `configure` needs Python ≥ 3.9 with `tomli` (built in as `tomllib` from
 `POMPPCSRC` CD with their sources, and `guest/gldriver/install.sh` builds and installs them
 (or installs the prebuilt binaries of `disks/prebuilt`, burnt on the same CD, when gcc 4.0 is
 missing). `scripts/package_release_macos.sh` produces the release archive
-(`scripts/package_release_linux.sh` for Linux x86-64, not published): it packages a committed
-tree, the QEMU of `$QEMU_SRC/build` (default `~/src/qemu-release`; on macOS preferably built with
-`CONFIGURE_EXTRA=--disable-sdl`), `frontend/build/pomppc` and the guest CD burnt by
-`scripts/make_guest_iso.sh` from `disks/prebuilt`.
+(`scripts/package_release_linux.sh` for Linux x86-64, not published); the full recipe is in
+[docs/publier-macos.md](docs/publier-macos.md) (in French).
 
 On a Linux x86-64 PC, `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` also builds `~/src/qemu/build-fast/`
 (`-O3 -march=native`, LTO, PGO; about 10 % faster in DOOM 3 than the reference build at equal

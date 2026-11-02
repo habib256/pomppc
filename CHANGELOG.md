@@ -13,8 +13,11 @@ de commit et dans `docs/`.
 
 ## 0.4 (02/11/2026)
 
-Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.4`) au commit de la version,
-**macOS 27 ou plus** : cinq bibliothèques Homebrew embarquées l'exigent. Principaux changements
+Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.4`) au commit de la version, construit
+pour **macOS 26.0** et essayé sous macOS 27 : l'hôte étant passé sous macOS 27, glib, pcre2, libpng
+et libunistring sont recompilées pour cette cible (`scripts/build_release_deps_macos.sh`) et
+l'empaquetage refuse tout binaire au-dessus (`MIN_MACOS`). README : vérification, résolutions,
+mise à jour et dépannage. Principaux changements
 pour ce paquet : Quartz Extreme allumé et valable à toutes les résolutions, série TCG du PC
 allumée sur arm64, plugin allégé, Tiger 10.4.11. Temps du M4 au 02/11 contre la 0.3, en ms/image :
 DOOM 3 28,9 contre 48,0, UT2004 19,3 contre 25,3, Zenerchi 2,6 contre 4,3, Colin McRae 41,7 en
