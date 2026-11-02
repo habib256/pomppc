@@ -6,6 +6,7 @@ POMPPC 0.4 brings **Quartz Extreme** to the prebuilt macOS package, at every dis
 - **Faster.** On an Apple M4, idle host, in ms/frame against 0.3: DOOM 3 28.9 vs 48.0, UT2004 19.3 vs 25.3, Zenerchi 2.6 vs 4.3. Colin McRae 41.7 at 1920×1080 vs 50.5 at 1024×768.
 - **Colin McRae:** the false reflections on the car body are gone.
 - **Single mouse cursor** in the ImGui front end.
+- **Runs on macOS 15 and later**, without Homebrew (0.3 required macOS 26).
 - **Better guide.** The README now covers checking the install, changing the resolution, upgrading and troubleshooting.
 
 Details are in [CHANGELOG.md](https://github.com/habib256/pomppc/blob/0.4/CHANGELOG.md).
@@ -20,7 +21,7 @@ Details are in [CHANGELOG.md](https://github.com/habib256/pomppc/blob/0.4/CHANGE
 
 ## Requirements
 
-- An Apple Silicon Mac running **macOS 26 or later**. The package is built for macOS 26.0 but was only run on macOS 27: please report any problem on macOS 26.
+- An Apple Silicon Mac running **macOS 15 or later**. Homebrew isn't needed: the package carries its own libraries, built for macOS 15.0. It was developed and measured on an M4 under macOS 27, so frame times will differ on other chips: please report any problem.
 - **Your own** Mac OS X 10.4 Tiger PowerPC install media. Nothing of Apple's is included.
 
 ## Getting started

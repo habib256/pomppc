@@ -55,8 +55,9 @@ on Linux x86-64; `QE=0 ./run_tiger.sh` turns it off. What is **not** done: Core 
 
 ## Quick start (prebuilt release, macOS on Apple Silicon)
 
-Requirements: an Apple Silicon Mac running **macOS 26 or later** (release 0.4 is built for macOS
-26.0 and tested on macOS 27), about 20 GB of free disk space, and **Mac OS X 10.4 Tiger PowerPC
+Requirements: an Apple Silicon Mac running **macOS 15 or later** (release 0.4 needs no Homebrew: it
+carries its own libraries, built for macOS 15.0; it was developed and measured on an M4 under
+macOS 27), about 20 GB of free disk space, and **Mac OS X 10.4 Tiger PowerPC
 installation media that you own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distributed here.
 
 1. Download `pomppc-<version>-macos-arm64.tar.xz` from the

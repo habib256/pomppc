@@ -2,32 +2,36 @@
 
 Recette de la 0.4 (02/11/2026). Le paquet est le commit : arbre propre exigé, tag posé sur ce commit.
 
-## 1. Choisir le macOS minimal
+## 1. Le macOS minimal
 
-Le macOS exigé se lit dans les binaires et monte tout seul quand l'hôte change : les bouteilles
-Homebrew visent le macOS de la machine, le compilateur aussi. `MIN_MACOS` (26.0 pour la 0.4) fixe
-la cible, et `package_release_macos.sh` refuse tout binaire au-dessus.
+Le paquet embarque ses bibliothèques et n'a pas besoin de Homebrew à l'exécution, mais le macOS
+exigé se lit dans chaque binaire : copiées telles quelles, les bouteilles Homebrew exigent le macOS
+de la machine. `MIN_MACOS` (15.0 pour la 0.4) fixe donc la cible, et
+`package_release_macos.sh` refuse tout binaire au-dessus.
 
 ```bash
 vtool -show-build <binaire> | grep minos       # ce qu'un binaire déclare
-scripts/build_release_deps_macos.sh            # ~/src/pomppc-deps : pcre2, libpng, libunistring, glib
+scripts/build_release_deps_macos.sh            # ~/src/pomppc-deps : les 17 formules, aux versions de Homebrew
 ```
 
-Les formules à recompiler sont celles que le refus de l'empaquetage nomme (`FORMULES="…"`).
-Le script reprend les versions et sommes de Homebrew. Les binaires compilés contre les bouteilles
-gardent la même ABI, et l'empaquetage remplace chaque bibliothèque par sa version recompilée.
+Le script refuse aussi une bibliothèque liée à Homebrew ou à `@rpath`. Une formule ajoutée à
+QEMU ou au frontal s'ajoute à sa liste `FORMULES`, dans l'ordre des dépendances.
 
 ## 2. Construire, hors des arbres quotidiens
 
 ```bash
-export MACOSX_DEPLOYMENT_TARGET=26.0
-QEMU_SRC=~/src/qemu-rel04 PYTHON=~/src/qemu-venv/bin/python3 CONFIGURE_EXTRA=--disable-sdl \
-  scripts/build_qemu_qfb.sh
-cmake -S frontend -B ~/src/pomppc-frontend-rel04 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
+D=~/src/pomppc-deps; PC=""; for d in "$D"/*/*/lib; do PC="$d/pkgconfig:$PC"; done
+GT=$(ls -d "$D"/gettext/*/lib)
+export PKG_CONFIG_PATH="$PC" MACOSX_DEPLOYMENT_TARGET=15.0 LDFLAGS="-L$GT"
+QEMU_SRC=~/src/qemu-rel04 PYTHON=~/src/qemu-venv/bin/python3 \
+  CONFIGURE_EXTRA="--disable-sdl --extra-ldflags=-L$GT" scripts/build_qemu_qfb.sh
+cmake -S frontend -B ~/src/pomppc-frontend-rel04 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+  -DCMAKE_PREFIX_PATH="$(ls -d "$D"/glfw/*)"
 cmake --build ~/src/pomppc-frontend-rel04 -j
 ```
 
-Le script de QEMU écrase `bench/build-capabilities.txt` : le sauvegarder puis le remettre.
+La cible ne se rattrape pas sur un arbre déjà construit : effacer `build/` en la changeant. Le
+script de QEMU écrase `bench/build-capabilities.txt` : le sauvegarder puis le remettre.
 `~/src/qemu/build` reste le binaire de la VM quotidienne.
 
 ## 3. Binaires de l'invité
@@ -57,7 +61,8 @@ SNAPSHOT=1 SSH_FWD=2240 ./run_tiger.sh
 ```
 
 Dans l'invité : `install.sh` du CD, redémarrage, étape 6 du README, `setmode` (`guest/gltest/`) à
-1024×768, 1920×1080 et 2560×1080, puis un jeu. Vérifier aussi `x-tb-fast` au lancement : le paquet
+1024×768, 1920×1080 et 2560×1080, puis un jeu. Vérifier que `lsof -p <QEMU>` ne montre que `lib/` du paquet, et si possible essayer
+sur le macOS minimal réel. Vérifier aussi `x-tb-fast` au lancement : le paquet
 v0.1.0 l'avait perdu en silence (`CHANGELOG.md`, 0.3).
 
 ## 6. Publier

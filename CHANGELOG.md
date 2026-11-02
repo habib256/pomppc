@@ -14,9 +14,9 @@ de commit et dans `docs/`.
 ## 0.4 (02/11/2026)
 
 Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.4`) au commit de la version, construit
-pour **macOS 26.0** et essayé sous macOS 27 : l'hôte étant passé sous macOS 27, glib, pcre2, libpng
-et libunistring sont recompilées pour cette cible (`scripts/build_release_deps_macos.sh`) et
-l'empaquetage refuse tout binaire au-dessus (`MIN_MACOS`). README : vérification, résolutions,
+pour **macOS 15.0**, sans Homebrew à l'exécution : QEMU, le frontal et leurs bibliothèques sont
+recompilés pour cette cible (`scripts/build_release_deps_macos.sh`) et l'empaquetage refuse tout
+binaire au-dessus (`MIN_MACOS`). Mis au point sur un M4 sous macOS 27. README : vérification, résolutions,
 mise à jour et dépannage. Principaux changements
 pour ce paquet : Quartz Extreme allumé et valable à toutes les résolutions, série TCG du PC
 allumée sur arm64, plugin allégé, Tiger 10.4.11. Temps du M4 au 02/11 contre la 0.3, en ms/image :

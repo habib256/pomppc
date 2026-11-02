@@ -123,8 +123,9 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
 ### Paquet publié (macOS sur Apple Silicon)
 
 Sans construire : l'archive `pomppc-<version>-macos-arm64.tar.xz` des
-[publications](https://github.com/habib256/pomppc/releases) demande **macOS 26 ou
-plus récent** (la 0.4 est construite pour macOS 26.0 et essayée sous macOS 27 ; recette de
+[publications](https://github.com/habib256/pomppc/releases) demande **macOS 15 ou
+plus récent**, sans Homebrew (la 0.4 embarque ses bibliothèques, construites pour macOS 15.0 ; mise
+au point et mesurée sur un M4 sous macOS 27 ; recette de
 construction : `docs/publier-macos.md` ; installation, résolutions, mise à jour et dépannage :
 [README.md](README.md#quick-start-prebuilt-release-macos-on-apple-silicon)). C'est le dépôt
 au tag de la publication, plus `bin/` (`qemu-system-ppc`, `qemu-system-ppc64`, `qemu-img`

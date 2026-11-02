@@ -15,8 +15,8 @@
 #   - frontal construit (frontend/README.md), FRONTEND=<binaire> s'il est ailleurs que dans
 #     frontend/build/pomppc ;
 #   - QEMU et frontal compilés avec MACOSX_DEPLOYMENT_TARGET=$MIN_MACOS, et les bibliothèques
-#     dont la bouteille Homebrew vise plus haut dans $RELEASE_DEPS
-#     (scripts/build_release_deps_macos.sh) ; tout binaire au-dessus de $MIN_MACOS est refusé ;
+#     dans $RELEASE_DEPS (scripts/build_release_deps_macos.sh) ; tout binaire au-dessus de
+#     $MIN_MACOS est refusé ;
 #   - binaires invités dans $PREBUILT (défaut disks/prebuilt), voir scripts/make_guest_iso.sh
 #     (CD toujours regravé ici : pas de GUEST_ISO, contrairement au paquet Linux).
 # Sortie : dist/pomppc-<version>-macos-arm64.tar.xz et son .sha256.
@@ -25,7 +25,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VER="${1:?version attendue, p. ex. v0.1.0}"
 QSRC="${QEMU_SRC:-$HOME/src/qemu-release}"
 FRONTEND="${FRONTEND:-$ROOT/frontend/build/pomppc}"
-MIN_MACOS="${MIN_MACOS:-26.0}"
+MIN_MACOS="${MIN_MACOS:-15.0}"
 RELEASE_DEPS="${RELEASE_DEPS:-$HOME/src/pomppc-deps}"
 NAME="pomppc-$VER-macos-arm64"
 DIST="$ROOT/dist"; OUT="$DIST/$NAME"
