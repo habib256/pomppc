@@ -59,17 +59,17 @@ printf '#!/bin/sh\necho agent-ok\n' > "$PROBE/job.sh"
 boxes="$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print(c["IN"], c["OU"])' \
          "$ROOT/bench/devloop/mailbox.json")"
 run_one() { # run_one <nom> : un démarrage, le job, l'arrêt ; sorties dans OUT/<nom>
-  local k
+  local _k
   active=1
   python3 "$DL" start > /dev/null 2>&1 || { echo "  démarrage raté"; return 1; }
-  for k in 1 2 3 4 5; do
+  for _k in 1 2 3 4 5; do
     python3 "$DL" run "$PROBE" --timeout 150 > /dev/null 2>&1 && break
     python3 "$DL" type '\n'; sleep 2
     python3 "$DL" type 'mount -uw /\n'; sleep 4
     python3 "$DL" type "sh /pomppc/agent.sh $boxes\n"; sleep 15
   done
   python3 "$DL" run "$JOB" --timeout 3600 > /dev/null 2>&1
-  rm -rf "$OUT/$1"; cp -R "$ROOT/bench/devloop/last/out" "$OUT/$1"
+  rm -rf "${OUT:?}/${1:?}"; cp -R "$ROOT/bench/devloop/last/out" "$OUT/$1"
   python3 "$DL" shutdown > /dev/null 2>&1
   active=0
   cp "$ROOT/bench/devloop/qemu.log" "$OUT/$1-qemu.log"

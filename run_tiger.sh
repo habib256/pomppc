@@ -83,12 +83,14 @@
 #   TCGCOLD=0 ./run_tiger.sh  # Linux x86-64 : coupe les chemins lents du code généré en zone froide de la
 #                             # région (x-tcg-cold, patches/tcg/0056, propriété de l'accélérateur ; allumé
 #                             # par défaut sur Linux x86-64 depuis le 31/10, docs/vitesse-doom3-x86.md §23 ;
-#                             # éteint sur le M4, où il serait sans effet : b.cond imm19)
+#                             # disponible sur le M4 depuis tcg/0066, éteint par défaut)
 #   VPERMINLINE=1 ./run_tiger.sh # vperm en pshufb dans le code généré (x-vperm-inline, patches/tcg/0059,
 #                             # éteint par défaut, neutre) ; VPERMVERIFY=1 : preuve
 #   VCPUQOS=1 POLLNS=1 ./run_tiger.sh # macOS : fils vCPU en QoS interactive (x-vcpu-qos, tcg/0057) et
 #                             # attente de la boucle principale à la µs (POMPPC_POLL_NS, tcg/0058) ;
 #                             # éteints par défaut tant que l'A/B n'est pas fait
+#   POLLNS=3 ./run_tiger.sh  # macOS : budget de réveils précis, repli progressif de 250 ms à 2 s
+#                             # (tcg/0067, éteint par défaut ; repli seulement sur rafales denses)
 #   MEMSTATS=1 ./run_tiger.sh # compteurs mémoire toutes les 10 s sur stderr (x-mem-stats, tcg/0031, 0042)
 #   PMUREAL=1 ./run_tiger.sh  # ppc64 : le PMU POWER8 ne compte plus sur un G4 (PMC5 fantôme à chaque
 #                             # sortie de bloc, x-pmu-real, patches/tcg/0049 ; éteint par défaut)
@@ -994,10 +996,20 @@ fi
 # POMPPC_POLL_NS=1 à QEMU (select à la microseconde). Éteint par défaut tant
 # que l'A/B n'est pas fait ; un QEMU sans 0058 ignore la variable.
 # POLLNS=2 : tcg/0065, seulement 0 < délai < 1 ms ; sinon g_poll.
+# POLLNS=3 : tcg/0067, budget de réveils précis ; repli progressif de 250 ms
+# à 2 s sur g_poll si les rafales reprennent, premier palier après une pause.
+# BEGIN POLLNS BUDGET GUARD
+if [ "${POLLNS:-0}" = 3 ] && ! qemu_has_poll_budget "$BIN"; then
+  echo "⚠ POLLNS=3 exige le budget de réveils tcg/0067 dans $BIN ; reconstruire QEMU." >&2
+  exit 1
+fi
+# END POLLNS BUDGET GUARD
 if [ "${POLLNS:-0}" != 0 ]; then
   export POMPPC_POLL_NS="$POLLNS"
   if [ "$POLLNS" = 2 ]; then
     MODE="$MODE + ATTENTE µs SOUS 1 ms"
+  elif [ "$POLLNS" = 3 ]; then
+    MODE="$MODE + ATTENTE µs À CADENCE BORNÉE"
   else
     MODE="$MODE + ATTENTE À LA MICROSECONDE"
   fi

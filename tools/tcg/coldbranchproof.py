@@ -25,7 +25,8 @@ def main():
     path = root / "tcg/aarch64/tcg-target.c.inc"
     source = path.read_text()
     begin = source.index("static bool reloc_pc26(")
-    end = source.index("static bool reloc_pc14(", begin)
+    end = source.index("static bool reloc_pc19(", begin)
+    end = source.index("\n}\n", end) + 3
     print("source : %s (sha256 %s)" %
           (path, hashlib.sha256(path.read_bytes()).hexdigest()), flush=True)
     proof = Path(__file__).with_suffix(".c")

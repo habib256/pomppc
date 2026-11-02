@@ -1,8 +1,10 @@
-# Zone froide arm64 : revue et preuve préparatoire du 02/11
+# Zone froide arm64 : revue, portage 0066 et preuves du 02/11
 
-Le portage de `tcg/0056` n'est pas implanté. Son garde x86-64 reste en place et
-`TCGCOLD` reste sans effet sur le M4. Cette étude ferme la question du mécanisme
-de branchement, pas celle du gain en jeu ni celle du portage complet.
+La revue de fin de nuit ci-dessous précède le portage. À la demande de
+l'utilisateur, **`tcg/0066` est implanté dans la séance du matin**, validé dans
+l’invité (§6). `TCGCOLD=1` agit désormais sur arm64 en émulation système ;
+les preuves sont closes (§6) et la matrice des cinq jeux est terminée (§7).
+Le défaut du M4 reste éteint : aucun gain générique établi.
 
 ## 1. Les entrées courtes concernent cinq familles
 
@@ -78,7 +80,7 @@ La preuve utilise la même adresse virtuelle RW/RX avec la protection JIT par
 fil de macOS. Elle ne teste pas un mapping séparé RW/RX, le gestionnaire de
 régions, les pools ni le rétablissement d'un état invité en exception.
 
-## 5. Implantation et fermeture restantes
+## 5. Décision de fin de revue, avant le portage 0066
 
 [F — conception] Une porte inversée suivie de `B` conserve les opérandes sans
 prendre de registre temporaire, mais change le sens de la branche rapide et
@@ -92,3 +94,120 @@ bon PC invité, saturation puis changement de région. Puis A/B entrelacé sur
 **mb, zen, ut, d3, cmr**, hôte au repos, six parties ou témoin pour les écarts
 sous 3 %. Le gain x86 de 1–2 % ne présume pas du gain M4 ; le profil du 02/11
 n'établit pas un goulot de cache d'instructions comparable à celui du PC.
+
+## 6. Portage 0066 du matin : relais chauds et pools séparés
+
+[D — code] QEMU v11.1.2, série POMPPC et `tcg/0066-tcg-cold-arm64.patch` :
+
+- Chaque branche conditionnelle d'entrée garde son sens et sa largeur. Un
+  relais `B` est ajouté en fin du corps chaud ; la branche d'origine le vise
+  en imm19, puis le relais vise le froid en imm26. Le chemin rapide ne traverse
+  aucune instruction supplémentaire. Les cinq callbacks utilisent `reloc_ldst`,
+  qui distingue le relais long des branches courtes créées dans le froid par tlbb.
+- `raddr` reste dans le corps chaud. Les adresses transmises aux helpers mémoire
+  et FP restent celles d'avant ; un relais ne prend aucun registre temporaire
+  et n'écrit pas LR.
+- Les régions arm64 froides ont une taille nominale au plus égale à 64 Mio,
+  y compris en SMP=1. Leurs bornes réelles (reliquat d'alignement inclus) sont
+  vérifiées strictement sous 128 Mio. Le mode utilisateur et TCI arm64 restent
+  exclus ; le garde x86-64 de 0056 reste valide.
+- Les pools froids sont finalisés avant le retour au chaud, avec leur propre
+  liste et leur propre `data_gen_ptr`. Le curseur, la liste et la borne chauds
+  sont rétablis sur tous les retours du finaliseur froid. Un épuisement du froid
+  ou des relais marque la région pleine ; un échec de relocation réduit le TB
+  suivant la procédure de QEMU. Le vidage du cache inclut code et pool froids.
+
+[A — hôte] `tools/tcg/coldzoneproof.py --mutants` extrait les fonctions du
+backend, le finaliseur et la règle de région de l'arbre construit. **53 cas
+réussis** : 48 exécutions natives des portes (chemins rapides et lents, arguments 64 bits) et accès aux pools à
+±48/96 Mio (`B.ne`, `B.hi`, `CBNZ` 64 et 32 bits ; zéro, un, bit 40), et cinq
+retours d'erreur. Les pools chaud/froid restent distincts ; les pointeurs
+chauds sont restaurés et aucun froid en échec n'est validé. Cinq mutants sont
+détectés : BL au lieu de B, portée courte, pools mélangés, curseur chaud perdu,
+région SMP=1 trop grande. Journal `.run/coldzoneproof-0211.log`.
+
+Le harnais teste aussi l'arithmétique des alias RX/RW et le découpage SMP=1.
+L'exécution native utilise MAP_JIT à adresse RW/RX identique ; elle ne prétend
+pas exécuter deux mappings distincts. Les callbacks mémoire/FP y sont remplacés
+par un émetteur de contrôle : **les preuves invitées restent nécessaires**.
+Le patch appliqué à la copie avant donne quatre fichiers identiques à ceux de
+l'arbre construit.
+
+**Validation invitée terminée** sur une copie autonome privée de la base
+d'endurance (`bench/tcg/cold-arm64-0211/invite/`), témoins froid éteint puis
+allumé, sorties identiques :
+
+- SMP=1, JIT placé à `0x7000000000`, loin du texte, tampon 1 Gio ;
+- SMP=2, tampon 64 Mio, **191 renouvellements du tampon dans le témoin et 137
+  avec le froid**. Le premier démarrage témoin à 8 Mio a manqué le délai SSH ;
+  son dossier interrompu est conservé, sans être compté comme une réussite.
+
+Tests flottants simples/doubles, programmes aléatoires et comparaisons,
+vecteurs, fautes mémoire au PC/DAR exact (**500 984 cas tlbb, 309 224 fautes**),
+mémoire protégée, lmw, dcbz hors réservation et code réécrit. Les vérificateurs
+FP/vectoriels, LMW et DCBZ restent actifs. Le témoin SMP=2 relève **102
+signalements TLB sans PTE, zéro autre page** ; le froid n'en relève aucun dans
+ce passage. [F] La cause de ces signalements du témoin reste ouverte, comme
+les observations antérieures de `tcg-g4.md` §35/44/45 : ni régression attribuée
+au froid, ni preuve qu'ils seraient faux. Trancher par une trace ordonnée des
+écritures de PTE et des invalidations sur les deux vCPU ; si le contrat reste
+ambigu, rejouer le cas minimal sur un G4 réel. Les sorties et compteurs bruts sont
+conservés. Aucun écart aux tests C. Les trois images qcow2 contrôlées après les
+essais sont sans erreur. Aucune vitesse n'est déduite de ces essais instrumentés.
+
+Le premier témoin SMP=1 avec `RETVERIFY=1`, **sans zone froide**, a donné
+44 signalements du cache de retours (`complet 0x0`, traduction absente), point
+« sans traduction » déjà ouvert dans le TODO. Aucun autre vérificateur n'y
+signale de divergence. Relevé conservé dans `invite-temoin-retverify/` et
+`temoin-retverify.json`. [F] Cause à instruire ; ces signalements ne sont pas
+attribués au portage ni déclarés faux. Trancher par un cas réduit qui remappe
+une page de code, avec journal du cache de retours (mmu_idx, époque, TB),
+traduction complète et témoin `RETINLINE=0`. La comparaison est rejouée avec ce
+vérificateur éteint dans les deux bras ; les tests invités continuent de
+contrôler les fautes au PC exact et les autres vérificateurs restent actifs.
+
+
+### Exceptions flottantes au PC invité exact
+
+Le contrôle `tools/guest/jobs/fptest/fpexctest.c` est compilé avec GCC dans
+Tiger, puis rejoué sans et avec le froid : SMP=1/JIT loin du texte, puis
+SMP=2/tampon 64 Mio. **640 exceptions par configuration, 2 560 au total,
+zéro erreur, sorties identiques** (`exceptions-fp-2/` dans le dossier de preuve).
+Cinq opérations : fadds/fadd sur NaN signalant, fdivs par zéro, fcmpo sur NaN
+calme et frsp sur NaN signalant. Chaque SIGFPE contrôle le PC contre
+l'étiquette de l'instruction ; les FPSCR et codes du signal sont aussi conservés.
+Ce contrôle de non-régression dans l'émulateur n'est pas une mesure sur G4 réel.
+
+[B — logiciel] Apple **xnu-792.24.17** :
+[`sigreturn`](https://github.com/apple-oss-distributions/xnu/blob/xnu-792.24.17/bsd/dev/ppc/unix_signal.c)
+réactive les exceptions précises pour un fil avec gestionnaire SIGFPE ;
+[`thread_enable_fpe`, dans status.c](https://github.com/apple-oss-distributions/xnu/blob/xnu-792.24.17/osfmk/ppc/status.c)
+pose FE0/FE1. Un retour de SIGUSR1 arme le test. Le même `status.c` exporte
+**MSR_EXPORT_MASK_SET** dans `PPC_THREAD_STATE`, et masque donc FE0/FE1 :
+le `msr_fe=000` du contexte du signal ne décrit pas le MSR réel. La première
+assertion du harnais sur ces bits a été retirée sur cette preuve primaire ;
+le contrôle des signaux et du PC est conservé. La campagne finale utilise une
+copie figée du source pour les quatre configurations. Les premières tentatives
+d'assemblage et d'assertion du masque sont conservées, sans être comptées
+comme des réussites ni attribuées au portage.
+
+## 7. Matrice finale et décision
+
+[A — hôte] Trois passages par bras avec témoin identique, quatre jeux en
+fenêtre et CMR en course 1920×1080 : **60 cellules sans anomalie d'exécution
+ni repli**, charge valide. Protocole, tableau complet et données dans
+[`re/ut-attente-m4.md`, §7](re/ut-attente-m4.md#7-matrice-finale-close-à-13-h-28--résultat-et-décision).
+Six preuves d'image séparées avec 0066 + attente progressive sont vertes.
+
+La comparaison propre au froid est `POLLNS=3 TCGCOLD=1` contre
+`POLLNS=3 TCGCOLD=0` : médianes mb −1,03 %, zen −1,08 %, d3 −0,34 %,
+ut −0,78 %, cmr +1,41 %. Petits déplacements, recouvrement des échantillons ;
+**aucun gain générique établi**, et aucune conclusion sur le froid seul sans
+attente progressive. L'ensemble contre la référence fait zen −10,06 %,
+ut +0,23 %, d3 +1,09 %, mb −0,76 %, cmr +0,65 %.
+
+**Portage terminé, option conservée éteinte par défaut sur le M4** ; activation
+explicite `TCGCOLD=1`. Le gain x86-64 ne suffit pas à l'allumer sur arm64.
+Le finaliseur générique de pools change aussi sur x86-64 : reconstruire
+`build/` et `build-fast/`, puis valider sur le PC à son retour. Aucun test
+Linux de cette séance n'est revendiqué.

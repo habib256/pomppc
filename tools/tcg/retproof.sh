@@ -18,7 +18,7 @@
 # verify.txt,run-*.log}.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$WT"
+cd "$WT" || exit 1
 DISK="${DEVDISK:?DEVDISK=<image raw de dev> requis}"
 QB="${QEMU_BIN:?QEMU_BIN requis}"
 BASE="${BASEPROPS-x-fast-fp=on,x-sr-tlb=on,x-lfs-inline=on,x-vfp-fast=on,x-vperm-fast=on,x-fp-inline=on}"

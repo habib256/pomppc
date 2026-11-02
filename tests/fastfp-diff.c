@@ -22,7 +22,7 @@
  * l'arbre QEMU patché, pour ses en-têtes et pour fpu_softfloat.c.o :
  *
  *   cc -O2 -Wall $(flags -I/-iquote de l'arbre) tests/fastfp-diff.c \
- *      <build>/libqemu-ppc-softmmu.a.p/fpu_softfloat.c.o -lm -o fastfp-diff
+ *      <build>/libcommon.a.p/fpu_softfloat.c.o -lm -o fastfp-diff
  *
  * Usage : ./fastfp-diff [itérations] [graine]
  */
@@ -62,8 +62,15 @@ static float_status mkstatus(bool primed, FloatRoundMode rm, bool ftz)
     float_status s;
 
     memset(&s, 0, sizeof(s));
+    /* [D] QEMU v11.1.2, target/ppc/cpu_init.c, ppc_cpu_reset_hold :
+     * mêmes règles de NaN et de sous-flux que le CPU testé. Une règle de NaN
+     * absente provoque ici une assertion : initialisation manquante du harnais. */
     set_float_detect_tininess(float_tininess_before_rounding, &s);
+    set_float_ftz_detection(float_ftz_before_rounding, &s);
     set_float_2nan_prop_rule(float_2nan_prop_ab, &s);
+    set_float_3nan_prop_rule(float_3nan_prop_acb, &s);
+    set_float_infzeronan_rule(float_infzeronan_dnan_never, &s);
+    set_float_default_nan_pattern(0b01000000, &s);
     set_float_rounding_mode(rm, &s);
     s.flush_to_zero = ftz;
     s.flush_inputs_to_zero = ftz;

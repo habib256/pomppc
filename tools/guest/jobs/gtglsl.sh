@@ -13,6 +13,6 @@ for s in glsl glslvs glslfs glsldp glslsmp; do
   env "$@" POMPPC_GL_NOTE=$O/$s.note $B $s > $O/$s.log 2>&1; echo "rc $?" >> $O/$s.log
   [ -f gltest.ppm ] && md5 -q gltest.ppm > $O/$s.md5
 done
-cd $O; for f in *.log; do s=${f%.log}; n=$(grep -c '^  ok' $f); k=$(grep -c 'FAIL\|ÉCHEC\|NON TENU' $f); echo "$s: OK $n, échecs $k, $(grep '^rc ' $f) $(cat $s.md5 2>/dev/null)"; done
+cd "$O" || exit 1; for f in *.log; do s=${f%.log}; n=$(grep -c '^  ok' $f); k=$(grep -c 'FAIL\|ÉCHEC\|NON TENU' $f); echo "$s: OK $n, échecs $k, $(grep '^rc ' $f) $(cat $s.md5 2>/dev/null)"; done
 echo "-- échecs"; grep -h 'FAIL\|ÉCHEC\|NON TENU' *.log
 echo "-- VERDICT"; grep -h 'VERDICT total\|VERDICT écart\|STATE écart\|TEXMEMO écart\|plugin 2' *.note

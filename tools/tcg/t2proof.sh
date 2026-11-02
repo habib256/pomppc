@@ -47,8 +47,8 @@ run() {   # run NOM PROPS_CPU [ENV...] → somme sur stdout, bilan dans $OUT/NOM
         -bios "$OUT/t2proof.bin" -display none -serial none -parallel none \
         -nodefaults -audio none -monitor "unix:$sock,server=on,wait=off" \
         > "$OUT/$name.out" 2> "$OUT/$name.err" &
-    local pid=$! sum="" t
-    for t in $(seq 1 600); do
+    local pid=$! sum="" _t
+    for _t in $(seq 1 600); do
         sleep 0.5
         kill -0 $pid 2>/dev/null || break
         [ -S "$sock" ] || continue
@@ -69,7 +69,7 @@ except subprocess.TimeoutExpired:
 PY
     # Un vCPU bloqué dans le code émis peut ignorer quit et SIGTERM.
     # Ne jamais laisser ce processus de banc derrière nous.
-    for t in $(seq 1 20); do
+    for _t in $(seq 1 20); do
         kill -0 $pid 2>/dev/null || break
         sleep 0.1
     done

@@ -22,5 +22,5 @@ if host_locked "$LOCK"; then
 fi
 ( cd "$R" && env POMPPC_FRONTEND=native "$@" nohup ./run_tiger.sh > "$log" 2>&1 & )
 sleep 20
-for i in $(seq 1 60); do $TS true >/dev/null 2>&1 && { echo "VM prête ($*)"; exit 0; }; sleep 5; done
+for _i in $(seq 1 60); do $TS true >/dev/null 2>&1 && { echo "VM prête ($*)"; exit 0; }; sleep 5; done
 echo "pas de ssh après 5 min"; exit 1

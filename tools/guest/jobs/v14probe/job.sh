@@ -7,7 +7,7 @@
 . ./lib.sh
 plugin_install && gltest_build || exit 1
 kextstat | grep -q net.pomppc.POMPPCGPU || kext_load
-cd $SRC/guest/gltest
+cd "$SRC/guest/gltest" || exit 1
 for m in ${MODES:-annonce allext apple}; do
   case $m in
     annonce) e="" ;; allext) e="POMPPC_GL_ALLEXT=1" ;; apple) e="POMPPC_GL_DISABLE=1" ;;
@@ -16,5 +16,10 @@ for m in ${MODES:-annonce allext apple}; do
   echo "== $m"
   env GLTEST_NOWS=1 POMPPC_GLTRACE_STATE=1 POMPPC_GL_T3DDUMP=1 POMPPC_GLTRACE=$OUT/tr-$m $e \
     ./gltest v14probe 64 64 w.ppm 2>&1 | grep -v "^  \[vidage\|^renderers\|^  \[[0-9]\]\|^CGL"
-  ( cd $OUT/tr-$m && ls | grep bin | grep -v "clear-glstate\|clear-gctxlow\|swap-dt3\|swap-prm3" | xargs rm -f )
+  ( cd "$OUT/tr-$m" || exit 1
+    for dump in ./*bin*; do
+      [ -f "$dump" ] || continue
+      case "$dump" in *clear-glstate*|*clear-gctxlow*|*swap-dt3*|*swap-prm3*) ;; *) rm -f "$dump" ;; esac
+    done
+  )
 done

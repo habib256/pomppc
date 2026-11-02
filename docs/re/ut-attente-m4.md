@@ -93,3 +93,123 @@ La même adresse chaude figurait dans l'étude du PC, mais son noyau doit avoir
 son empreinte et ses octets vérifiés **sur le PC** avant de transférer cette
 identification. Accélérer uniquement `mftb` ferait aussi tourner cette attente
 plus vite : le gain utile sur le jeu reste à prouver.
+
+## 5. Reprise du matin : compter la cadence, puis la borner
+
+[A — hôte, diagnostic] Deux parties séparées, `m4-attente-diag2-0211`, même
+binaire diagnostique, même scène ; compteur local au fil autour du vrai poll,
+traces des signaux du décrémenteur. Les temps de jeu instrumentés ne sont pas
+utilisés comme preuve de vitesse. Médianes de relevés d'environ une seconde :
+
+| scène et mode | attentes positives expirées / s | signaux DEC levés / s |
+|---|---:|---:|
+| zen, référence | 220 | 763 |
+| zen, mode 2 précis | 1 977 | 1 546 |
+| UT, référence | 563 | 917 |
+| UT, mode 2 précis | 11 261 | 11 135 |
+
+Intervalles et sources dans `bench/tcg/attente-correction-0211/cadence.json` ;
+11–15 secondes par cellule, un seul fil observé dans ces relevés. Un poll
+non bloquant n'est pas compté comme une expiration de délai ; un signal DEC
+levé n'est pas assimilé à une interruption déjà traitée par le noyau.
+
+Deux premiers essais sont archivés :
+`archive/m4-pollns-plancher-250us-0211` (diagnostic avec plancher de 250 µs,
+la perte UT reste présente), et `archive/m4-pollns-idle-0211` (précision seulement
+quand QEMU voit tous les vCPU inactifs ; son pilote ne retrouve pas le gain zen).
+Leurs pilotes à une partie par bras ne prouvent ni gain ni neutralité.
+
+**Premier budget fixe 0067, `POLLNS=3`** : budget local au fil, 128 expirations précises dans une
+fenêtre de 32 ms, puis retour au `g_poll` courant pendant 250 ms. Les E/S prêtes,
+erreurs, replis FD_SETSIZE et polls non bloquants ne consomment pas le budget.
+Une fenêtre écoulée réinitialise le compte. Les modes 0/1/2 sont conservés,
+le mode est initialisé par `g_once`, aucune horloge ni instruction invitée
+n'est modifiée. [F — choix de politique] Ces seuils sont à juger par l'A/B
+complet, pas par une propriété supposée du G4.
+
+**587 cas de contrat/routage réussis**, dont temps simulé pour les frontières
+32/250 ms, fenêtres séparées et indépendance des fils. Cinq mutants détectés
+(repli supprimé, état partagé, E/S comptées, frontière 1 ms, fenêtre stricte).
+`.run/pollns-budget-proof-0211.log`, `mutants-budget/` dans le dossier d'étude.
+
+Pilote sans traces, une partie par bras : zen 2,8686→2,3553 ms/image ;
+UT 20,1304→19,7263. **Signal encourageant, pas de conclusion de vitesse** sur
+un seul passage. La suite à trois passages en fenêtre a écarté ce premier budget :
+UT 19,4629→19,9666 ms/image (**+2,59 %**), témoin identique 19,3673 ;
+chacun des trois budgets est plus lent que les six contrôles. Zen gagne
+9,48 %, mb −0,72 %, d3 +0,79 %. **CMR non joué** : campagne arrêtée
+volontairement pendant froid-3 ; aucun gain générique revendiqué.
+Instantané et protocole : `archive/m4-pollns-budget250-0211`
+(`93eb215`), données `m4-budget-froid-0211-fen`.
+
+Le binaire expose le point de trace `pomppc_poll_budget_backoff`, désactivé
+par défaut. Le lanceur exige cette capacité avant `POLLNS=3` : un ancien 0058
+interprétait toute chaîne non nulle comme le mode 1. La sonde n'amorce pas de
+VM ; absence et échec sont refusés. Tests du vrai garde avec chemin contenant
+des espaces, et de la vraie sonde (présent, absent, échec).
+
+
+## 6. Repli progressif : retirer le ralentissement résiduel d'UT
+
+Le seuil reste **128 expirations dans 32 ms**. Le premier repli dure 250 ms ;
+si une rafale reprend dans les 32 ms suivant son échéance, le palier double :
+500 ms, 1 s, puis **2 s au maximum**. Une rafale plus tardive revient à 250 ms.
+Pendant un palier, chaque poll continue à utiliser son délai normal arrondi
+par `g_poll`. L'état et la progression sont propres à chaque fil ; les E/S
+prêtes ne consomment pas le budget. Aucun code ni horloge de Tiger ne change.
+[F — politique] Seuils et paliers à juger sur la matrice, pas sur un supposé G4.
+
+**1 635 contrôles réussis** : contrat et routage des modes existants, paliers
+récurrents, plafond, reprise aux échéances exactes, frontière 32 ms et retour
+au premier palier. Les tests pilotent le poll réel avec le temps simulé sans
+lire son état privé. **Neuf mutants détectés**, dont progression supprimée,
+plafond à 4 s, premier palier non rétabli et frontière de reprise déplacée.
+Sources réelles extraites de `util/qemu-timer.c`, journaux
+`.run/pollns-progressif-0211.log` et `mutants-progressif/` dans le dossier d'étude.
+La reconstruction et l'application du patch donnent les mêmes sources octet
+pour octet. Le pilote séparé à trois passages retrouve zen −10,17 % ; UT
++0,70 %, inconclusif. Il ne remplace pas la matrice finale ci-dessous.
+
+## 7. Matrice finale close à 13 h 28 : résultat et décision
+
+[A — hôte] M4, QEMU v11.1.2 et série POMPPC incluant 0066/0067,
+**trois passages entrelacés par bras**, quatre bras : référence 0/0,
+témoin identique 0/0, progressif 3/0, ensemble 3/1 (`POLLNS/TCGCOLD`).
+Quatre jeux en fenêtre, CMR en course 1920×1080. Hôte au repos, barrière
+avant chaque lancement et charge continue ; tous les relevés sont valides.
+**60 cellules, zéro anomalie d'exécution, zéro repli de rendu.**
+
+Médianes en ms/image ; pourcentages par rapport à la référence, baisse = gain :
+
+| Jeu | Référence | Témoin identique | Progressif | Progressif + froid |
+|---|---:|---:|---:|---:|
+| Marble Blast | 6,15336 | 6,25059 (+1,58 %) | 6,17042 (+0,28 %) | 6,10671 (−0,76 %) |
+| Zenerchi | 2,64450 | 2,63731 (−0,27 %) | 2,40438 (−9,08 %) | 2,37846 (−10,06 %) |
+| DOOM 3 | 28,90677 | 28,88774 (−0,07 %) | 29,32253 (+1,44 %) | 29,22157 (+1,09 %) |
+| UT2004 | 19,57143 | 19,45005 (−0,62 %) | 19,76962 (+1,01 %) | 19,61585 (+0,23 %) |
+| Colin McRae | 41,63335 | 41,38841 (−0,59 %) | 41,32152 (−0,75 %) | 41,90481 (+0,65 %) |
+
+Le témoin identique évite de transformer chaque petit écart en gain. UT
+présente désormais un écart faible avec recouvrement des contrôles ; **aucune
+neutralité stricte n'est démontrée**. DOOM 3 garde un petit coût possible,
+au-dessus du déplacement de son témoin. CMR varie d'environ 5–6 % entre
+contrôles : son écart n'est pas concluant. Le gain net porte sur Zenerchi.
+**`POLLNS` reste éteint par défaut**, mode 3 disponible ; pas de gain générique
+revendiqué. La grande perte UT du mode 2 n'est pas reproduite par le mode 3.
+Le froid est comparé ici à attente progressive identique, pas seul contre 0/0.
+
+Données : `bench/tcg/ab/m4-progressif-0211-{fen,pe}/`, synthèse avec tous
+les échantillons et empreintes dans `bench/tcg/ab/m4-progressif-0211/`.
+Les CSV de vitesse sont rouges pour l'unique motif `--sans-vidage` : ils
+ne prétendent pas contrôler les images. **Six preuves distinctes sont vertes**
+avec 3/1 (`m4-progressif-preuve-0211-{fen,pe}`), références validées réutilisées,
+zéro repli. Ce tour instrumenté ne fournit aucun chiffre d'A/B.
+
+Les traces séparées confirment les paliers UT 250 ms → 500 ms → 1 s → 2 s ;
+zen ne déclenche qu'un repli de 250 ms, CMR aucun. Sources dans
+`bench/tcg/attente-correction-0211/progressif/`. Le témoin CMR-1 est conservé :
+la capture montrant l'arrêt a été prise **après** la mesure (11:54:25 fin,
+11:54:40 arrêt normal, 11:54:44 capture). Les deux demi-fenêtres présentent
+2 130,67 sommets/échange, au-dessus du seuil de course ; il n'y a pas eu
+intervention pendant la mesure. La durée de préparation variable n'est pas
+un échec de la course.

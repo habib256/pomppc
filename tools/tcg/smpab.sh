@@ -18,7 +18,7 @@
 # bilan : tools/tcg/regreport.py "$(cat bench/reg/reffast.txt)" bench/reg/res ÉTIQUETTE…
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$WT"
+cd "$WT" || exit 1
 RES="$WT/bench/reg/res"; mkdir -p "$RES"
 export TCG_OPTS="${TCG_OPTS-x-jit-near=on}"
 export QEXTRA="${QEXTRA--name smp,debug-threads=on}"

@@ -23,7 +23,7 @@
 # <étiquette>-sample.txt, <étiquette>-info.txt ; bilan : tools/tcg/regreport.py.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$WT"
+cd "$WT" || exit 1
 DISK="${DEVDISK:?DEVDISK=<image raw de dev> requis}"
 export DEVDISK="$DISK"
 QB="${QEMU_BIN:-$HOME/src/qemu-tcg19/build/qsr15}"

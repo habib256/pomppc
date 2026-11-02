@@ -11,8 +11,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 OPTS = "FASTFP SRTLB LFSINLINE VFPFAST VPERMFAST FPINLINE RETINLINE JCIDX ICBISYNC MSRNOBQL JCBITS JITNEAR QGPU_GPU_COPY QGPU_GLSL".split()
 # Défauts propres à l'hôte (docs/vitesse-doom3-x86.md §13, docs/jit-m4-2026-10-05.md ; série du
-# PC sur le M4 depuis le 26/10, docs/parite-m4-2510.md : tout sauf JITREL32 ; TCGCOLD sur le PC
-# seul depuis le 31/10, sans effet sur arm64).
+# PC sur le M4 depuis le 26/10, docs/parite-m4-2510.md : tout sauf JITREL32 ; TCGCOLD allumé sur le PC
+# depuis le 31/10, disponible sur arm64 depuis 0066 mais éteint par défaut).
 HOSTOPTS = ("VFPNATIVE TLBPRECISE LMWINLINE DCBZINLINE JITREL32 FPNATIVECMP VFPNATIVECMP LMWVEC JCWORD "
             "DIRTYSKIP PTEGMAP JC2WAY FPKNOWN FPRFLAZY STFSKNOWN PPC32MT LFSKNOWN TLBBASE TCGCOLD").split()
 HOST = "%s:%s" % (os.uname().sysname, os.uname().machine)
@@ -92,6 +92,33 @@ for host, cpu_spec, accel, rc, wanted in (
     if rc:
         assert "exige split-wx=on" in p.stderr, p
 print("tier2 M4 : split-wx automatique, refus explicite et autres configurations OK")
+
+# Un ancien 0058 interprète toute valeur non nulle comme le mode 1. Refuser
+# explicitement le mode 3 sans sa capacité compilée, même si la sonde échoue.
+guard = source.split("# BEGIN POLLNS BUDGET GUARD", 1)[1].split("# END POLLNS BUDGET GUARD", 1)[0]
+for mode in ("0", "1", "2", "3"):
+    for cap in (0, 1, 2):
+        script = ('qemu_has_poll_budget() { [ "$1" = "$BIN" ] || exit 9; '
+                  'echo probed; return "$CAP"; };\n' + guard + '\necho accepted')
+        p = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                           env=dict(os.environ, POLLNS=mode, CAP=str(cap),
+                                    BIN="/a binary with spaces/qemu"), timeout=5)
+        rejected = mode == "3" and cap != 0
+        assert p.returncode == int(rejected), (mode, cap, p)
+        assert ("probed" in p.stdout) == (mode == "3"), p
+        assert ("accepted" in p.stdout) != rejected, p
+with tempfile.TemporaryDirectory(prefix="poll capability ") as tmp:
+    binary = Path(tmp) / "fake qemu"
+    for output, status, expected in (("pomppc_poll_budget_backoff", 0, 0),
+                                     ("other_event", 0, 1),
+                                     ("pomppc_poll_budget_backoff", 1, 2)):
+        binary.write_text('#!/bin/sh\n[ "$1" = -trace ] && [ "$2" = help ] || exit 8\n'
+                          + "echo " + output + "\nexit " + str(status) + "\n")
+        binary.chmod(0o755)
+        p = subprocess.run(["bash", "-c", 'source "$1"; qemu_has_poll_budget "$2"',
+                            "_", str(ROOT / "scripts/caps.sh"), str(binary)], timeout=5)
+        assert p.returncode == expected, (output, status, p)
+print("POLLNS=3 : capacité compilée requise, anciennes versions et échecs refusés")
 
 # Binaire rapide du PC (scripts/qemu_fast.sh, docs/binaire-rapide-x86.md) : le choix
 # de build-fast/ selon présence, relevé, version, processeur, série et capacités,

@@ -45,7 +45,7 @@ stop_vm() {
 }
 
 wait_ssh() {
-  for i in $(seq 1 60); do
+  for _i in $(seq 1 60); do
     $TS true >/dev/null 2>&1 && return 0
     sleep 5
   done

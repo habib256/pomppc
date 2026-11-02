@@ -26,7 +26,7 @@ W=/tmp/mtcharge; rm -rf $W; mkdir -p $W
 
 compile() { # compile <fil> <source>
   n=0; e=0; ref=""
-  while [ $(date +%s) -lt $FIN ]; do
+  while [ "$(date +%s)" -lt $FIN ]; do
     gcc -O2 -faltivec -c -o $W/$1.o $2 2>> $W/$1.err || e=$((e + 1))
     m=$(md5 -q $W/$1.o 2>/dev/null)
     [ -z "$ref" ] && ref=$m
@@ -37,7 +37,7 @@ compile() { # compile <fil> <source>
 }
 atom() {
   n=0; e=0
-  while [ $(date +%s) -lt $FIN ]; do
+  while [ "$(date +%s)" -lt $FIN ]; do
     ./atomtest $ATOMN 2 > $W/atom-last.txt 2>&1
     grep -q 'atom bilan OK' $W/atom-last.txt || { e=$((e + 1)); cat $W/atom-last.txt >> $W/atom.err; }
     n=$((n + 1))
@@ -46,7 +46,7 @@ atom() {
 }
 gl() {
   n=0; e=0; ref=""
-  while [ $(date +%s) -lt $FIN ]; do
+  while [ "$(date +%s)" -lt $FIN ]; do
     rm -f $W/gl.ppm
     env GLTEST_NOWS=1 GLTEST_REQUIRE=POMPPC GLTEST_D3FR=$GLFR /tmp/gltest-mc d3inter 256 256 $W/gl.ppm > $W/gl-last.txt 2>&1 \
       || { e=$((e + 1)); cat $W/gl-last.txt >> $W/gl.err; }
@@ -63,7 +63,7 @@ compile gcc2 vfptest.c &
 atom &
 gl &
 # releve toutes les 10 min : l'invite avance-t-il ?
-while [ $(date +%s) -lt $FIN ]; do
+while [ "$(date +%s)" -lt $FIN ]; do
   sleep 600
   echo "releve $(date '+%H:%M:%S') $(uptime | sed 's/.*load/load/')"
 done

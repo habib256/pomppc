@@ -41,7 +41,7 @@ cat $OUT/errpeer-seul.txt
 [ $rp = 0 ] || fail "errpeer seul rc=$rp (refus non comptés à sa tranche)"
 
 gltest_build || exit 1
-cd $SRC/guest/gltest
+cd "$SRC/guest/gltest" || exit 1
 
 # stats LABEL FICHIER : « sync fallback(s) » et « foreign error move(s) » du bilan
 stats() {

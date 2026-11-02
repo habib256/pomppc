@@ -1,0 +1,144 @@
+POMPPC tcg/0067 : attente courte avec budget de reveils precis
+
+[A] Diagnostic M4, 02/11 : mode 2, environ 11000 expirations/s sur UT
+contre 2000 sur zen. Le budget fixe 250 ms garde une perte UT de 2,59 %
+sur trois passages ; archive/m4-pollns-budget250-0211. Les temps avec
+traces ne servent pas de preuve de vitesse.
+Mode POMPPC_POLL_NS=3 : sous 1 ms, select precis ; a 128 expirations
+dans 32 ms, retour au g_poll courant. Repli 250 ms, double jusqu'a 2 s
+si une rafale reprend dans les 32 ms suivant l'echeance ; sinon retour
+au premier palier. Budget local au fil ; E/S pretes, erreurs, replis et
+retours non bloquants ne le consomment pas. Initialisation par g_once.
+[F] Seuils et progression a valider sur les cinq jeux, aucun allumage.
+Modes 0/1/2 conserves ; aucun changement du noyau ni des horloges.
+
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -31,6 +31,7 @@
+ #include "system/replay.h"
+ #include "system/cpus.h"
+ #include "hw/core/cpu.h"
++#include "trace.h"
+ 
+ #ifdef CONFIG_POSIX
+ #include <pthread.h>
+@@ -332,22 +333,86 @@
+  * ERR, comme glib).  Repli sur g_poll (-2) si un descripteur dépasse
+  * FD_SETSIZE.
+  */
++static unsigned qemu_poll_ns_mode(void)
++{
++    static gsize mode_once;
++
++    if (g_once_init_enter(&mode_once)) {
++        const char *e = getenv("POMPPC_POLL_NS");
++        unsigned mode = e && *e && strcmp(e, "0") ? 1 : 0;
++        if (e && (!strcmp(e, "2") || !strcmp(e, "3"))) {
++            mode = e[0] - '0';
++        }
++        g_once_init_leave(&mode_once, mode + 1);
++    }
++    return mode_once - 1;
++}
++
++/* POMPPC tcg/0067: each poll thread has its own expiration budget.
++ * [A] M4 diagnostics 02/11: mode 2, about 11000 expirations/s on UT,
++ * about 2000 on zen; files in bench/tcg/ab/m4-attente-diag2-0211.
++ * [F] Policy to validate on all five games: at 128 precise expirations
++ * within 32 ms, use the existing millisecond path for 250 ms. If the
++ * burst resumes within 32 ms of that deadline, double the pause up to
++ * 2 s; an isolated burst resets it to 250 ms. This is
++ * host wakeup coalescing, not an alteration of guest code or clocks. */
++enum {
++    POLLNS_WINDOW_US = 32000,
++    POLLNS_LIMIT = 128,
++    POLLNS_BACKOFF_US = 250000,
++    POLLNS_MAX_BACKOFF_US = 2000000,
++};
++static __thread struct {
++    int64_t window_us;
++    int64_t resume_us;
++    int64_t backoff_us;
++    unsigned expired;
++} pollns_budget;
++
++static bool qemu_poll_ns_precision_allowed(void)
++{
++    int64_t now = g_get_monotonic_time();
++
++    if (now < pollns_budget.resume_us) {
++        return false;
++    }
++    if (now - pollns_budget.window_us >= POLLNS_WINDOW_US) {
++        pollns_budget.window_us = now;
++        pollns_budget.expired = 0;
++    }
++    return true;
++}
++
++static void qemu_poll_ns_precision_expired(void)
++{
++    int64_t now = g_get_monotonic_time();
++
++    /* A delayed host scheduling turn is not a dense expiration burst. */
++    if (now - pollns_budget.window_us >= POLLNS_WINDOW_US) {
++        pollns_budget.window_us = now;
++        pollns_budget.expired = 0;
++    }
++    if (++pollns_budget.expired >= POLLNS_LIMIT) {
++        if (pollns_budget.backoff_us &&
++            now - pollns_budget.resume_us <= POLLNS_WINDOW_US) {
++            pollns_budget.backoff_us = MIN(pollns_budget.backoff_us * 2,
++                                          POLLNS_MAX_BACKOFF_US);
++        } else {
++            pollns_budget.backoff_us = POLLNS_BACKOFF_US;
++        }
++        pollns_budget.resume_us = now + pollns_budget.backoff_us;
++        trace_pomppc_poll_budget_backoff(pollns_budget.expired,
++                                       pollns_budget.backoff_us);
++    }
++}
++
+ static bool qemu_poll_ns_select_on(int64_t timeout)
+ {
+-    static int mode = -1;
+-
+-    if (mode < 0) {
+-        const char *e = getenv("POMPPC_POLL_NS");
+-        mode = e && *e && strcmp(e, "0") ? 1 : 0;
+-        if (e && !strcmp(e, "2")) {
+-            mode = 2;
+-        }
+-    }
+-    /* POMPPC tcg/0065 : mode 2, seulement les delais sous 1 ms.
+-     * [F] Hypothese a mesurer sur les cinq jeux : garder l'arrondi de
+-     * g_poll pour les delais longs eviterait la perte d'UT du mode 1.
+-     * Aucun mode n'est actif sans POMPPC_POLL_NS. */
+-    return mode == 1 || (mode == 2 && timeout < SCALE_MS);
++    unsigned mode = qemu_poll_ns_mode();
++
++    return mode == 1 || (timeout < SCALE_MS &&
++                        (mode == 2 ||
++                         (mode == 3 && qemu_poll_ns_precision_allowed())));
+ }
+ 
+ static int qemu_poll_ns_select(GPollFD *fds, guint nfds, int64_t timeout)
+@@ -436,6 +501,9 @@
+     if (timeout > 0 && qemu_poll_ns_select_on(timeout)) {
+         int r = qemu_poll_ns_select(fds, nfds, timeout);
+         if (r != -2) {
++            if (r == 0 && qemu_poll_ns_mode() == 3) {
++                qemu_poll_ns_precision_expired();
++            }
+             return r;
+         }
+     }
+--- a/util/trace-events
++++ b/util/trace-events
+@@ -117,3 +117,6 @@
+ 
+ # datadir.c
+ load_file(const char *name, const char *path) "name %s location %s"
++
++# qemu-timer.c, POMPPC tcg/0067 (also the runtime capability marker)
++pomppc_poll_budget_backoff(unsigned expired, int64_t pause_us) "expired %u pause_us %" PRId64

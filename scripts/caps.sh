@@ -60,9 +60,9 @@ _CAPS_BIN=""; _CAPS_DEV=""; _CAPS_NET=""; _CAPS_AUD=""
 # « device absent » et déclenche un faux rouge — le pendant exact du faux vert
 # que ce fichier existe pour éviter. Une reprise suffit à absorber le transitoire.
 _caps_load() {
-  local bin="$1" try
+  local bin="$1" _try
   [ "$bin" = "$_CAPS_BIN" ] && return 0
-  for try in 1 2; do
+  for _try in 1 2; do
     _CAPS_DEV="$(printf '%s\n' \
         '{"execute":"qmp_capabilities"}' \
         '{"execute":"qom-list-types","arguments":{"implements":"device"}}' \
@@ -108,6 +108,15 @@ qemu_has_netdev() {
 qemu_has_audiodev() {
   _caps_load "$1" || return 2
   grep -qx "[[:space:]]*$2[[:space:]]*" <<< "$_CAPS_AUD"
+}
+
+# tcg/0067 : le point de trace est compilé avec le mode 3 à budget. Un ancien
+# 0058 prend toute valeur non nulle pour le mode 1 : ne pas y envoyer 3 à l'aveugle.
+# 0 = présent, 1 = absent, 2 = sondage impossible ; pas de VM démarrée.
+qemu_has_poll_budget() {
+  local out
+  out="$("$1" -trace help 2>&1)" || return 2
+  grep -qxF 'pomppc_poll_budget_backoff' <<< "$out"
 }
 
 # Le device est-il réellement présent dans l'arbre QOM de la machine ?

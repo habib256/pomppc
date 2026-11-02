@@ -38,7 +38,7 @@ for s in $SCENES; do
          ./gltest $s 256 256 img.ppm > $OUT/$s-$nom.txt 2>&1
     then rc=0; else rc=$?; fi
     h=$(md5 -q img.ppm 2>/dev/null || echo absent)
-    line="$line  $nom[rc=$rc $(echo $h | cut -c1-8)]"
+    line="$line  ${nom}[rc=$rc $(echo $h | cut -c1-8)]"
     if [ -z "$refrc" ]; then ref=$h; refrc=$rc
     elif [ "$h" != "$ref" ] || [ "$rc" != "$refrc" ]; then
       ko=$((ko + 1)); line="$line ÉCART"

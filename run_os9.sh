@@ -108,8 +108,8 @@ disk_installed() {
 # --- Décider quoi booter ---
 case "$MODE" in
   disk)    BOOT=disk ;;
-  install) BOOT=cd ;;
-  auto|*)  if disk_installed; then BOOT=disk; else BOOT=cd; fi ;;
+  install) BOOT="cd" ;;
+  auto|*)  if disk_installed; then BOOT=disk; else BOOT="cd"; fi ;;
 esac
 
 DRIVES=(-drive "file=$OS9_DISK,format=qcow2,media=disk")
@@ -140,7 +140,7 @@ if [ -n "$SHARE" ]; then
     mkdir -p "$SHARE"
     VIRTIO_ARGS=(
       -device "loader,addr=0x4000000,file=$NDRVLOADER"
-      -device virtio-9p-pci,fsdev=sh0,mount_tag=Shared
+      -device "virtio-9p-pci,fsdev=sh0,mount_tag=Shared"
       -fsdev "local,id=sh0,security_model=none,path=$SHARE"
       -device virtio-tablet-pci
     )
@@ -161,7 +161,6 @@ if [ -z "${NOPAD:-}" ] && [ "$BOOT" = disk ] && [ -e /dev/input/js0 ] \
    && qemu_has_device "$BIN" usb-host; then
   PAD_VID=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p')
   PAD_PID=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^ID_MODEL_ID=//p')
-  PAD_NODE=$(udevadm info -q property -n /dev/input/js0 2>/dev/null | sed -n 's/^DEVNAME=//p')
   # nœud USB brut accessible en écriture ? (via la règle udev)
   PAD_USB="/dev/bus/usb/$(lsusb 2>/dev/null | awk -v v="$PAD_VID" -v p="$PAD_PID" 'tolower($6)==v":"p{printf "%s/%s", $2, substr($4,1,3)}')"
   if [ -n "$PAD_VID" ] && [ -n "$PAD_PID" ] && [ -w "$PAD_USB" ]; then

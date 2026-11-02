@@ -42,9 +42,13 @@ def main():
         binary = directory / "proof"
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) +
                        ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", tmp,
+                        *(["-DHAVE_POLL_BUDGET"] if "qemu_poll_ns_precision_allowed" in target else []),
                         str(Path(__file__).with_suffix(".c")), "-o", str(binary)] + flags,
                        check=True)
-        for mode in (None, "0", "1", "2"):
+        modes = [None, "0", "1", "2"]
+        if "qemu_poll_ns_precision_allowed" in target:
+            modes += ["3"]
+        for mode in modes:
             env = dict(os.environ)
             env.pop("POMPPC_POLL_NS", None)
             if mode is not None:

@@ -23,7 +23,7 @@
 # démarrage (secteurs lus dans bench/devloop/mailbox.json).
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$WT"
+cd "$WT" || exit 1
 DISK="${DEVDISK:?DEVDISK=<image raw de dev> requis}"
 QB="${QEMU_BIN:-$HOME/src/qemu-tcg/build/qsr}"
 NPASS="${NPASS:-2}"

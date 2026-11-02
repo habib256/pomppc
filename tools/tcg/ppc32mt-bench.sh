@@ -28,7 +28,7 @@
 # macOS (M4, docs/parite-m4-2510.md) : pas de perf, seulement le temps de chaque job.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-cd "$WT"
+cd "$WT" || exit 1
 TAG=${1:?étiquette}; shift
 [ $# -ge 1 ] || { echo "usage : $0 ÉTIQUETTE JOB [JOB…]" >&2; exit 2; }
 DISK="${DEVDISK:?DEVDISK=<image raw de dev> requis}"
@@ -146,7 +146,7 @@ EOF
 done
 
 DEVDISK="$DISK" python3 "$DL" shutdown >> "$OUT/run.log" 2>&1
-for i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
+for _i in $(seq 1 60); do kill -0 "$PID" 2>/dev/null || break; sleep 2; done
 if kill -0 "$PID" 2>/dev/null; then
   echo "⚠ QEMU encore vivant après shutdown : devloop.py stop" | tee -a "$OUT/run.log"
   DEVDISK="$DISK" python3 "$DL" stop >> "$OUT/run.log" 2>&1
