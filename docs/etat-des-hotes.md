@@ -196,7 +196,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 03/11/2026, 00 h 26 (dossier partagé, 0.4.1 en publication, aucune VM ne tourne)
+## 3. Mac M4 : état au 03/11/2026, 00 h 30 (0.4.1 publiée, dossier partagé, aucune VM ne tourne)
 
 **Soir du 02/11, demande de l'utilisateur : QE doit tenir toutes les résolutions.** Corrigé
 (`docs/quartz-extreme.md`, journal du 02/11) : kext (VRAM entière), plugin `20261102-modes`, cœur
@@ -213,7 +213,11 @@ jouer. Matrice, A/B et DOOM 3/UT2004/cmr à ces résolutions **pas faits** (TODO
 sans Homebrew** (les 25 binaires, garde-fou `MIN_MACOS`) ; recette et arbres dans
 `docs/publier-macos.md`. Archive éprouvée sous macOS 27 sur un M4 seulement, les notes le disent.
 
-**0.4.1 préparée, non publiée (21 h).** `POMPPC.app` dans `dist/POMPPC-0.4.1-macos-arm64.dmg`, commit
+**Version 0.4.1 publiée le 03/11 à la demande de l'utilisateur** (https://github.com/habib256/pomppc/releases/tag/0.4.1,
+tag `0.4.1` sur `2fac68c` ; `.dmg`, archive, CD et sommes vérifiés après retéléchargement). L'essai sur le M1 de
+l'utilisateur sous macOS 15.8 reste à faire : c'est le plus gros doute restant.
+
+**0.4.1, ce qui a été préparé (21 h).** `POMPPC.app` dans `dist/POMPPC-0.4.1-macos-arm64.dmg`, commit
 `f5ea5a4` : assistant de premier lancement, combo 10.4.11 téléchargé chez Apple avant le pilote, données dans `~/POMPPC`, frontal en anglais. Essayée
 ici depuis le `.dmg` avec Tiger et OS 9 ; assistant couvert par `tests/app_wizard_test.sh`, réponses
 simulées. L'assistant ouvre la page de Macintosh Garden et attend le fichier : il ne télécharge rien
@@ -234,7 +238,7 @@ dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une c
 en `SNAPSHOT=1` : Tiger (éjection, `kill -9` puis reprise sans suppression, arrêt normal, *Connect Again*), OS 9
 (montage, éjection vue par `tray_open`, fichier dupliqué et dossier créé revenus). **Pas éprouvé :** accord de
 confidentialité de macOS sur Documents ou Bureau pour l'app signée ad hoc, très gros dossier, écriture sous OS 9
-d'un fichier avec resource fork, vraie Corbeille depuis l'app (les épreuves passent par `POMPPC_TRASH`).
+d'un fichier avec resource fork. La vraie Corbeille (`/usr/bin/trash`) a été éprouvée depuis l'app du `.dmg`.
 
 **Ergonomie, points 2 à 8 (3/11 minuit, dans la 0.4.1).** `usbhid/0002` corrige la mort de l'OHCI (cause : le
 garde-fou `ED_LINK_LIMIT` comptait les paquets ; **QEMU à reconstruire sur le PC**). Glisser-déposer par disque USB
