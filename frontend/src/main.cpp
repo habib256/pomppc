@@ -765,6 +765,8 @@ int main(int argc, char** argv) {
             if (ci < st.arg.size()) {
                 ImGuiKey k = probeKey(st.arg[ci]);
                 if (k != ImGuiKey_None) probeKeys({k}, probePhase % 2 == 0);
+                // Aussi le caractère : un champ d'ImGui lit le texte, pas les touches.
+                if (probePhase % 2 == 0) ImGui::GetIO().AddInputCharacter((unsigned char)st.arg[ci]);
                 done = false;
             }
         } else if (st.op == "shot") {

@@ -84,6 +84,7 @@ int main() {
     CHECK(!createDisk(root, "tiger", 8, false, &err));
     CHECK(fs::file_size(root + "/disks/tiger.qcow2") == stamp);
     CHECK(!createDisk(root, "../evil", 8, false, &err));
+    CHECK(!createDisk(root, "", 8, false, &err) && err.find("Enter") == 0);
     CHECK(!createDisk(root, "ok", 0, false, &err));
     CHECK(!createDisk(root, "ok", 4096, false, &err));
     CHECK(!fs::exists(root + "/disks/ok.qcow2"));

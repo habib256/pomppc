@@ -131,6 +131,10 @@ bool setDiskSsd(const std::string& root, const std::string& fileName, bool ssd) 
 
 bool createDisk(const std::string& root, const std::string& name, int gigabytes, bool ssd,
                 std::string* err) {
+    if (name.empty()) {
+        *err = "Enter a name for the new disk.";
+        return false;
+    }
     if (!validDiskName(name)) {
         *err = "Use only letters, digits, spaces, - and _ in the name.";
         return false;
