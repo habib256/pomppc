@@ -173,7 +173,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261101-ombre"
+#define POMPPC_PLUGIN_REV "20261102-modes"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -21048,6 +21048,14 @@ static void caps_probe(unsigned char *cfg)
 static void caps_extensions(unsigned char *cfg)
 {
     unsigned long w0 = 0, w1 = 0;
+    /* 02/11 : GL_MAX_VIEWPORT_DIMS (cfg+0x0c, +0x10 ; 2048 chez Apple). GLEngine y
+       borne glViewport : sous Quartz Extreme, le bureau en 2560x1080 sortait
+       comprimé dans 2048 pixels de large (docs/quartz-extreme.md, journal du
+       02/11). Les surfaces de l'hôte tiennent QGPU_MAX_SURF_DIM.
+       [A] Mesuré sous Tiger 10.4.11 : glGetIntegerv rend ces valeurs, la
+       compression disparaît avec elles. */
+    GLD_U32(cfg, 0x0c) = QGPU_MAX_SURF_DIM;
+    GLD_U32(cfg, 0x10) = QGPU_MAX_SURF_DIM;
     /* Textures 3D (OpenGL 1.2, protocole v10) : sans repli possible, donc
        seulement si l'hôte les tient (G.tex3d). cfg+0xc0, voisine et encore
        non identifiée, n'est PAS touchée. */
@@ -21099,7 +21107,11 @@ static void caps_extensions(unsigned char *cfg)
        v10 ; le plugin depuis le 27/09 (G.rect, scènes rect et rectfp). */
     if (G.rect) {
         w0 |= 1UL << 25;
-        GLD_U16(cfg, 0xc0) = QGPU_MAX_TEX_DIM;
+        /* 02/11 : dans le WindowServer, ce rectangle est la texture d'export d'une
+           fenêtre (sans données invitées) : il suit la surface, comme SURF_TEX.
+           À 2048, une fenêtre GL plus large sortait blanche dès que le
+           compositeur la dessinait lui-même (docs/quartz-extreme.md, 02/11). */
+        GLD_U16(cfg, 0xc0) = pomppc_ws_process() ? QGPU_MAX_SURF_DIM : QGPU_MAX_TEX_DIM;
     }
     /* 26/09 : GL_APPLE_vertex_array_range (bit 47) et sa limite (cfg+0x8c,
        0xFFFFF comme les pilotes matériels, 0 chez Apple). IndirectX (Colin

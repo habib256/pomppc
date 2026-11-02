@@ -9,6 +9,12 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Quartz Extreme à toutes les résolutions, 02/11 soir.** Passer en 1920×1080 donnait un écran
+  rayé, et le défaut revenait à chaque démarrage : la VRAM restait mappée à la taille du mode de
+  démarrage (kext). En 2560×1080, bureau comprimé à 2048 de large (`GL_MAX_VIEWPORT_DIMS`) et
+  fenêtre GL de plus de 2048 blanche (texture d'export, cœur et plugin `20261102-modes`). 44
+  changements à chaud justes, 11 définitions en 32, 16 et 8 bits ; `glwin`, Marble Blast et Zenerchi
+  justes ; 467 OK. Matrice et A/B non rejoués, PC non essayé (`docs/quartz-extreme.md`, journal).
 - **Contrôle général remis au vert, 02/11 matin.** Les 49 scripts en échec
   ShellCheck sont corrigés : retours de `cd`, arguments littéraux, variables
   réellement inutilisées et nettoyages par noms complets. Trois nettoyages

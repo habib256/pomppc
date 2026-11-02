@@ -114,7 +114,9 @@ cette liste ; la séance suivante se fait sur le M4)
 
 **À faire sur le PC, dans l'ordre** (au retour du M4)
 0. **Reconstruire `build/` et `build-fast/` depuis la série 0066/0067**, avant
-   toute mesure (profil PGO du 31/10). 0066 modifie le finaliseur générique de pools :
+   toute mesure (profil PGO du 31/10). Le cœur qgpu a aussi changé le 02/11 au soir ; installer
+   le kext et le plugin `20261102-modes` du bundle, redémarrer l'invité, puis balayer les modes
+   avec `guest/gltest/setmode.c` (`quartz-extreme.md`, journal du 02/11 ; jamais essayé sous NVIDIA). 0066 modifie le finaliseur générique de pools :
    valider les chemins x86-64 sur cet hôte ; les preuves natives M4 ne le remplacent pas.
    Vérifier à l'œil le curseur unique du frontal et la bande d'ombre avec le kext du 01/11 ;
    une cellule de preuve verte de la matrice en fenêtre (les tours du 01/11 étaient sans vidage).
@@ -194,7 +196,17 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 13 h 34 (travaux du matin clos, VM normale en service)
+## 3. Mac M4 : état au 02/11/2026, 18 h 25 (QE à toutes les résolutions, VM normale en service)
+
+**Soir du 02/11, demande de l'utilisateur : QE doit tenir toutes les résolutions.** Corrigé
+(`docs/quartz-extreme.md`, journal du 02/11) : kext (VRAM entière), plugin `20261102-modes`, cœur
+qgpu (rectangle jusqu'à `QGPU_MAX_SURF_DIM`). `~/src/qemu/build` reconstruit, `disks/prebuilt` à
+jour (ancien : `bench/prebuilt-0211/avant-modes.tar`), VM quotidienne installée et redémarrée à
+18 h 16 (anciens binaires dans `/var/tmp/avant-0211/` de l'invité). 44 changements de mode justes,
+467 OK. **Le disque quotidien reste réglé en 1920×1080×16 par l'utilisateur** : la matrice de
+preuve y sortirait d'un autre réglage que ses références ; revenir au réglage d'origine pour la
+jouer. Matrice, A/B et DOOM 3/UT2004/cmr à ces résolutions **pas faits** (TODO, « Maintenant »).
+**Curseur en plein écran : réglé, confirmé par l'utilisateur le 02/11.**
 
 **Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
 plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente
@@ -203,7 +215,7 @@ sans anomalie ni repli**, six preuves d'image séparées vertes. Aucun nouveau l
 allumé : gain zen, petit coût possible d3, pas de gain générique. Contrôle général
 **470 OK, zéro échec, une exclusion Linux**. VM quotidienne restaurée à 13 h 33 sous
 ImGuiDock, frontal détaché (parent PID 1), QEMU vivant, SSH et kext contrôlés à 13 h 34.
-Restent le curseur en plein écran à l'œil et le coût des avis d'ombre actifs (§4).
+Reste le coût des avis d'ombre actifs (§4).
 
 **Matin du 02/11, demande de correction et de portage** (base `5067b22`) :
 - **Attente 0067, `POLLNS=3`** : 128 expirations précises en 32 ms par fil, puis
@@ -463,10 +475,11 @@ personnalité « auto » le suit). `tcg/0057`–`0059`, `0064`–`0067` compilé
 options éteintes. `x-tcg-cold` est disponible sur arm64 système depuis `0066`,
 **éteint par défaut sur le M4** ; attente progressive via `POLLNS=3`, éteinte aussi.
 
-**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit le 02/11 matin,
+**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit le 02/11 à 17 h 40 (cœur qgpu ;
+série TCG du matin),
 série jusqu'à `0059` et `0064`–`0067`, correctif de contrat de 0058 ; empreintes
-et preuves dans le bilan du matin ci-dessus. Kext du 01/11 et plugin
-`20261101-ombre` inchangés.
+et preuves dans le bilan du matin ci-dessus. Kext du 02/11 et plugin
+`20261102-modes` (soir).
 
 **Fait le 30/10**
 - **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
@@ -529,8 +542,8 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
   31/10, réduites le 01/11 à ce qui n'y figure pas :
   (Bilan du 02/11 : points 1-2 faits, la VM **quotidienne** servant de VM de dev ; preuves
   et mesures neuves faites, profils clos. Matin : attente progressive et portage
-  complet de la zone froide validés, A/B clos, options éteintes. Restent le curseur
-  à l'œil et le coût d'un avis d'ombre effectivement actif ; §3.)
+  complet de la zone froide validés, A/B clos, options éteintes. Reste le coût
+  d'un avis d'ombre effectivement actif ; §3.)
   1. `git pull` ; **reconstruire QEMU** (`qgpu-core.c` du 31/10 : reflets de cmr ; `tcg/0059`
      nommé depuis le 30/10) ; ni le protocole ni l'ABI n'ont changé. Vérifier que la série se
      compile sur arm64 avec `tcg/0059` (l'opcode générique n'y est jamais émis ; rien ne change
@@ -540,8 +553,7 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
      `install.sh` sans `QE`, puis **redémarrer l'invité**. Les kext du 30/10 (`805f504`, curseur
      immobile) et plugins du 30/10 (`f01d2d7`, `pomppc_qe_same` ; `tex_bind_id`) y sont inclus.
   3. Ombre de DOOM 3 confirmée par l'utilisateur à 22 h 39, reflets de cmr validés sur la
-     nouvelle preuve en course. **Reste : curseur net en plein écran à l'œil** ; son test
-     hors VM passe, accès UI au frontal indisponible dans cette séance.
+     nouvelle preuve en course. Curseur confirmé réglé par l'utilisateur le 02/11.
   4. **Mesures neuves faites**, `m4-bundle-0111n-{fen,pe}` : trois bras du même plugin
      séparent PACKBITS et chemin non-simple, pas une ancienne compilation du bundle
      (artefacts antérieurs absents). PACKBITS UT −3,19 %, cmr −7,08 %, autres écarts

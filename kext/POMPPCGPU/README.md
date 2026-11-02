@@ -99,7 +99,8 @@ pose sur `Darwin:arm64` et `Linux:x86_64`). En mode QE, le kext :
 
 Ces ajouts ne touchent pas `qgpu_abi.h`, mais changent le kext : réinstaller **et redémarrer**
 l'invité. Au 01/11, les deux hôtes ont le kext du 01/11 (méthode 6 ; le M4 depuis 16 h 57) ;
-face à un kext plus ancien, le plugin `20261101-ombre` se replie sur la méthode 5.
+face à un kext plus ancien, le plugin se replie sur la méthode 5. Le 02/11, le kext mappe toute la
+VRAM (`pomppcScreenMemory`) : le M4 l'a, le PC le reçoit avec le bundle (redémarrage de l'invité).
 
 ## v9 : le doorbell asynchrone
 

@@ -108,6 +108,12 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## Maintenant
 
+- [ ] **[QE — les deux hôtes] Résolutions : finir la preuve** (corrigé le 02/11,
+  `docs/quartz-extreme.md`, journal). Restent : DOOM 3, UT2004 et Colin McRae à 1920×1080 et
+  2560×1080 ; matrice de preuve et A/B du plugin `20261102-modes` sur un disque au réglage des
+  références ; balayage `guest/gltest/setmode.c` sur le PC (EGL/NVIDIA). **Fermeture :** ces
+  essais justes, ou leur écart écrit.
+
 Ordre du 01/11 : la séance de l'après-midi est sur le M4, son chantier passe en tête (même ordre
 que `docs/etat-des-hotes.md` §4) ; le plugin est
 commun ; les leviers du JIT x86 attendent le retour sur le PC.
@@ -294,7 +300,8 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
 
 Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
-- [ ] **[Frontend] Curseur unique sous ImGuiDock** (`50a9801`, 01/11) : à voir à l'œil au prochain
+- [ ] **[Frontend] Curseur unique sous ImGuiDock** (`50a9801`, 01/11) : **réglé sur le M4,
+  confirmé par l'utilisateur le 02/11** ; à voir à l'œil sur le PC au prochain
   `run_tiger.sh` en fenêtre (un seul curseur sur l'image, flèche de l'hôte de retour sur les
   menus et bandeaux, rien de collé après un aller-retour en plein écran).
 - [ ] **[Plugin] Replis à retirer** : `POMPPC_GL_VERDICT=0`, `POMPPC_GL_WHITELIST=0`,

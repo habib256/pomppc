@@ -186,6 +186,41 @@ présentation directe n'a pas eu lieu : `kIOReturnBusy` (région inconnue, pas e
 
 ## 3. Journal
 
+- **02/11, 17 h 15-18 h 20 (M4) : CORRIGÉ : changer de résolution sous QE.** Signalé par
+  l'utilisateur : en 1920×1080, écran rayé, bloc noir et aplat bleu. Trois limites, trouvées
+  l'une derrière l'autre, toutes héritées de la taille de démarrage ou d'un plafond de 2048.
+  1. **VRAM mappée à la taille du mode de démarrage (la panne signalée).** Le plugin GL dans le
+     WindowServer et le plugin GA mappent la VRAM par le client 2D, qui rendait
+     `getApertureRange` : la plage du mode **courant**, 3 Mio en 1024×768×32 au démarrage du
+     WindowServer. `ws_main_display` refusait ensuite tout mode plus grand (`rb × h > WS.size`),
+     sans rien dire : il continuait à écrire au pas de 4096. Mesures : zone peinte arrêtée à la
+     ligne 820 en 1920×1080×16 (3 Mio / 3840 = 819,2), trace figée sur `1024x768, 4096
+     octets/ligne`. Correctif (kext) : `pomppcScreenMemory` mappe toute la VRAM si elle part de la
+     même adresse que l'ouverture ; le client de surface aussi. Le réglage étant conservé par le
+     WindowServer, la panne revenait à chaque démarrage.
+  2. **`GL_MAX_VIEWPORT_DIMS` à 2048 (cfg+0x0c et +0x10).** En 2560×1080, le bureau sortait
+     comprimé dans 2048 pixels de large (icône à x≈34 au lieu de 42, rapport 0,8), bande
+     bleue à droite. Plugin : annonce `QGPU_MAX_SURF_DIM` ; `glGetIntegerv` rend 4096.
+  3. **Texture d'export plafonnée à 2048.** Fenêtre GL de 2400 px : `SURF_TEX` refusé par le cœur
+     (`QGPU_MAX_TEX_DIM`), puis fenêtre blanche dès que le compositeur la dessinait lui-même.
+     Cœur : un rectangle suit la surface jusqu'à `QGPU_MAX_SURF_DIM` (2D refusé comme avant,
+     cas ajouté à `qgpu_core_test`). Plugin : `GL_MAX_RECTANGLE_TEXTURE_SIZE` (cfg+0xc0) à la même
+     valeur **dans le WindowServer seulement** ; les applications gardent 2048.
+  **Preuves** (VM jetable, série complète puis VM quotidienne pour l'installation ;
+  `guest/gltest/setmode.c`) : 44 changements à chaud sans écart, les 11
+  définitions de 640×480 à 2560×1080 en 32, 16 et 8 bits, à la montée et à la descente, images
+  regardées ; `glwin` juste en fenêtre de 400 à 2400 px de large, 16 et 32 bits ; Marble Blast en
+  fenêtre (1920×1080×32, 2560×1080×16) et plein écran, Zenerchi, retour au bureau juste, aucun
+  plantage du WindowServer. `tests/run-all.sh` : 467 OK, 0 échec, 4 ignorés. Captures locales :
+  `bench/qe-modes-0211/` (hors dépôt).
+  **Pas fait :** matrice de preuve (le disque quotidien est maintenant réglé en
+  1920×1080×16 par l'utilisateur, les références sont prises à un autre réglage), A/B (l'annonce
+  et la borne ne touchent pas le chemin courant des jeux, mesure à confirmer), DOOM 3, UT2004 et
+  Colin McRae à ces résolutions. **PC :** code commun, non essayé sous EGL/NVIDIA.
+  Autres écrans : `kIOFBSystemAperture` et `getVRAMRange` de `POMPPCQFB` partent de la même
+  adresse (relu, non exécuté). [E] Le retour retenu de `IONDRVFramebuffer::getVRAMRange` n'est
+  pas relu dans ses sources ; aucun incident sur ces 44 changements et les redémarrages.
+
 - **01/11, 10 h-11 h 45 (PC x86-64)** : **CORRIGÉ : image ancienne du jeu sous l'ombre d'une
   fenêtre posée sur une fenêtre GL** (signalée à 9 h 13 : DOOM 3 en fenêtre pendant son
   chargement, image noire, et sous le bord droit de l'ombre du Terminal une bande de l'écran

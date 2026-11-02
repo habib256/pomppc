@@ -4692,8 +4692,17 @@ static uint32_t exec_one(QgpuCore *c, uint32_t op, const uint32_t *a,
         }
         w = s->width;
         h = s->height;
-        if (!w || !h || w > QGPU_MAX_TEX_DIM || h > QGPU_MAX_TEX_DIM) {
-            return QGPU_ST_BAD_ARG;
+        /* 02/11 : un rectangle suit la surface jusqu'à QGPU_MAX_SURF_DIM. C'est la
+           texture d'export d'une fenêtre sous Quartz Extreme : une fenêtre GL de
+           2400 px dans un écran 2560x1080 restait blanche (docs/quartz-extreme.md,
+           journal du 02/11). Elle n'a qu'un niveau et le plugin la crée lui-même.
+           Les autres cibles gardent QGPU_MAX_TEX_DIM. */
+        {
+            uint32_t dim_max = t->target == QGPU_TT_RECTANGLE ?
+                               QGPU_MAX_SURF_DIM : QGPU_MAX_TEX_DIM;
+            if (!w || !h || w > dim_max || h > dim_max) {
+                return QGPU_ST_BAD_ARG;
+            }
         }
         t0 = now_ns();
         c->cstats.surf_tex++;

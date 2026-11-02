@@ -1640,8 +1640,9 @@
  *
  *   Refus : texture, surface ou niveau inconnus, cible d'image qui n'est pas
  *   celle de la texture, texture 3D ou cube, niveau ≠ 0 pour un rectangle,
- *   surface plus grande que QGPU_MAX_TEX_DIM : QGPU_ST_BAD_ARG. Sans
- *   QGPU_CAP_SURF_TEX : l'opcode est inconnu (BAD_OPCODE).
+ *   surface plus grande que QGPU_MAX_TEX_DIM (QGPU_MAX_SURF_DIM pour un
+ *   rectangle, 02/11) : QGPU_ST_BAD_ARG. Sans QGPU_CAP_SURF_TEX : l'opcode est
+ *   inconnu (BAD_OPCODE).
  *
  *   TEX_READBACK — QGPU_OP_TEX_READBACK [tex, cible d'image, niveau, off, max]
  *

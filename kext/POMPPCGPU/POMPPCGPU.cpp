@@ -2293,6 +2293,34 @@ bool POMPPCAccelerator::surfaceBounds(UInt32 id, IOAccelBounds * b)
 #define super IOUserClient
 OSDefineMetaClassAndStructors(POMPPCSurfaceClient, IOUserClient)
 
+/* 02/11 : toute la VRAM, et non l'ouverture du mode courant. getApertureRange
+   borne sa plage au mode du moment (POMPPCQFB::getApertureRange ; même effet
+   mesuré sur qemu_vga.ndrv) : mappée au démarrage du WindowServer, en 1024x768,
+   elle faisait 3 Mio, et le plugin refusait ensuite tout mode plus grand
+   (WS.size) : image rayée au pas de 4096 octets, limitée à ces 3 Mio. Ne
+   remplace l'ouverture que si les deux plages partent de la même adresse : les
+   décalages que le plugin calcule restent relatifs au début de l'écran.
+   [A] Mesuré sous QEMU VGA : zone peinte en 1920x1080x16 de 820 lignes au pas
+   de 3840, soit 3 Mio ; trace du plugin figée en 1024x768, 4096 octets/ligne.
+   [E] Rend un objet retenu, comme getApertureRange : relu sur POMPPCQFB, pas
+   sur IONDRVFramebuffer. */
+static IODeviceMemory * pomppcScreenMemory(IOFramebuffer * fb)
+{
+    IODeviceMemory * aperture = fb->getApertureRange(kIOFBSystemAperture);
+    IODeviceMemory * vram = fb->getVRAMRange();
+
+    if (aperture && vram &&
+        aperture->getPhysicalAddress() == vram->getPhysicalAddress() &&
+        aperture->getLength() <= vram->getLength()) {
+        aperture->release();
+        return vram;
+    }
+    if (vram) {
+        vram->release();
+    }
+    return aperture;
+}
+
 bool POMPPCSurfaceClient::initWithFramebuffer(task_t owningTask, IOFramebuffer * fb)
 {
     IODeviceMemory * vram;
@@ -2303,7 +2331,7 @@ bool POMPPCSurfaceClient::initWithFramebuffer(task_t owningTask, IOFramebuffer *
     fTask = owningTask;
     fFB = fb;
     fFB->retain();
-    vram = fFB->getApertureRange(kIOFBSystemAperture);
+    vram = pomppcScreenMemory(fFB);
     if (vram) {
         fMap = vram->map(fTask, 0, kIOMapAnywhere);
         vram->release();
@@ -2541,9 +2569,8 @@ IOReturn POMPPCGAClient::clientClose(void)
     return kIOReturnSuccess;
 }
 
-/* La VRAM du framebuffer, ouverture système : celle où le WindowServer
-   dessine. getApertureRange rend un objet neuf (retenu), que
-   IOUserClient::mapClientMemory relâche après le mapping. */
+/* La VRAM du framebuffer, là où le WindowServer dessine : un objet retenu,
+   que IOUserClient::mapClientMemory relâche après le mapping. */
 IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options,
                                              IOMemoryDescriptor ** memory)
 {
@@ -2552,7 +2579,7 @@ IOReturn POMPPCGAClient::clientMemoryForType(UInt32 type, IOOptionBits * options
     if (type != POMPPC_GA_MEM_VRAM || !fFB) {
         return kIOReturnBadArgument;
     }
-    vram = fFB->getApertureRange(kIOFBSystemAperture);
+    vram = pomppcScreenMemory(fFB);
     if (!vram) {
         return kIOReturnNoMemory;
     }

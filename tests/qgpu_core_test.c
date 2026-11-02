@@ -6089,6 +6089,31 @@ static void run_v20(QgpuCore *c, uint8_t *shmem)
     CHECK(st == QGPU_ST_OK && lv && (lv[3 * 16 + 5] & 0xFFFFFF) == 0x00FF00 &&
           c->tex[51].level[0][0].w == 16,
           "SURF_TEX rectangle : st %u texel %06x", st, lv ? lv[3 * 16 + 5] & 0xFFFFFF : 0);
+    {   /* 02/11 : au-delà de QGPU_MAX_TEX_DIM, le rectangle suit la surface (texture
+           d'export sous Quartz Extreme), le 2D reste refusé. */
+        uint32_t st_large, st_large2d, st_trop;
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+        emit(&e, 6); emit(&e, QGPU_MAX_TEX_DIM + 1); emit(&e, 4); emit(&e, QGPU_FMT_XRGB8888);
+        tcreate3(&e, 53, QGPU_TT_RECTANGLE);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+        emit(&e, 53); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 0); emit(&e, 6);
+        st_large = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        e.off = e.start = CMD_OFF;
+        tcreate3(&e, 54, QGPU_TT_2D);
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
+        emit(&e, 54); emit(&e, QGPU_TT_2D); emit(&e, 0); emit(&e, 6);
+        st_large2d = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        e.off = e.start = CMD_OFF;
+        emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_CREATE, QGPU_LEN_SURF_CREATE));
+        emit(&e, 7); emit(&e, QGPU_MAX_SURF_DIM + 1); emit(&e, 4); emit(&e, QGPU_FMT_XRGB8888);
+        st_trop = qgpu_core_execute(c, CMD_OFF, e.off - e.start);
+        CHECK(st_large == QGPU_ST_OK &&
+              c->tex[53].level[0][0].w == QGPU_MAX_TEX_DIM + 1 &&
+              st_large2d == QGPU_ST_BAD_ARG && st_trop == QGPU_ST_BAD_ARG,
+              "SURF_TEX large : rectangle st %u, 2D st %u, surface trop large st %u",
+              st_large, st_large2d, st_trop);
+    }
     e.off = e.start = CMD_OFF;
     emit(&e, QGPU_CMD_HDR(QGPU_OP_SURF_TEX, QGPU_LEN_SURF_TEX));
     emit(&e, 51); emit(&e, QGPU_TT_RECTANGLE); emit(&e, 1); emit(&e, 5);
