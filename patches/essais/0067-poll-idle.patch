@@ -1,0 +1,105 @@
+POMPPC tcg/0067 : attente courte precise seulement au repos des vCPU
+
+[D] QEMU v11.1.2, all_cpu_threads_idle sous BQL dans qemu_main_loop.
+Mode POMPPC_POLL_NS=3 : sous 1 ms, select precis seulement lorsque tous
+les vCPU sont inactifs ; sinon g_poll. Etat local au fil, les autres
+boucles d'E/S ne deviennent pas precises. Modes 0/1/2 conserves.
+Initialisation du mode par g_once, sans course entre fils.
+[F] Hypothese generique de cadence : a mesurer sur les cinq jeux.
+Aucun allumage par defaut, aucune modification du noyau ni des horloges.
+
+--- a/util/qemu-timer.c
++++ b/util/qemu-timer.c
+@@ -332,22 +332,28 @@
+  * ERR, comme glib).  Repli sur g_poll (-2) si un descripteur dépasse
+  * FD_SETSIZE.
+  */
++/* POMPPC tcg/0067: only the main system loop declares its idle state.
++ * Other poll threads default to the coarse path in adaptive mode. */
++static __thread bool pollns_cpus_idle;
++
+ static bool qemu_poll_ns_select_on(int64_t timeout)
+ {
+-    static int mode = -1;
+-
+-    if (mode < 0) {
++    static gsize mode_once;
++
++    if (g_once_init_enter(&mode_once)) {
+         const char *e = getenv("POMPPC_POLL_NS");
+-        mode = e && *e && strcmp(e, "0") ? 1 : 0;
+-        if (e && !strcmp(e, "2")) {
+-            mode = 2;
+-        }
+-    }
+-    /* POMPPC tcg/0065 : mode 2, seulement les delais sous 1 ms.
+-     * [F] Hypothese a mesurer sur les cinq jeux : garder l'arrondi de
+-     * g_poll pour les delais longs eviterait la perte d'UT du mode 1.
+-     * Aucun mode n'est actif sans POMPPC_POLL_NS. */
+-    return mode == 1 || (mode == 2 && timeout < SCALE_MS);
++        unsigned mode = e && *e && strcmp(e, "0") ? 1 : 0;
++        if (e && (!strcmp(e, "2") || !strcmp(e, "3"))) {
++            mode = e[0] - '0';
++        }
++        g_once_init_leave(&mode_once, mode + 1);
++    }
++    unsigned mode = mode_once - 1;
++    /* [F] Generic scheduling hypothesis: precise wakeups while all vCPUs
++     * are idle; preserve the coarse path while they execute. Must pass
++     * the five-game A/B before enabling. No guest-PC or clock shortcut. */
++    return mode == 1 || (timeout < SCALE_MS &&
++                        (mode == 2 || (mode == 3 && pollns_cpus_idle)));
+ }
+ 
+ static int qemu_poll_ns_select(GPollFD *fds, guint nfds, int64_t timeout)
+@@ -409,6 +415,15 @@
+     return r;
+ }
+ #endif
++
++void qemu_poll_ns_set_cpus_idle(bool idle)
++{
++#if !defined(CONFIG_PPOLL) && defined(__APPLE__)
++    pollns_cpus_idle = idle;
++#else
++    (void)idle;
++#endif
++}
+ 
+ /* qemu implementation of g_poll which uses a nanosecond timeout but is
+  * otherwise identical to g_poll
+--- a/include/qemu/timer.h
++++ b/include/qemu/timer.h
+@@ -766,6 +766,9 @@
+  * Returns: number of fds ready
+  */
+ int qemu_poll_ns(GPollFD *fds, guint nfds, int64_t timeout);
++/* POMPPC tcg/0067: per poll thread; the system loop sets this under BQL.
++ * Used only by the opt-in adaptive macOS mode (POMPPC_POLL_NS=3). */
++void qemu_poll_ns_set_cpus_idle(bool idle);
+ 
+ /**
+  * qemu_soonest_timeout:
+--- a/system/runstate.c
++++ b/system/runstate.c
+@@ -945,8 +945,20 @@
+ int qemu_main_loop(void)
+ {
+     int status = EXIT_SUCCESS;
++#ifdef __APPLE__
++    const char *pollns = getenv("POMPPC_POLL_NS");
++    bool adaptive_poll = pollns && !strcmp(pollns, "3");
++#endif
+ 
+     while (!main_loop_should_exit(&status)) {
++#ifdef __APPLE__
++        if (adaptive_poll) {
++            /* [D] QEMU v11.1.2 system/cpus.c: stopped, or halted with
++             * no pending work, checked here with BQL held. The snapshot
++             * lasts one poll; fd notifications can still wake it early. */
++            qemu_poll_ns_set_cpus_idle(all_cpu_threads_idle());
++        }
++#endif
+         main_loop_wait(false);
+     }
+ 

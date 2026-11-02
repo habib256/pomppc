@@ -64,6 +64,15 @@ static void compare(const char *name, const GPollFD *input, unsigned n,
     }
 }
 
+#ifdef HAVE_POLL_IDLE
+static gpointer other_poll_thread(gpointer arg)
+{
+    GPollFD f = {*(int *)arg, G_IO_IN, 0xffff};
+    compare("autre fil : aucun état idle hérité", &f, 1, 1000, 0);
+    return NULL;
+}
+#endif
+
 int main(void)
 {
     const int64_t delays[] = {-1, 0, 1, 999999, 1000000, 1000001, 1000000000000LL};
@@ -74,6 +83,13 @@ int main(void)
     const char *mode = getenv("POMPPC_POLL_NS");
     unsigned i, full = mode && !strcmp(mode, "1");
     unsigned short_only = mode && !strcmp(mode, "2");
+#ifdef HAVE_POLL_IDLE
+    unsigned adaptive = mode && !strcmp(mode, "3");
+    const char *idle_env = getenv("POMPPC_PROOF_IDLE");
+    bool idle = idle_env && !strcmp(idle_env, "1");
+    qemu_poll_ns_set_cpus_idle(idle);
+    short_only |= adaptive && idle;
+#endif
     unsigned on = full || short_only;
     GPollFD f[3];
     alarm(10);
@@ -92,6 +108,12 @@ int main(void)
     f[1] = f[0];
     f[2] = (GPollFD){-1, G_IO_IN, 0xffff};
     compare("doublons et fd ignoré", f, 3, 1000, on);
+#ifdef HAVE_POLL_IDLE
+    if (adaptive) {
+        GThread *thread = g_thread_new("poll-proof", other_poll_thread, &p[0]);
+        g_thread_join(thread);
+    }
+#endif
     compare("aucun fd", NULL, 0, 1, on);
     f[0] = (GPollFD){p[0], 0, 0xffff};
     compare("aucun événement demandé", f, 1, 1, on);

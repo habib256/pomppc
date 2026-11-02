@@ -42,13 +42,20 @@ def main():
         binary = directory / "proof"
         subprocess.run(shlex.split(os.environ.get("CC", "cc")) +
                        ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-I", tmp,
+                        *(["-DHAVE_POLL_IDLE"] if "void qemu_poll_ns_set_cpus_idle(" in target else []),
                         str(Path(__file__).with_suffix(".c")), "-o", str(binary)] + flags,
                        check=True)
-        for mode in (None, "0", "1", "2"):
+        modes = [(None, None), ("0", None), ("1", None), ("2", None)]
+        if "void qemu_poll_ns_set_cpus_idle(" in target:
+            modes += [("3", "0"), ("3", "1")]
+        for mode, idle in modes:
             env = dict(os.environ)
             env.pop("POMPPC_POLL_NS", None)
             if mode is not None:
                 env["POMPPC_POLL_NS"] = mode
+            env.pop("POMPPC_PROOF_IDLE", None)
+            if idle is not None:
+                env["POMPPC_PROOF_IDLE"] = idle
             result = subprocess.run([str(binary)], env=env, timeout=15)
             if result.returncode:
                 raise SystemExit(result.returncode)
