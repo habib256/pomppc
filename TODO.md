@@ -140,7 +140,10 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      `docs/re/ut-attente-m4.md`. Répartir la perte entre réveils, attente et verrou avant
      un nouveau levier ; aucune attente du noyau n'est supprimée.
   4. Parité de la zone froide (`tcg/0056`, saut long aarch64) en dernier : gain PC de 1-2 %
-     sur un goulot L1i propre au PC.
+     sur un goulot L1i propre au PC. **Revue et preuve préparatoire faites le 02/11** :
+     36 portes longues exécutées sur le M4, deux mutants détectés ; familles mémoire,
+     FP et tlbb à couvrir, régions SMP=1 et pools littéraux à traiter. Implantation et
+     A/B restent à faire (`docs/tcg-zone-froide-arm64.md`), levier toujours sans effet.
   5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle
      et 4 cycles mb/zen/ut/d3 sans incident (`endurance.md` §16), `etat-des-hotes.md` à jour.
   **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.

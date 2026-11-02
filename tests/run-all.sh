@@ -83,6 +83,12 @@ if [ "$(uname -s)" = Darwin ] && command -v cc >/dev/null 2>&1 &&
 else
   noop "POLLNS : macOS, glib de développement et arbre QEMU tcg/0058 requis"
 fi
+if [ "$(uname -sm)" = "Darwin arm64" ] && command -v cc >/dev/null 2>&1 &&
+   [ -f "$POLLNS_SRC/tcg/aarch64/tcg-target.c.inc" ]; then
+  if python3 tools/tcg/coldbranchproof.py "$POLLNS_SRC"; then ok "M4 : portes longues exécutées (préparation zone froide)"; else ko "M4 : portes longues"; fi
+else
+  noop "portes longues : Mac arm64 et sources QEMU requis"
+fi
 if python3 tests/screamer_audio_test.py; then ok "Screamer et profil audio stable"; else ko "Screamer et profil audio stable"; fi
 if [ -x frontend/build/pointer_test ]; then
   if frontend/build/pointer_test; then ok "souris fenêtre/plein écran"; else ko "souris fenêtre/plein écran"; fi

@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 4 h 51 (endurance finale en cours ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 5 h 05 (endurance finale en cours ; arrêt prévu à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -334,6 +334,14 @@ des anciennes références**.
   `m4-nuit-0211-fin-jeux` (mb, zen, ut, d3, aucun nouveau cycle après 6 h 05).
   Base immuable du 01/11, QEMU `8568ff59…`, tous les défauts, attente précise éteinte.
   Journal `.run/nuit-fin-0211.log` ; remise de la VM normale après ces contrôles.
+- **Zone froide arm64, préparation faite à 5 h 05** : revue des cinq familles de
+  chemins lents et des pools littéraux, taille des régions non fixe (cas SMP=1 à couvrir).
+  **36 portes longues exécutées sur le M4** à ±48/96 Mio, relocations réelles extraites
+  du backend construit, deux mutants de condition/largeur détectés. Le portage complet
+  et l'A/B restent à faire ; le garde x86-64 est inchangé, aucun allumage sur le M4.
+  `docs/tcg-zone-froide-arm64.md`, `tools/tcg/coldbranchproof.*`.
+- Contrôle général final des sources : **410 OK**, mêmes 49 signalements ShellCheck
+  préexistants (liste comparée), 5 ignorés (`.run/tests-coldbranch-0211.log`).
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`

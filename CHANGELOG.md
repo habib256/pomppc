@@ -9,6 +9,11 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **M4 : preuve préparatoire des sauts longs de la zone froide, 02/11.** 36 portes
+  exécutées sur le M4 avec les relocations réelles de QEMU, destinations à ±48/96 Mio,
+  deux mutants de condition/largeur détectés. Revue : couvrir aussi FP/tlbb, la taille
+  des régions en SMP=1 et les pools littéraux. Portage encore à implanter et mesurer,
+  aucun allumage (`tcg-zone-froide-arm64.md`).
 - **M4 : l'attente d'UT identifiée dans `delay_idle`, 02/11.** Mappage des piles arm64
   vers les instructions invitées, puis registre LR à `mach_absolute_time` : boucle
   d'attente active SMP du noyau xnu-792.24.17, source Apple concordante. Pas de raccourci
