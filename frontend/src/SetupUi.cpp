@@ -2,6 +2,7 @@
 // Copyright (c) 2026 VERHILLE Arnaud
 #include "SetupUi.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -219,7 +220,9 @@ void drawSetupPage(SetupFlow& setup, const SetupActions& actions) {
 }
 
 float setupBarHeight(const SetupFlow& setup) {
-    return setup.wantsVm() ? 3.0f * ImGui::GetTextLineHeightWithSpacing() + 12.0f : 0.0f;
+    if (!setup.wantsVm()) return 0.0f;
+    const int lines = setup.step() == SetupFlow::Step::Finished ? 1 : 3;
+    return lines * ImGui::GetFrameHeightWithSpacing() + (lines == 1 ? 6.0f : 0.0f);
 }
 
 void drawSetupBar(SetupFlow& setup) {

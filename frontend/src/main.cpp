@@ -947,7 +947,9 @@ int main(int argc, char** argv) {
         static int driverState = -1;      // -1 inconnu, 0 absent, 1 présent
         static double vmSince = 0;
         static bool vmWasRunning = false;
-        if (bridge->running() && !vmWasRunning) { vmSince = glfwGetTime(); driverState = -1; }
+        // Sans VM, plus rien n'est su du pilote : l'état de la VM précédente ne doit pas clore une étape.
+        if (!bridge->running()) driverState = -1;
+        else if (!vmWasRunning) vmSince = glfwGetTime();
         vmWasRunning = bridge->running();
         if (bridge->running() && curLauncher == tigerSh && glfwGetTime() - driverPoll > 2.0) {
             driverPoll = glfwGetTime();
