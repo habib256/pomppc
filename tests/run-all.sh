@@ -68,6 +68,7 @@ if python3 tests/flyby_report_test.py; then ok "fixed-step flyby report"; else k
 if python3 tests/matrice_test.py >/dev/null; then ok "matrice de jeux : règles de scène, ppmcmp"; else ko "matrice de jeux (python3 tests/matrice_test.py)"; fi
 if python3 tests/endurance_memory_test.py; then ok "endurance : collecte RAM"; else ko "endurance : collecte RAM"; fi
 if python3 tests/endurance_launch_test.py; then ok "endurance : arrêt pendant le lancement"; else ko "endurance : arrêt pendant le lancement"; fi
+if python3 tests/host_detach_test.py; then ok "VM détachée : survit au groupe du lanceur"; else ko "VM détachée : survit au groupe du lanceur"; fi
 if python3 tests/threadbusy_test.py; then ok "sample hôte : coûts et attentes par fil"; else ko "sample hôte : coûts et attentes par fil"; fi
 if python3 tests/samplejit_test.py; then ok "sample arm64 : PC invités et appelants sans ambiguïté"; else ko "sample arm64 : PC invités et appelants sans ambiguïté"; fi
 if python3 tests/machonm_stubs_test.py; then ok "Mach-O ppc : symboles indirects"; else ko "Mach-O ppc : symboles indirects"; fi

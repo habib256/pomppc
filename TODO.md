@@ -7,7 +7,8 @@
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
-M4 342 démarrages et 40 cycles de jeu sans incident le 29/10 ; Quartz Extreme allumé sur les
+M4 342 démarrages et 40 cycles de jeu sans incident le 29/10, puis 70 démarrages et 8 jeux
+avec le nouveau bundle dans la nuit du 01 au 02/11 ; Quartz Extreme allumé sur les
 deux hôtes). **L'orientation est de nouveau la vitesse, sur les deux hôtes**, car la version x86
 reste trop lente pour être publiée (règle du 20/10). Vitesse, ms/image, hôte au repos
 (PC du 01/11, M4 du 02/11) :
@@ -145,7 +146,8 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      FP et tlbb à couvrir, régions SMP=1 et pools littéraux à traiter. Implantation et
      A/B restent à faire (`docs/tcg-zone-froide-arm64.md`), levier toujours sans effet.
   5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle
-     et 4 cycles mb/zen/ut/d3 sans incident (`endurance.md` §16), `etat-des-hotes.md` à jour.
+     et 4 cycles, puis 55 démarrages et 4 cycles avec le binaire final : **70 démarrages
+     et 8 jeux sains** (`endurance.md` §16–17). Restauration détachée corrigée et vérifiée.
   **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.
 
 - [ ] **[Plugin — les deux hôtes] Alléger le plugin de l'invité, suite de PACKBITS**
@@ -163,8 +165,9 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   02/11 : UT −3,19 %, cmr −7,08 %, autres écarts inconclusifs (`profil-m4-0211.md` §1).
   S'y rattache l'**avis borné** des
   surfaces non simples (QE, 01/11) : le
-  coût de l'avis d'ombre (mb-fen +6 % quand une fenêtre est posée sur le jeu, la matrice y pose
-  toujours son Terminal) vient d'un avis sur toute la surface ; le kext connaît le rectangle
+  coût de l'avis d'ombre (mb-fen +6 % mesuré sur le PC quand une fenêtre est posée sur le jeu)
+  vient d'un avis sur toute la surface ; le relevé M4 du 02/11 n'a pas d'avis actifs en régime
+  stable, son coût reste à mesurer sous une fenêtre posée. Le kext connaît le rectangle
   englobant de la partie non visible : le renvoyer par la méthode 6 et n'aviser que lui, puis
   remonter la cadence (fermeture : mb-fen sous fenêtre posée au niveau de
   `POMPPC_GL_QE_NONSIMPLE=0`, bande toujours juste). **Fermeture :** plugin sous 20 % du vCPU

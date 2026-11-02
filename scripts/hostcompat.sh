@@ -15,7 +15,7 @@
 #   HOST_DISPLAY            # affichage par défaut : cocoa (macOS) ou gtk
 #   HOST_AUDIODEV           # backend audio : coreaudio (macOS) ou pa
 #   host_audio_env          # prépare l'environnement du backend audio
-#   host_detach CMD…        # lance CMD détaché de la session (setsid si présent)
+#   host_detach CMD…        # nouvelle session (setsid ou Python sur macOS)
 #   host_loadavg            # charge moyenne sur 1 min (point décimal)
 #   host_now                # horloge murale en secondes, avec décimales
 #   host_cpu_time PID       # temps CPU cumulé (s) de PID, « ? » s'il est parti
@@ -187,6 +187,11 @@ host_detach() {
   if command -v setsid >/dev/null 2>&1; then
     setsid "$@"
   else
-    nohup "$@"
+    # [A] M4, tests/host_detach_test.py : nohup conserve le groupe du lanceur.
+    # Une vraie session permet à la VM de survivre à la fin de ce groupe.
+    python3 -c 'import os, signal, sys
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])' "$@"
   fi
 }

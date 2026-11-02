@@ -191,7 +191,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 02/11/2026, 5 h 05 (endurance finale en cours ; arrêt prévu à 6 h 40)
+## 3. Mac M4 : état au 02/11/2026, 6 h 02 (contrôles clos, VM normale remise ; fin à 6 h 40)
 
 **Nuit du 01 au 02/11, reprise à 22 h 31** (demande de l'utilisateur : suivre le TODO jusqu'à
 6 h 40, heure Réunion). Dépôt à jour sur `aad7721`. À la reprise, `.run/` et `bench/` sont
@@ -342,6 +342,17 @@ des anciennes références**.
   `docs/tcg-zone-froide-arm64.md`, `tools/tcg/coldbranchproof.*`.
 - Contrôle général final des sources : **410 OK**, mêmes 49 signalements ShellCheck
   préexistants (liste comparée), 5 ignorés (`.run/tests-coldbranch-0211.log`).
+- **Endurance finale close à 5 h 53**, 50 froids puis 5 démarrages/4 jeux, aucun incident,
+  base sans erreur, aucune VM privée résiduelle. Nuit entière : **70 démarrages de
+  contrôle et 8 jeux sains**, binaires distingués dans `endurance.md` §16–17.
+- **Restauration corrigée à 5 h 59** : le frontal restait dans le groupe du lanceur avec
+  `nohup` et s'arrêtait après lui. `host_detach` crée une session réelle sur macOS ;
+  `matab.sh` l'utilise. Deux tests négatifs avant, positifs après (mort du groupe parent,
+  enfant vivant, arguments préservés). VM quotidienne sous ImGuiDock, frontal/QEMU
+  vivants après la fin du lanceur, SSH et kext contrôlés ; suivi au repos jusqu'à 6 h 40.
+- Après cette correction : **412 OK**, mêmes 49 scripts en échec ShellCheck (fichiers
+  comparés, diagnostics des trois scripts modifiés inchangés), 5 ignorés.
+  `.run/tests-detach-0211.log`. Aucun changement de binaire QEMU ni de levier.
 
 **Fait le 01/11** (après-midi ; Time Machine et hermes tournaient en parallèle sur l'hôte)
 - **QEMU reconstruit** (`a0e028e`, `.run/build-0111.log`) : `qgpu-core.c` du 31/10, `tcg/0059`
@@ -396,7 +407,7 @@ personnalité « auto » le suit). `tcg/0057`, `0058` compilés, éteints ; `x-t
 compilé, sans effet sur arm64.
 
 **Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit dans la nuit du 01 au 02/11
-(série jusqu'à `0059` et `0064`, plus le correctif de contrat de 0058, éteint) ; kext du 01/11
+(série jusqu'à `0059` et `0064`, correctif de contrat de 0058 et variante 0065 éteinte) ; kext du 01/11
 et plugin `20261101-ombre` (voir ci-dessus).
 
 **Fait le 30/10**
@@ -483,8 +494,8 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
      (`re/ut-attente-m4.md`), empreinte du PC à vérifier. **Suite : zone froide 0056** :
      revue et 36 portes longues exécutées sur le M4, mais implantation/A/B encore à faire ;
      traiter aussi FP, tlbb, régions SMP=1 et pools littéraux (`tcg-zone-froide-arm64.md`).
-  6. Première tranche d'endurance faite : 15 démarrages de contrôle et 4 jeux sains ;
-     tranche finale du nouveau binaire en cours, résultats au §3 et dans `endurance.md`.
+  6. **Endurance faite** : 70 démarrages de contrôle et 8 jeux sains dans la nuit,
+     résultats au §3 et dans `endurance.md` §16–17. Restauration détachée corrigée.
 
 - **Avant de quitter un hôte** : arrêter les campagnes en cours, remettre la VM quotidienne
   (`tools/tcg/matab.sh --restore`), mettre à jour cette page, puis commit et push.

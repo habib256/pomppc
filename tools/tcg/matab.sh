@@ -58,7 +58,7 @@ wait_ssh() {
 
 start_vm() { # start_vm JOURNAL [VAR=v …]  (les parties : fenêtre QEMU native, comme la matrice)
   local log=$1; shift
-  ( cd "$R" && env POMPPC_FRONTEND="${MATAB_FRONTEND:-native}" "$@" nohup ./run_tiger.sh > "$log" 2>&1 & )
+  ( cd "$R" && host_detach env POMPPC_FRONTEND="${MATAB_FRONTEND:-native}" "$@" ./run_tiger.sh < /dev/null > "$log" 2>&1 & )
   sleep 20
   wait_ssh || { python3 "$WT/tools/tcg/hmp.py" "$(mon)" system_reset >/dev/null 2>&1; wait_ssh; }
 }

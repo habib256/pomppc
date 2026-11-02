@@ -899,3 +899,44 @@ encore non committées : leur rapport garde donc le HEAD de lancement `aca7459`.
 exécuté du banc est celui ensuite committé sous `04574f7` ; copie et empreinte dans
 `source-precision.json` et `endurance-source-04574f7.py` de leurs dossiers. Ne pas attribuer
 ces corrections au seul HEAD indiqué par le rapport.
+
+## 17. M4, 02/11 au matin : contrôle final du binaire et de la restauration
+
+[A — hôte] Même base immuable que le §16 ; binaire reconstruit à 1 h 58,
+SHA-256 `8568ff593add448f6fbedf719213ab54aa58795291b09bec6cb9c0c9c6997da6`.
+Contrat de 0058 corrigé et variante 0065 compilée, **tous deux éteints**.
+Une instance, leviers du lanceur par défaut, banc sans frontal. Pilotage
+`.run/nuit-fin-0211.sh`, journal `.run/nuit-fin-0211.log`.
+
+- `m4-nuit-0211-fin-dem`, 4 h 50–5 h 28 : **50 démarrages froids, aucun incident**.
+  SSH à 15 s sur les 50, charge hôte max 4,0 ; borne haute Wilson 95 % : 7,1 %.
+- `m4-nuit-0211-fin-jeux`, 5 h 28–5 h 53 : **5 démarrages** (1 froid, 4 reboots)
+  et **4 jeux sains**, SSH médian 20 s (15–20), charge max 2,8. Bornes hautes
+  Wilson : 43,4 % pour les démarrages, 49,0 % pour les jeux.
+
+| jeu | cycles sains | images |
+|---|---:|---:|
+| mb | 1/1 | 25 583 |
+| zen | 1/1 | 45 785 |
+| ut | 1/1 | 10 395 |
+| d3 | 1/1 | 24 455 |
+
+Fin de tranche : **55 démarrages et 4 jeux sans incident**, aucun QEMU résiduel,
+base sans erreur à `qemu-img check` (`base-ombre-0211-fin-check.txt`). Avec le
+§16, la nuit compte **70 démarrages de contrôle et 8 jeux sains**, répartis entre
+les binaires qui y sont indiqués ; les interruptions volontaires ne sont pas
+ajoutées à ces totaux. Ce n'est pas un A/B de vitesse.
+
+**Défaut de restauration découvert ensuite.** `matab.sh --restore` annonçait la
+VM relancée et SSH répondait, mais le frontal et QEMU ne survivaient pas à la
+fin du groupe du lanceur. Sur le M4, `nohup` ne crée pas de session distincte.
+Reproduction hors VM : les deux tests de `host_detach_test.py` échouent avant
+correction (SID hérité), puis passent après, y compris quand le groupe parent
+reçoit SIGTERM. Les arguments contenant espaces et caractères de shell restent
+intacts. Journaux `.run/host-detach-{avant,apres}-0211.log`.
+
+`host_detach` utilise désormais `os.setsid` puis `exec` sur l'hôte sans
+`setsid(1)` ; `matab.sh` l'emploie avec une entrée standard fermée. Le chemin
+Linux conserve l'utilitaire `setsid`. Restauration réelle contrôlée à 5 h 59 :
+frontal dans son propre groupe, vivant après le départ du lanceur, QEMU et SSH
+actifs. Noyau invité MD5 `def99c6e…`, kext chargé. Aucun verrou supprimé.

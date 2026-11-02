@@ -9,6 +9,13 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+- **Restauration : la VM survit à son lanceur, 02/11.** `matab.sh` utilise une
+  vraie session détachée ; sur macOS sans `setsid(1)`, `host_detach` passe par
+  `os.setsid` et `exec`, car `nohup` gardait le groupe parent. Deux tests échouent
+  avant et passent après, restauration ImGuiDock/SSH vérifiée (`endurance.md` §17).
+- **M4 : endurance finale, 02/11.** Binaire courant : 50 froids, puis 5 démarrages
+  et quatre jeux, aucun incident. Nuit entière : 70 démarrages de contrôle et
+  huit jeux sains, bases vérifiées (`endurance.md` §16–17).
 - **M4 : preuve préparatoire des sauts longs de la zone froide, 02/11.** 36 portes
   exécutées sur le M4 avec les relocations réelles de QEMU, destinations à ±48/96 Mio,
   deux mutants de condition/largeur détectés. Revue : couvrir aussi FP/tlbb, la taille
