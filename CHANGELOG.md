@@ -11,6 +11,15 @@ de commit et dans `docs/`.
 
 (rien pour l'instant)
 
+## 0.4.1 (02/11/2026)
+
+**Une vraie application macOS.** `POMPPC.app` dans un `.dmg`, à glisser dans Applications, sans
+Terminal sur le Mac (`scripts/package_app_macos.sh`). Au premier lancement, des fenêtres demandent le
+média de Tiger ou un disque existant et rappellent l'installation du pilote dans Tiger, en français
+ou en anglais. Les données vivent dans `~/POMPPC`. Signature ad hoc, faute de certificat Apple
+Developer : macOS demande un accord au premier lancement. README refondu autour de l'app, l'archive
+devient l'installation avancée. QEMU, le frontal et les binaires invités sont ceux de la 0.4.
+
 ## 0.4 (02/11/2026)
 
 Paquet macOS Apple Silicon (`scripts/package_release_macos.sh 0.4`) au commit de la version, construit

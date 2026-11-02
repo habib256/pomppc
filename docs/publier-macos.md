@@ -47,7 +47,15 @@ PREBUILT=bench/release-0.4/prebuilt FRONTEND=~/src/pomppc-frontend-rel04/pomppc 
   QEMU_SRC=~/src/qemu-rel04 scripts/package_release_macos.sh 0.4
 ```
 
-Sortie : `dist/pomppc-0.4-macos-arm64.tar.xz` et son `.sha256`. Le CD seul, `pomppc-guest.iso`, se
+Sortie : `dist/pomppc-0.4-macos-arm64.tar.xz` et son `.sha256`. Puis l'app, tirée de ce paquet :
+
+```bash
+scripts/package_app_macos.sh 0.4
+```
+
+Sortie : `dist/POMPPC.app`, `dist/POMPPC-0.4-macos-arm64.dmg` et son `.sha256`. Pas de certificat
+Apple Developer ici : signature ad hoc, sans notarisation, d'où l'accord demandé au premier lancement.
+L'icône se refait par `scripts/app-macos/icone.swift`. Le CD seul, `pomppc-guest.iso`, se
 publie à part, renommé `pomppc-0.4-guest.iso`.
 
 ## 5. Éprouver l'archive

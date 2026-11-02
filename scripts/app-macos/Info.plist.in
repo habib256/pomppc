@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>POMPPC</string>
+  <key>CFBundleDisplayName</key><string>POMPPC</string>
+  <key>CFBundleIdentifier</key><string>net.pomppc.POMPPC</string>
+  <key>CFBundleExecutable</key><string>POMPPC</string>
+  <key>CFBundleIconFile</key><string>POMPPC</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>LSMinimumSystemVersion</key><string>@MIN_MACOS@</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <key>LSArchitecturePriority</key><array><string>arm64</string></array>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSHumanReadableCopyright</key><string>GPL-3.0-or-later, VERHILLE Arnaud. Licences : Resources/pomppc/THIRD-PARTY-LICENSES.</string>
+</dict>
+</plist>

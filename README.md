@@ -53,12 +53,39 @@ Quartz Extreme (the desktop composited through the host GPU) is on by default si
 on Apple Silicon, at every display mode Tiger offers (640×480 to 2560×1080), and in the repository
 on Linux x86-64; `QE=0 ./run_tiger.sh` turns it off. What is **not** done: Core Image.
 
-## Quick start (prebuilt release, macOS on Apple Silicon)
+## Install the app (macOS on Apple Silicon)
 
-Requirements: an Apple Silicon Mac running **macOS 15 or later** (release 0.4 needs no Homebrew: it
-carries its own libraries, built for macOS 15.0; it was developed and measured on an M4 under
-macOS 27), about 20 GB of free disk space, and **Mac OS X 10.4 Tiger PowerPC
-installation media that you own**. No Apple ROM is needed: OpenBIOS boots Tiger. Nothing of Apple's is distributed here.
+You need an Apple Silicon Mac running **macOS 15 or later**, about 20 GB of free disk space, and
+**Mac OS X 10.4 Tiger PowerPC installation media that you own** (`.iso`, `.cdr` or `.dmg`), or an
+existing POMPPC disk. Nothing of Apple's is included. No Homebrew, Xcode or Terminal is needed on
+the Mac.
+
+1. Download `POMPPC-<version>-macos-arm64.dmg` from the
+   [Releases](https://github.com/habib256/pomppc/releases) page, open it, and drag **POMPPC** onto
+   **Applications**.
+2. Open POMPPC from Applications. **macOS blocks it the first time**, because the app isn't
+   notarized by Apple. Go to **System Settings ▸ Privacy & Security**, scroll down, click
+   **Open Anyway** next to POMPPC, and confirm. You only do this once per version.
+3. POMPPC asks for your Tiger media, or for an existing `.qcow2` disk. To install Tiger, follow its
+   installer (in Disk Utility, erase the disk as *Mac OS Extended, Journaled*), close the window
+   when it finishes, and open POMPPC again.
+4. Once Tiger has started, install the 3D driver. Open Terminal inside Tiger (in Applications,
+   Utilities) and type the line below, then restart Tiger. Do this again after each POMPPC update.
+
+   ```sh
+   sudo sh /Volumes/POMPPC_GUEST/install.sh
+   ```
+
+Your data is in the **`POMPPC` folder of your home folder** (`~/POMPPC`): your Tiger disk is
+`disks/tiger.qcow2`. The app itself holds no data, so updating means replacing it in Applications.
+Copy the disk while Tiger is off to back it up. Delete `~/POMPPC` to remove your data.
+
+Then see [Changing the display resolution](#changing-the-display-resolution) and
+[Troubleshooting](#troubleshooting).
+
+## Advanced install (archive, Terminal)
+
+The `.tar.xz` archive holds the same programs, with the scripts' variables at hand.
 
 1. Download `pomppc-<version>-macos-arm64.tar.xz` from the
    [Releases](https://github.com/habib256/pomppc/releases) page, then extract it:
@@ -139,9 +166,13 @@ the mode saved by Tiger applies once its desktop starts.
 
 ### Upgrading from an earlier release
 
-1. Shut Tiger down, then extract the new archive next to the old one.
-2. Move your `disks/tiger.qcow2` into the new folder (and `images/`, if you keep your media there).
-3. Run `./run_tiger.sh`, install the guest CD again as in step 5, and **reboot Tiger**.
+**With the app:** shut Tiger down, replace POMPPC in Applications, open it, install the driver again
+and restart Tiger. Moving from the archive to the app: move your `disks/tiger.qcow2` to
+`~/POMPPC/disks/` before opening the app, or choose it when the app asks.
+
+**With the archive:** shut Tiger down and extract the new archive next to the old one. Move your
+`disks/tiger.qcow2` into the new folder (and `images/`, if you keep your media there). Run
+`./run_tiger.sh`, install the guest CD again as in step 5, and **reboot Tiger**.
 
 **Do not skip the reinstall**: an old guest driver on a new release can show a striped or
 wrongly sized desktop. Your applications and settings stay on the disk.
@@ -150,19 +181,25 @@ wrongly sized desktop. Your applications and settings stay on the disk.
 
 | Symptom | What to do |
 |---|---|
-| macOS refuses to open the binaries | Run the `xattr -dr com.apple.quarantine .` line of step 1 in the extracted folder. |
+| macOS refuses to open POMPPC | System Settings ▸ Privacy & Security ▸ **Open Anyway**. With the archive, run the `xattr` line of its step 1. |
+| The app quits or nothing appears | Read `~/POMPPC/.run/app.log` and attach it to your report. |
 | `Tiger tourne déjà` ("Tiger is already running") | Close the other VM. Never delete `.run/tiger.lock`: two VMs writing to the same disk corrupt it. |
 | Open Firmware `0 >` prompt | `boot cd:,\\:tbxi` while installing, `boot hd:,\\:tbxi` afterwards. |
-| No 3D, or a striped desktop after an upgrade | Run the guest CD's `install.sh` again and reboot Tiger (step 5). Check with step 6. |
-| The mouse is offset in the window | On Tiger 10.4.10 or older, start with `TABLET_MARGIN=0 ./run_tiger.sh`. |
+| No 3D, or a striped desktop after an upgrade | Run the guest CD's `install.sh` again and restart Tiger. Check with the commands below. |
+| The mouse is offset in the window | On Tiger 10.4.10 or older, start the archive with `TABLET_MARGIN=0 ./run_tiger.sh`. |
 | A game wants relative mouse motion | Untick **Machine ▸ Souris absolue en fenêtre**, or play in full screen. |
 | You need to type in a front-end field | Use **Machine ▸ Clavier → invité**. |
-| Accelerated desktop misbehaves | `QE=0 ./run_tiger.sh` turns Quartz Extreme off for that run. Please report it. |
+| Accelerated desktop misbehaves | With the archive, `QE=0 ./run_tiger.sh` turns Quartz Extreme off for that run. Please report it. |
 | Warcraft III does not reach its first scene | Start it again: this launch failure is intermittent. |
 | Return to Castle Wolfenstein | Not working yet. |
 
 Bug reports: [GitHub issues](https://github.com/habib256/pomppc/issues). Please include the host
-macOS version, the guest display mode and the output of step 6.
+macOS version, the guest display mode and the output of these commands, typed in Tiger's Terminal:
+
+```sh
+kextstat | grep pomppc
+system_profiler SPDisplaysDataType | grep -E "Resolution|Quartz"
+```
 
 Each launcher documents its variables in its header (`head -160 run_tiger.sh`): `GPU=0`,
 `FASTFP=0`, `NET=0`, `SNAPSHOT=1` (throw-away disk), `QFB=1` (second monitor), and more.

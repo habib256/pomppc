@@ -122,8 +122,9 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
 
 ### Paquet publié (macOS sur Apple Silicon)
 
-Sans construire : l'archive `pomppc-<version>-macos-arm64.tar.xz` des
-[publications](https://github.com/habib256/pomppc/releases) demande **macOS 15 ou
+Sans construire : `POMPPC-<version>-macos-arm64.dmg` des
+[publications](https://github.com/habib256/pomppc/releases) contient une app à glisser dans
+Applications (données dans `~/POMPPC`). L'archive `pomppc-<version>-macos-arm64.tar.xz` demande **macOS 15 ou
 plus récent**, sans Homebrew (la 0.4 embarque ses bibliothèques, construites pour macOS 15.0 ; mise
 au point et mesurée sur un M4 sous macOS 27 ; recette de
 construction : `docs/publier-macos.md` ; installation, résolutions, mise à jour et dépannage :
