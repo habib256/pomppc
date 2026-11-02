@@ -493,6 +493,12 @@ PY
 then ok "GLD_LIST alignée sur le générateur"; else ko "GLD_LIST de pomppc_gld.h désalignée"; fi
 
 echo
+echo "=== 5 quinquies. assistant de POMPPC.app ==="
+if [ "$(uname -s)" = Darwin ]; then
+  if ./tests/app_wizard_test.sh >/dev/null 2>&1; then ok "assistant de premier lancement"
+  else ko "assistant de premier lancement ($(./tests/app_wizard_test.sh 2>&1 | grep -m1 ÉCHEC))"; fi
+else noop "assistant de POMPPC.app (macOS seulement)"; fi
+
 echo "=== 6. device QFB de bout en bout (Open Firmware, sans invité) ==="
 if [ "$SLOW" = 1 ]; then
   if python3 tests/qfb_smoke.py; then ok "qfb_smoke.py"; else ko "qfb_smoke.py"; fi

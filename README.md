@@ -55,10 +55,9 @@ on Linux x86-64; `QE=0 ./run_tiger.sh` turns it off. What is **not** done: Core 
 
 ## Install the app (macOS on Apple Silicon)
 
-You need an Apple Silicon Mac running **macOS 15 or later**, about 20 GB of free disk space, and
-**Mac OS X 10.4 Tiger PowerPC installation media that you own** (`.iso`, `.cdr` or `.dmg`), or an
-existing POMPPC disk. Nothing of Apple's is included. No Homebrew, Xcode or Terminal is needed on
-the Mac.
+You need an Apple Silicon Mac running **macOS 15 or later** and about 20 GB of free disk space. No
+Homebrew, Xcode or Terminal is needed on the Mac. POMPPC doesn't include Mac OS: its setup helps you
+get the installation disc.
 
 1. Download `POMPPC-<version>-macos-arm64.dmg` from the
    [Releases](https://github.com/habib256/pomppc/releases) page, open it, and drag **POMPPC** onto
@@ -66,18 +65,27 @@ the Mac.
 2. Open POMPPC from Applications. **macOS blocks it the first time**, because the app isn't
    notarized by Apple. Go to **System Settings ▸ Privacy & Security**, scroll down, click
    **Open Anyway** next to POMPPC, and confirm. You only do this once per version.
-3. POMPPC asks for your Tiger media, or for an existing `.qcow2` disk. To install Tiger, follow its
-   installer (in Disk Utility, erase the disk as *Mac OS Extended, Journaled*), close the window
-   when it finishes, and open POMPPC again.
-4. Once Tiger has started, install the 3D driver. Open Terminal inside Tiger (in Applications,
-   Utilities) and type the line below, then restart Tiger. Do this again after each POMPPC update.
+3. Follow the setup, which appears when POMPPC has no disk:
+   1. Choose **Mac OS X 10.4 Tiger** or **Mac OS 9.2.2**.
+   2. Choose **Create a New Disk** and its size, or **Use an Existing Disk** (`.qcow2`).
+   3. Get the installation disc. **I Have the Disc** takes your own `.iso`, `.toast`, `.cdr`, `.dmg`
+      or `.zip`. **Open Macintosh Garden** opens the disc's page on
+      [Macintosh Garden](https://macintoshgarden.org), an independent archive not linked to Apple:
+      click a download link there, and POMPPC continues by itself when the file reaches your
+      Downloads folder, after checking it against the site's checksum. Mac OS remains Apple's
+      copyrighted software, so only download it if you're entitled to use it.
+   4. In the installer, use Disk Utility to erase the disk as *Mac OS Extended*, then install on it.
+      When it finishes, close the window and open POMPPC again.
+4. **Tiger only:** once it has started, install the 3D driver. Open Terminal inside Tiger (in
+   Applications, Utilities) and type the line below, then restart Tiger. Do this again after each
+   POMPPC update.
 
    ```sh
    sudo sh /Volumes/POMPPC_GUEST/install.sh
    ```
 
-Your data is in the **`POMPPC` folder of your home folder** (`~/POMPPC`): your Tiger disk is
-`disks/tiger.qcow2`. The app itself holds no data, so updating means replacing it in Applications.
+Your data is in the **`POMPPC` folder of your home folder** (`~/POMPPC`): your disks are
+`disks/tiger.qcow2` and `disks/os9.qcow2`. The app itself holds no data, so updating means replacing it in Applications.
 Copy the disk while Tiger is off to back it up. Delete `~/POMPPC` to remove your data.
 
 Then see [Changing the display resolution](#changing-the-display-resolution) and
@@ -85,7 +93,8 @@ Then see [Changing the display resolution](#changing-the-display-resolution) and
 
 ## Advanced install (archive, Terminal)
 
-The `.tar.xz` archive holds the same programs, with the scripts' variables at hand.
+The `.tar.xz` archive holds the same programs, with the scripts' variables at hand. It needs your
+own Tiger installation media.
 
 1. Download `pomppc-<version>-macos-arm64.tar.xz` from the
    [Releases](https://github.com/habib256/pomppc/releases) page, then extract it:
@@ -152,8 +161,8 @@ The `.tar.xz` archive holds the same programs, with the scripts' variables at ha
    also holds small OpenGL test programs (`glwin`, `gltest`).
 
 Your Tiger disk is the single file `disks/tiger.qcow2`: copy it while the VM is off to back it up.
-The front end's menus and most script messages are in French: **Machine** holds the machine
-controls, **Jeux** the game library, **Périphériques** the devices, **Vue** the display.
+The front end's menus are **Machine**, **Games**, **OS**, **Devices** and **View**. In this archive,
+the scripts' Terminal messages are in French.
 
 ### Changing the display resolution
 
@@ -187,8 +196,8 @@ wrongly sized desktop. Your applications and settings stay on the disk.
 | Open Firmware `0 >` prompt | `boot cd:,\\:tbxi` while installing, `boot hd:,\\:tbxi` afterwards. |
 | No 3D, or a striped desktop after an upgrade | Run the guest CD's `install.sh` again and restart Tiger. Check with the commands below. |
 | The mouse is offset in the window | On Tiger 10.4.10 or older, start the archive with `TABLET_MARGIN=0 ./run_tiger.sh`. |
-| A game wants relative mouse motion | Untick **Machine ▸ Souris absolue en fenêtre**, or play in full screen. |
-| You need to type in a front-end field | Use **Machine ▸ Clavier → invité**. |
+| A game wants relative mouse motion | Untick **Machine ▸ Absolute Mouse in Window**, or play in full screen. |
+| You need to type in a front-end field | Use **Machine ▸ Keyboard to Guest**. |
 | Accelerated desktop misbehaves | With the archive, `QE=0 ./run_tiger.sh` turns Quartz Extreme off for that run. Please report it. |
 | Warcraft III does not reach its first scene | Start it again: this launch failure is intermittent. |
 | Return to Castle Wolfenstein | Not working yet. |

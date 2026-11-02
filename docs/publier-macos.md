@@ -55,7 +55,13 @@ scripts/package_app_macos.sh 0.4
 
 Sortie : `dist/POMPPC.app`, `dist/POMPPC-0.4-macos-arm64.dmg` et son `.sha256`. Pas de certificat
 Apple Developer ici : signature ad hoc, sans notarisation, d'où l'accord demandé au premier lancement.
-L'icône se refait par `scripts/app-macos/icone.swift`. Le CD seul, `pomppc-guest.iso`, se
+L'icône se refait par `scripts/app-macos/icone.swift`.
+
+L'assistant de premier lancement (`scripts/app-macos/pomppc-app.sh`) ouvre les pages de Macintosh
+Garden et attend le fichier dans Téléchargements : il ne télécharge rien lui-même. Mac OS reste sous
+droit d'auteur d'Apple, et le dépôt continue de ne rien distribuer d'Apple : le geste reste celui de
+l'utilisateur. Si le site change ses fichiers, mettre à jour noms et MD5 en tête du script
+(`https://macintoshgarden.org/arch_md5.php?filename=<fichier>`). Le CD seul, `pomppc-guest.iso`, se
 publie à part, renommé `pomppc-0.4-guest.iso`.
 
 ## 5. Éprouver l'archive

@@ -99,10 +99,11 @@ fi
 
 # --- Le disque a-t-il un système installé ? (heuristique : > 200 Mo de données écrites) ---
 disk_installed() {
+  # du et non qemu-img map + python3 : sans outils de développement, /usr/bin/python3 ouvre une
+  # fenêtre d'installation sur le Mac (POMPPC.app).
   local alloc
-  alloc=$(qemu-img map --output=json "$OS9_DISK" 2>/dev/null \
-          | python3 -c 'import sys,json;print(sum(e.get("length",0) for e in json.load(sys.stdin) if e.get("data")))' 2>/dev/null || echo 0)
-  [ "${alloc:-0}" -gt 209715200 ]   # 200 Mo
+  alloc=$(du -k "$OS9_DISK" 2>/dev/null | cut -f1)
+  [ "${alloc:-0}" -gt 204800 ]   # 200 Mo
 }
 
 # --- Décider quoi booter ---

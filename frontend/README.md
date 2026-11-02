@@ -81,11 +81,11 @@ explicit environment overrides (including `0`) are preserved. The headless and
 explicit native-display paths remain available for automation.
 
 The keyboard is routed to the guest from the start — toggle it with
-**Machine ▸ Clavier → invité** when you need to type into an ImGui field.
+**Machine ▸ Keyboard to Guest** when you need to type into an ImGui field.
 
 ### Carillon de démarrage (hôte macOS et Linux)
 
-**Périphériques ▸ Carillon de démarrage (hôte)** règle l'activation, le volume
+**Devices ▸ Startup Chime (Host)** règle l'activation, le volume
 (0–100 %) et le chemin d'un WAV/AIFF (Entrée pour valider). Ces préférences
 restent dans `.run/chime.conf`, indépendamment du son Screamer de Tiger.
 Le lecteur (NSSound sur macOS ; PulseAudio `pa_simple` sur Linux, serveur pulse de PipeWire
@@ -93,7 +93,7 @@ compris, WAV et AIFF, `src/StartupChimeLinux.cpp`) est asynchrone : un lancement
 puis son premier
 affichage valide déclenchent une seule lecture. Une pause, une nouvelle image,
 un redimensionnement ou une réactivation du son ne la rejouent pas. Une relance
-de QEMU ou **Machine ▸ Redémarrer** réarme le carillon. Un redémarrage demandé
+de QEMU ou **Machine ▸ Restart** réarme le carillon. Un redémarrage demandé
 depuis l'invité seul n'est pas détecté. Une erreur audio est journalisée sans
 empêcher le démarrage de la VM. Aucun son dans les sondes headless.
 
@@ -135,14 +135,14 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
 
 ### Layout, ratio, plein écran (F1)
 
-- The guest screen (**Écran**) is docked in the centre of a full-frame DockSpace, with
-  **Ludothèque** on the right and **Journal** / **Bilan** below; every panel can be
-  re-docked, the layout is saved in `<repo>/.run/imgui.ini` and **Vue ▸ Disposition par
+- The guest screen (**Screen**) is docked in the centre of a full-frame DockSpace, with
+  **Library** on the right and **Log** / **Status** below; every panel can be
+  re-docked, the layout is saved in `<repo>/.run/imgui.ini` and **View ▸ Disposition par
   défaut** rebuilds it.
 - The guest is always drawn at the largest rectangle with **its own aspect ratio**, centred,
-  black bands around it — never stretched (**Vue ▸ Ajuster à la fenêtre**, the default).
-  **Vue ▸ 50/100/150/200 %** still fixes the size in window mode (scrollbars if larger).
-- **Vue ▸ Plein écran**, **Alt+Enter**, **Ctrl+Cmd+F** or **F11**: the host window goes to its monitor at
+  black bands around it — never stretched (**View ▸ Fit to Window**, the default).
+  **View ▸ 50/100/150/200 %** still fixes the size in window mode (scrollbars if larger).
+- **View ▸ Full Screen**, **Alt+Enter**, **Ctrl+Cmd+F** or **F11**: the host window goes to its monitor at
   native size (`glfwSetWindowMonitor`), menus and panels hidden, guest only, 4:3 guest on a
   16:9 screen = 1440×1080 between two 240-px bands on 1920×1080. **Same shortcut (Alt+Enter, F11 or Ctrl+Cmd+F)**
   goes back to the window at its previous size and position. ImGuiDock always starts in a
@@ -154,7 +154,7 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   full-screen behaviour is disabled — the green button zooms instead.
 - The pointer is mapped on the **rectangle actually drawn** (`SetAbsPosition` in guest pixels,
   relative motion scaled by the same factor, remainders carried); the bands send nothing.
-- **Machine ▸ Souris absolue en fenêtre** (on by default): mac99 has both a tablet
+- **Machine ▸ Absolute Mouse in Window** (on by default): mac99 has both a tablet
   (virtio-tablet from `run_os9.sh`, usb-tablet with `TABLET=1`) and a USB HID mouse; the HID
   mouse becomes QEMU's *current* pointer as soon as the guest polls it, which made OS 9's
   pointer relative (clicks landed wherever the accelerated guest cursor was). The frontend
@@ -179,8 +179,8 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   cursor); it comes back over menus and bands, in pause and when the VM is stopped. In
   relative mode without capture it stays visible (`wantsHiddenHostCursor`,
   `src/PointerPolicy.h`, tested by `pointer_policy`).
-- **Bilan** shows the guest size, the drawn rectangle and scale, the window size and the
-  pointer mode; **Journal** logs launches, CDs, scanout changes, switches and left clicks
+- **Status** shows the guest size, the drawn rectangle and scale, the window size and the
+  pointer mode; **Log** records launches, CDs, scanout changes, switches and left clicks
   (host point → guest pixel).
 
 `POMPPC_FE_SCRIPT` plays a test script through ImGui's input queue (same path as the real
@@ -210,7 +210,7 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
 - **P2 (input)** ✅ — set-1 keycode table, absolute pointer (clamped to the
   guest surface), relative-motion fallback, wheel, scaled coordinate mapping.
 - **P3 (menus → QMP)** ✅ — persistent QMP channel; menu bar drives
-  `system_reset` (Machine ▸ Redémarrer), `stop`/`cont` (Pause), CD insert/eject
+  `system_reset` (Machine ▸ Restart), `stop`/`cont` (Pause), CD insert/eject
   on the `gamecd` drive (`blockdev-change-medium`/`eject`), and an OS selector
   that relaunches Tiger ↔ Mac OS 9. `Vue` zooms 50–200 %.
 - **P4 (in progress)** —
@@ -219,7 +219,7 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
     (`ScanoutMap`) and only reports dirty rects (`UpdateMap`) — no pixels on
     the bus. Silently falls back to inline `Scanout`/`Update` for
     non-shareable surfaces. Verified: mac99 surfaces are shareable.
-  - ✅ **Son / Manette** (Périphériques menu): both **on by default** (Screamer output
+  - ✅ **Sound / Gamepad** (Devices menu): both **on by default** (Screamer output
     through PulseAudio on Linux, CoreAudio on macOS, menu item « Son (Screamer) » since 01/11 + `usb-host` gamepad passthrough); toggling relaunches QEMU.
     The run scripts self-guard (no device → skipped).
   - ✅ **Clipboard peer** (`org.qemu.Display1.Clipboard`): we export our
@@ -230,7 +230,7 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
     the guest also needs a QEMU clipboard agent, which PPC Mac OS X / OS 9
     lack — so it's a correct, verified peer that stays latent until a guest
     agent (or another D-Bus peer) provides content.
-  - ✅ **Ludothèque** (Jeux ▸ Ludothèque): a window listing the game CD images
+  - ✅ **Library** (Games ▸ Library): a window listing the game CD images
     in `disks/cdr/` and `disks/`; click one to hot-insert it into the `gamecd` drive
     (`blockdev-change-medium`, verified on a live OS 9), with an eject button
     and the currently-mounted title. `games.iso` (the auto-mounted master) is

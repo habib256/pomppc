@@ -298,10 +298,10 @@ static std::string macClipboardText() {
 #endif
 
 // Window names shared by the DockBuilder layout and the Begin() calls.
-static const char* kWinScreen  = "Écran";
-static const char* kWinLibrary = "Ludothèque";
-static const char* kWinBilan   = "Bilan";
-static const char* kWinJournal = "Journal";
+static const char* kWinScreen  = "Screen";
+static const char* kWinLibrary = "Library";
+static const char* kWinBilan   = "Status";
+static const char* kWinJournal = "Log";
 
 // Ctrl+C ou SIGTERM : quitter par la fin de main (réglages écrits, QEMU
 // arrêté proprement) au lieu de mourir sur place. Le gestionnaire ne fait que
@@ -536,7 +536,7 @@ int main(int argc, char** argv) {
     auto guestView = [&](bool allowZoom) {
         ImGuiIO& io = ImGui::GetIO();
         if (guestW <= 0) {
-            ImGui::TextDisabled("En attente de l'affichage QEMU…");
+            ImGui::TextDisabled("Waiting for the QEMU display…");
             drawSize = ImVec2(0, 0);
             return;
         }
@@ -823,40 +823,43 @@ int main(int argc, char** argv) {
         // ── Menu bar → machine control over QMP ──────────────────────────
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("Machine")) {
-                if (ImGui::MenuItem("Redémarrer") && bridge->reset()) {
+                if (ImGui::MenuItem("Restart") && bridge->reset()) {
                     chimePlayer.stop();
                     chimeTrigger.arm();
                 }
-                if (ImGui::MenuItem(paused ? "Reprendre" : "Pause")) {
+                if (ImGui::MenuItem(paused ? "Resume" : "Pause")) {
                     paused = !paused;
                     bridge->setPaused(paused);
                 }
                 ImGui::Separator();
-                ImGui::MenuItem("Clavier → invité", nullptr, &grabbed);
-                if (ImGui::MenuItem("Souris absolue en fenêtre", nullptr, &preferTablet))
+                ImGui::MenuItem("Keyboard to Guest", nullptr, &grabbed);
+                if (ImGui::MenuItem("Absolute Mouse in Window", nullptr, &preferTablet))
                     pointerPrefChanged = true;
                 ImGui::Separator();
-                if (ImGui::MenuItem("Quitter")) glfwSetWindowShouldClose(window, GLFW_TRUE);
+                if (ImGui::MenuItem("Quit")) glfwSetWindowShouldClose(window, GLFW_TRUE);
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Jeux")) {
+            if (ImGui::BeginMenu("Games")) {
                 ImGui::MenuItem(kWinLibrary, nullptr, &showLibrary);
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("OS")) {
                 bool onTiger = (curLauncher == tigerSh);
-                if (ImGui::MenuItem("Mac OS X 10.4 (Tiger)", nullptr, onTiger, !onTiger))
+                // Sans disque, le lanceur échouerait sans rien montrer : pas de choix à offrir.
+                const bool hasTiger = std::getenv("DISK") || fs::exists(root + "/disks/tiger.qcow2");
+                const bool hasOs9 = std::getenv("OS9_DISK") || fs::exists(root + "/disks/os9.qcow2");
+                if (ImGui::MenuItem("Mac OS X 10.4 (Tiger)", nullptr, onTiger, !onTiger && hasTiger))
                     relaunch(tigerSh);
                 bool onOs9 = (curLauncher == os9Sh);
-                if (ImGui::MenuItem("Mac OS 9.2.2", nullptr, onOs9, !onOs9))
+                if (ImGui::MenuItem("Mac OS 9.2.2", nullptr, onOs9, !onOs9 && hasOs9))
                     relaunch(os9Sh);
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Périphériques")) {
-                if (ImGui::BeginMenu("Carillon de démarrage (hôte)")) {
-                    ImGui::TextDisabled("Profil attendu : Power Mac G4 AGP / PowerMac3,1");
-                    ImGui::TextDisabled("Fichier WAV/AIFF — provenance : voir frontend/README.md");
-                    if (ImGui::Checkbox("Activer le carillon", &chime.enabled)) {
+            if (ImGui::BeginMenu("Devices")) {
+                if (ImGui::BeginMenu("Startup Chime (Host)")) {
+                    ImGui::TextDisabled("Expected profile: Power Mac G4 AGP / PowerMac3,1");
+                    ImGui::TextDisabled("WAV/AIFF file. Source: see frontend/README.md");
+                    if (ImGui::Checkbox("Enable Chime", &chime.enabled)) {
                         if (!chime.enabled) chimePlayer.stop();
                         saveChime();
                     }
@@ -866,26 +869,26 @@ int main(int argc, char** argv) {
                         chimePlayer.volume(chime.volume);
                         saveChime();
                     }
-                    if (ImGui::InputText("Fichier", chimeFile, sizeof(chimeFile), ImGuiInputTextFlags_EnterReturnsTrue)) {
+                    if (ImGui::InputText("File", chimeFile, sizeof(chimeFile), ImGuiInputTextFlags_EnterReturnsTrue)) {
                         chime.file = chimeFile;
                         saveChime();
                     }
-                    ImGui::TextDisabled("Entrée pour valider le chemin ; aucun redémarrage requis.");
+                    ImGui::TextDisabled("Press Return to confirm the path. No restart needed.");
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
-                ImGui::TextDisabled("(bascule = redémarrage immédiat de la VM)");
-                if (ImGui::MenuItem("Son (Screamer)", nullptr, &sound))
+                ImGui::TextDisabled("(switching restarts the VM immediately)");
+                if (ImGui::MenuItem("Sound (Screamer)", nullptr, &sound))
                     relaunch(curLauncher);
-                if (ImGui::MenuItem("Manette USB", nullptr, &pad))
+                if (ImGui::MenuItem("USB Gamepad", nullptr, &pad))
                     relaunch(curLauncher);
                 ImGui::EndMenu();
             }
-            if (ImGui::BeginMenu("Vue")) {
-                if (ImGui::MenuItem("Plein écran", "Alt+Entrée, F11"))
+            if (ImGui::BeginMenu("View")) {
+                if (ImGui::MenuItem("Full Screen", "Alt+Return, F11"))
                     toggleFullscreen = true;
                 ImGui::Separator();
-                if (ImGui::MenuItem("Ajuster à la fenêtre", nullptr, fitView)) fitView = true;
+                if (ImGui::MenuItem("Fit to Window", nullptr, fitView)) fitView = true;
                 const float zooms[] = {0.5f, 1.0f, 1.5f, 2.0f};
                 const char* zlab[] = {"50 %", "100 %", "150 %", "200 %"};
                 for (int i = 0; i < 4; ++i)
@@ -896,11 +899,11 @@ int main(int argc, char** argv) {
                 ImGui::Separator();
                 ImGui::MenuItem(kWinBilan, nullptr, &showBilan);
                 ImGui::MenuItem(kWinJournal, nullptr, &showJournal);
-                if (ImGui::MenuItem("Disposition par défaut")) resetLayout = true;
+                if (ImGui::MenuItem("Default Layout")) resetLayout = true;
                 ImGui::EndMenu();
             }
             ImGui::TextDisabled("  %dx%d  %s  %s", guestW, guestH,
-                                bridge->running() ? "en marche" : "arrêté",
+                                bridge->running() ? "running" : "stopped",
                                 paused ? "(pause)" : "");
             ImGui::EndMainMenuBar();
         }
@@ -936,19 +939,19 @@ int main(int argc, char** argv) {
         // ── Ludothèque : insert a game CD into the guest at runtime ───────
         if (showLibrary) {
             if (ImGui::Begin(kWinLibrary, &showLibrary)) {
-                ImGui::TextDisabled("Insère un CD de jeu à chaud (lecteur gamecd)");
+                ImGui::TextDisabled("Insert a game CD while running (gamecd drive)");
                 if (currentCd.empty())
-                    ImGui::TextDisabled("CD inséré : aucun");
+                    ImGui::TextDisabled("CD inserted: none");
                 else
-                    ImGui::Text("CD inséré : %s", prettyName(currentCd).c_str());
+                    ImGui::Text("CD inserted: %s", prettyName(currentCd).c_str());
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Éjecter")) {
+                if (ImGui::SmallButton("Eject")) {
                     bridge->ejectCd();
                     currentCd.clear();
-                    journal("CD éjecté");
+                    journal("CD ejected");
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Rafraîchir")) cdImagesStale = true;
+                if (ImGui::SmallButton("Refresh")) cdImagesStale = true;
                 if (cdImagesStale) { cdImages = listCdImages(root); cdImagesStale = false; }
                 ImGui::Separator();
                 ImGui::BeginChild("games");
@@ -958,7 +961,7 @@ int main(int argc, char** argv) {
                                           ImGuiSelectableFlags_AllowDoubleClick)) {
                         if (bridge->changeCd(g)) {
                             currentCd = g;
-                            journal("CD inséré : %s", prettyName(g).c_str());
+                            journal("CD inserted: %s", prettyName(g).c_str());
                         }
                     }
                 }
@@ -973,19 +976,19 @@ int main(int argc, char** argv) {
                 int fbw = 0, fbh = 0, ww = 0, wh = 0;
                 glfwGetFramebufferSize(window, &fbw, &fbh);
                 glfwGetWindowSize(window, &ww, &wh);
-                ImGui::Text("Invité : %dx%d  (%s)", guestW, guestH,
-                            bridge->running() ? "en marche" : "arrêté");
-                ImGui::Text("Vue : %s", fitView ? "ajustée au ratio" : "zoom fixe");
+                ImGui::Text("Guest: %dx%d  (%s)", guestW, guestH,
+                            bridge->running() ? "running" : "stopped");
+                ImGui::Text("View: %s", fitView ? "fit to ratio" : "fixed zoom");
                 if (drawSize.x > 0)
-                    ImGui::Text("Rectangle dessiné : %.0fx%.0f @ %.0f,%.0f  (×%.3f)",
+                    ImGui::Text("Drawn rectangle: %.0fx%.0f @ %.0f,%.0f  (×%.3f)",
                                 drawSize.x, drawSize.y, drawOrigin.x, drawOrigin.y,
                                 guestW ? drawSize.x / guestW : 0.0f);
-                ImGui::Text("Fenêtre hôte : %dx%d pt, %dx%d px", ww, wh, fbw, fbh);
-                ImGui::Text("Souris : %s, dernière position invité %d,%d",
-                            bridge->mouseIsAbsolute() ? "absolue" : "relative", lastGx, lastGy);
-                ImGui::Text("Clavier vers l'invité : %s", grabbed ? "oui" : "non");
+                ImGui::Text("Host window: %dx%d pt, %dx%d px", ww, wh, fbw, fbh);
+                ImGui::Text("Mouse: %s, last guest position %d,%d",
+                            bridge->mouseIsAbsolute() ? "absolute" : "relative", lastGx, lastGy);
+                ImGui::Text("Keyboard to guest: %s", grabbed ? "yes" : "no");
                 if (!currentCd.empty())
-                    ImGui::Text("CD : %s", prettyName(currentCd).c_str());
+                    ImGui::Text("CD: %s", prettyName(currentCd).c_str());
             }
             ImGui::End();
         }

@@ -14,11 +14,14 @@ de commit et dans `docs/`.
 ## 0.4.1 (02/11/2026)
 
 **Une vraie application macOS.** `POMPPC.app` dans un `.dmg`, à glisser dans Applications, sans
-Terminal sur le Mac (`scripts/package_app_macos.sh`). Au premier lancement, des fenêtres demandent le
-média de Tiger ou un disque existant et rappellent l'installation du pilote dans Tiger, en français
-ou en anglais. Les données vivent dans `~/POMPPC`. Signature ad hoc, faute de certificat Apple
-Developer : macOS demande un accord au premier lancement. README refondu autour de l'app, l'archive
-devient l'installation avancée. QEMU, le frontal et les binaires invités sont ceux de la 0.4.
+Terminal sur le Mac (`scripts/package_app_macos.sh`). Sans disque au premier lancement, un assistant
+fait choisir Tiger ou OS 9, crée un disque de la taille voulue ou importe un disque existant, puis
+obtient le CD d'installation : média de l'utilisateur, ou page de Macintosh Garden ouverte dans le
+navigateur, fichier repris tout seul dans Téléchargements et contrôlé par MD5. L'app ne télécharge
+rien elle-même. Les données vivent dans `~/POMPPC`. Signature ad hoc, faute de certificat Apple
+Developer : macOS demande un accord au premier lancement. Le frontal et l'assistant passent en
+anglais ; le menu OS grise un système sans disque ; `run_os9.sh` ne dépend plus de python3 au
+démarrage. README refondu autour de l'app. QEMU et les binaires invités sont ceux de la 0.4.
 
 ## 0.4 (02/11/2026)
 
