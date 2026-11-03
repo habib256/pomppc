@@ -29,9 +29,8 @@
 #include <filesystem>
 #include <memory>
 #include <string>
-#ifdef _WIN32
-#include <unistd.h>   // usleep (mingw-w64)
-#else
+#include <unistd.h>   // usleep ; glib 2.66 de bullseye ne l'amène pas (mingw-w64 l'a aussi)
+#ifndef _WIN32
 #include <spawn.h>
 #endif
 #include <fstream>

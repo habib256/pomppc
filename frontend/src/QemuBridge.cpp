@@ -14,6 +14,10 @@
 #endif
 
 #include <gio/gio.h>
+#ifndef G_DBUS_METHOD_INVOCATION_HANDLED
+// Arrivée avec glib 2.68 ; le plancher de l'AppImage est la 2.66 de bullseye. [B] gio/gdbusmethodinvocation.h de la glib du PC : TRUE.
+#define G_DBUS_METHOD_INVOCATION_HANDLED TRUE
+#endif
 #ifndef _WIN32
 #include <gio/gunixfdlist.h>
 #endif
