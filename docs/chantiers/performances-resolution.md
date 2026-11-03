@@ -4,6 +4,12 @@
 
 Actif sur le M4 ; à reprendre sur le PC ensuite.
 
+**03/11 : A/B ImGuiDock contre natif à refaire, aucun chiffre valable.** Les parties de
+`bench/tcg/ab/m4-frontal-0311-fen.sans-frontal` ont tourné **sans frontal** : `pomppc` plantait au lancement, écran
+du Mac éteint (corrigé, `9f7788b`). Pour la reprise : `POMPPC_FRONTEND=imgui` dans un bras, vérifier
+`pgrep -x pomppc` pendant la partie, `MATAB_AVANT` doit fermer le frontal, et l'écran doit être **allumé** :
+`caffeinate -d` empêche la veille sans réveiller, il faut d'abord `caffeinate -u -t 3`.
+
 - [ ] **[Jeux] Performances selon la résolution** — gros ralentissements signalés par
   l'utilisateur dans **Colin McRae en 1920 × 1080** (27/10 ; sur le M4 la cellule y est à +11 %
   contre 1024×768). Étendre les essais aux autres résolutions, jeux et modes ; relever les temps

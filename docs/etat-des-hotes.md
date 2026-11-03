@@ -144,7 +144,7 @@ cette liste ; la séance suivante se fait sur le M4)
 ~82 ms/image **en course** (plein écran).
 
 **À faire sur le PC, dans l'ordre** (au retour du M4)
-0. **Reconstruire `build/` et `build-fast/` depuis la série du 03/11** (`tcg/0064` à `0067`,
+0. Le frontal a changé (`9f7788b`) : `run_frontend.sh` le reconstruit au lancement. **Reconstruire `build/` et `build-fast/` depuis la série du 03/11** (`tcg/0064` à `0067`,
    `usbhid/0002`, `guest-driver` de `qgpu-pci.c`), avant toute mesure (profil PGO du 31/10). Le cœur
    qgpu a aussi changé le 02/11 au soir ; installer
    le kext et le plugin `20261102-modes` du bundle, redémarrer l'invité, puis balayer les modes
@@ -210,7 +210,15 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 03/11/2026, 13 h 07 (0.4.1 publiée, lot 4 fini sur main, aucune VM ne tourne)
+## 3. Mac M4 : état au 03/11/2026, 16 h 55 (preuve QE faite, frontal corrigé, aucune VM ne tourne ; suite sur le PC)
+
+**Après-midi du 03/11, demande de l'utilisateur : suivre le TODO jusqu'à 16 h 30.**
+- **Preuve QE aux résolutions : faite sur le M4** (`docs/chantiers/qe-resolutions.md`) : 16 cellules vertes sur 16, Colin McRae depuis quatre bureaux, A/B du plugin `20261102-modes` sans perte. Neuf références refaites et regardées.
+- **Frontal : plantage corrigé** (`9f7788b`, non publié) : lancé écran du Mac éteint, `pomppc` mourait à la première image, **0.4.1 touchée**. Correctif de version à décider par l'utilisateur.
+- **DOOM 3 à 37 ms/image au lieu de 29 sur ce M4** depuis le 03/11, macOS 27.2 installé à 12 h 48 ; cause non établie, plugin, binaire, QE, son, attente, QoS et réglages du jeu écartés (`docs/chantiers/d3-macos272.md`). **Ne pas comparer d3 aux chiffres d'avant.**
+- **A/B ImGuiDock contre natif : pas fait**, les premières parties tournaient sans frontal (`docs/chantiers/performances-resolution.md`).
+- **Pièges :** écran éteint, mb-fen 8,5-9 ms contre 6,2-6,9 : allumer avant de mesurer (`caffeinate -u -t 3`, `caffeinate -d` seul ne réveille pas). `tools/tcg/matab.sh` gagne `MATAB_APRES`. Le disque quotidien démarre en **1024×768×16** (préférences du 02/11 à 18 h 51) ; le bureau en 32 bits se règle pour la session par `/var/tmp/qe0311/setmode` (invité du M4 seulement). Kext et plugin neufs reposés, empreintes vérifiées ; copies des deux bras dans `/var/tmp/bras0311/` de l'invité.
+- Aucun fichier de `patches/` touché depuis `9702c26`. `tests/run-all.sh` après le correctif du frontal : 485 OK, 0 échec, 4 ignorés. `bench/` reste local : les preuves citées ne suivent pas sur le PC.
 
 **TODO réorganisé (3/11, 13 h 07, demande de l'utilisateur).** `TODO.md` devient un index par hôte, au plus trois chantiers actifs par hôte, avec une fiche par chantier dans `docs/chantiers/`. Texte déplacé tel quel. Règles de travail au §1 de cette page, référence validée au §5, état de la matrice dans `docs/matrice-jeux.md` §0, table des lectures dans `docs/README.md`. Aucun fichier de `patches/` touché : l'empreinte de la série ne change pas. Rien de mesuré, aucune VM lancée.
 

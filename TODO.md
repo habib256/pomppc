@@ -11,7 +11,7 @@ M4 342 démarrages et 40 cycles de jeu sans incident le 29/10, puis 70 démarrag
 avec le nouveau bundle dans la nuit du 01 au 02/11 ; Quartz Extreme allumé sur les
 deux hôtes). **L'orientation est de nouveau la vitesse, sur les deux hôtes**, car la version x86
 reste trop lente pour être publiée (règle du 20/10). Vitesse, ms/image, hôte au repos
-(PC du 01/11, M4 du 02/11) :
+(PC du 01/11, M4 du 02/11 ; **sur le M4, DOOM 3 est à 37 ms depuis le 03/11**, voir « Ensuite ») :
 
 | jeu | PC x86-64 (binaire rapide, plugin `packbits`) | M4 (02/11, QE) | rapport |
 |---|---:|---:|---:|
@@ -38,8 +38,7 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
 ## Actifs
 
 **Sur les deux hôtes**
-- [ ] **[QE] Résolutions** : Colin McRae, matrice et A/B du plugin `20261102-modes`, balayage `setmode.c`
-  sur le PC. **Fermeture :** essais justes, ou écart écrit. [Fiche](docs/chantiers/qe-resolutions.md)
+- [ ] **[QE] Résolutions** : M4 fait le 03/11 ; reste le PC : matrice, A/B, balayage `setmode.c`. **Fermeture :** essais justes, ou écart écrit. [Fiche](docs/chantiers/qe-resolutions.md)
 - [ ] **[Plugin] L'alléger, suite de PACKBITS, avis borné compris**. **Fermeture :** plugin sous 20 % du vCPU
   sur cmr et d3, aucun jeu en perte, matrice verte. [Fiche](docs/chantiers/alleger-plugin.md)
 
@@ -56,6 +55,7 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
 
 Dans l'ordre, l'hôte entre crochets. Un chantier d'un hôte n'y monte que si une place d'actif s'y libère.
 
+0. **[M4] DOOM 3 à 37 ms/image au lieu de 29 depuis le 03/11** : ni le plugin, ni le binaire, ni QE, ni le son, ni les réglages du jeu ; suspect macOS 27.2 [F]. À trancher avant tout A/B sur d3. [Fiche](docs/chantiers/d3-macos272.md)
 1. **[PC] Matrice** : un tour complet de preuve avec le kext et le plugin du 01/11. [Fiche](docs/chantiers/jeux.md)
 2. **[PC, puis M4] Performances selon la résolution** : le pendant du chantier actif sur le M4. [Fiche](docs/chantiers/performances-resolution.md)
 3. **[Les deux] Endurance sur la configuration par défaut** : gardien ssh, panique #76, une tranche après chaque allumage. [Fiche](docs/chantiers/fiabilite.md)

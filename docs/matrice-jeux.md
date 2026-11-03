@@ -64,8 +64,8 @@ hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à sc
 sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
-**M4, dernier tour complet : `bench/matrice/20261028-1854`** (28/10, QE, série du PC) : **17
-vertes sur 17 automatisées**. **PC, dernier tour complet : `bench/matrice/20261007-0709`** (07/10) ;
+**M4, dernier tour complet : `bench/matrice/qe-res-0311-*`** (03/11, QE, plugin `20261102-modes`, macOS 27.2) : **16
+vertes sur 16 jouées** ; avant, `20261028-1854` (28/10) : 17 sur 17. **PC, dernier tour complet : `bench/matrice/20261007-0709`** (07/10) ;
 depuis, les cellules sont rejouées par les A/B (`bench/tcg/ab/*`), un tour complet avec le cœur
 corrigé du 31/10 reste à faire.
 
