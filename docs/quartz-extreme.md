@@ -1,6 +1,6 @@
 # Quartz Extreme sous POMPPC
 
-Chantier ouvert le 28/10/2026 sur le M4 (TODO « Divers », `docs/roadmap-opengl15.md` étape E).
+Chantier ouvert le 28/10/2026 sur le M4 (`docs/chantiers/plus-tard.md`, Divers ; `docs/roadmap-opengl15.md` étape E).
 But : le WindowServer de Tiger compose les fenêtres sur le GPU de l'hôte, à travers notre
 plugin et qgpu, comme sur un Power Mac à carte accélérée. Informations Système doit alors
 afficher « Quartz Extreme : géré ».

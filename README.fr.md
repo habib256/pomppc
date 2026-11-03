@@ -52,7 +52,7 @@ Ces temps ont baissé depuis (série TCG et allègement du plugin allumés par d
 hôtes). Hôte au repos, ms/image, M4 (02/11/2026) / PC x86-64 (01/11/2026) : DOOM 3 en fenêtre
 28,9 / 78-80, UT2004 en fenêtre 19,3 / 40, Marble Blast en fenêtre 6,2 / 8,3, Zenerchi en fenêtre
 2,6 / 4,6, Colin McRae en plein écran **en course** 41,7 / 82. Dernier tour complet de la matrice sur le M4 :
-17 vertes sur 17 (28/10/2026) ; tableau courant dans `TODO.md`. La version Linux x86-64 n'est
+17 vertes sur 17 (28/10/2026) ; tableau courant dans `docs/matrice-jeux.md`. La version Linux x86-64 n'est
 pas publiée tant que sa vitesse n'est pas acceptable (cible : DOOM 3 à 50 ms/image).
 
 Ce qui borne tout : le PowerPC est émulé (pas de virtualisation PPC sur ARM ni x86). Le projet

@@ -8,7 +8,7 @@ Historique de la couche baseline (Linux x86-64, 2026-08). Le protocole de mesure
 > leviers est allumée par défaut (PPC32MT, lfs-known, tlb-base, zone froide… :
 > `docs/vitesse-doom3-x86.md`, `CHANGELOG.md`). Les leviers se jugent sur la matrice de jeux
 > (`tools/matrice/`, ms/image) ; pour le boot, `CPU_qemu` reste la métrique, et la baseline de
-> 23,32 s n'a pas été refaite (`TODO.md`, « Métrologie boot »). Les §1 et §2 restent l'histoire
+> 23,32 s n'a pas été refaite (`docs/chantiers/plus-tard.md`, « Métrologie boot »). Les §1 et §2 restent l'histoire
 > d'août.
 
 ## 1. Optimisations (guidées par le profiling)

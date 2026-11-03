@@ -222,7 +222,7 @@ arbfp` : juste sur l'hôte ; le rendu d'Apple n'annonce pas
 `GL_ARB_fragment_program` et **ignore** `glEnable(GL_FRAGMENT_PROGRAM_ARB)`
 sans erreur — sous Apple, les huit programmes de fragments de Colin McRae ne
 jouaient donc pas. Colin McRae : voir `docs/archive/todo-gpu-3d-2026-09-24.md`
-(état du 23/09) ; état courant : `TODO.md`, « Matrice de jeux ».
+(état du 23/09) ; état courant : `docs/matrice-jeux.md` §0.
 
 ## 6. Génériques à taille déclarée (24/09/2026)
 

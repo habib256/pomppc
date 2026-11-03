@@ -4,7 +4,7 @@
 > construit ; les volets état et géométrie sont entrés comme capacités (`QGPU_CAP_STATE_BLOCK`,
 > `QGPU_CAP_GEOM_HOST`).)
 
-Chantier A4 (`TODO.md`, « Plus tard > Vitesse ») : « déplacer le travail vers l'hôte […]
+Chantier A4 (`docs/chantiers/plus-tard.md`, Vitesse) : « déplacer le travail vers l'hôte […]
 textures par DMA sur plages sales ». Volet voisin du backend : G7 (`glTexSubImage*` par
 rectangle sale) et G8 (PBO en rotation pour `SURF_PRESENT`), bug hunt du 22/09. Règle du
 projet : mesurer avant d'optimiser. **Verdict : le plafond est nul en jeu et négligeable au

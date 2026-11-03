@@ -253,7 +253,7 @@ Gain total attendu sur le PC : **~6-12 ms/image sur ~150 (4-8 %)**, estimation �
 - Clé du verdict calculée deux fois par dessin (dispatch et dessin) et `TexInfo` (320 octets)
   recopié deux fois.
 - `+set r_useIndexBuffers 1` dans DOOM 3 (§1) : rien à écrire, à mesurer.
-- Attente de l'hôte (4,6 ms/image sur le PC) : côté QEMU (`nat_conv_attr`, TODO « [Cœur] »).
+- Attente de l'hôte (4,6 ms/image sur le PC) : côté QEMU (`nat_conv_attr`, `docs/chantiers/rendu-hote.md`).
 
 ## 9. Levier D — une soumission par image : `POMPPC_GL_ZONES` (20/10/2026)
 

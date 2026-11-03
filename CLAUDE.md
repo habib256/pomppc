@@ -15,7 +15,8 @@ Avant toute action :
 En fin de séance, mettre à jour `docs/etat-des-hotes.md` (section de l'hôte, avec date et
 heure), puis commit sur `main` et push.
 
-Autres repères : `TODO.md` (priorités), `CHANGELOG.md` (travaux clos), `docs/` (études),
+Autres repères : `TODO.md` (priorités, index de `docs/chantiers/`), `CHANGELOG.md` (travaux clos),
+`docs/` (études, index dans `docs/README.md`),
 `docs/vitesse-doom3-x86.md` (vitesse sur le PC), `docs/parite-m4-2510.md` (parité sur le M4).
 
 ## Les grades de preuve

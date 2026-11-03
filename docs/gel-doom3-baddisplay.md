@@ -147,7 +147,7 @@ relue à chaque attente, et la valeur 250 ms suppose un matériau qui ne s'arrê
 jamais. Ou borner les arrêts de vCPU côté QEMU : doorbell synchrone sans BQL,
 ou destruction des objets d'un client mort hors du fil principal. Le prochain
 gel lu par `kpanic.py` dira si c'est bien un « Lock timeout ». (01/11 : toujours ouvert, rien
-de fait ; suivi dans l'entrée « Plantages en jeu sans cause » de `TODO.md`.)
+de fait ; suivi dans l'entrée « Plantages en jeu sans cause » de `docs/chantiers/fiabilite.md`.)
 
 ## 3. `system_reset` bloqué après la panique : l'OpenPIC
 

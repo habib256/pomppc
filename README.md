@@ -41,7 +41,7 @@ These times have dropped since (TCG series and lighter guest plugin enabled by d
 hosts). Idle host, ms/frame, Apple Silicon M4 (02/11/2026) / Linux x86-64 PC (01/11/2026): DOOM 3
 windowed 28.9 / 78–80, UT2004 windowed 19.3 / 40, Marble Blast windowed 6.2 / 8.3, Zenerchi windowed
 2.6 / 4.6, Colin McRae full screen *during the race* 41.7 / 82. Last full matrix run on Apple Silicon: 17/17 green (28/10/2026);
-current table in `TODO.md`. The Linux x86-64 build is not released until its speed is
+current table in `docs/matrice-jeux.md`. The Linux x86-64 build is not released until its speed is
 acceptable (target: DOOM 3 at 50 ms/frame).
 
 **The limit is the CPU.** The G4 is emulated (there is no PowerPC virtualization on ARM or

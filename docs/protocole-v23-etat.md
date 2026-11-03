@@ -3,7 +3,7 @@
 > (01/11/2026 : la v23 n'a jamais été posée. Les volets A4 sont entrés comme capacités annoncées
 > par le device, `QGPU_PROTO_VERSION` restant 22 : ici `QGPU_CAP_STATE_BLOCK` (`patches/qgpu/qgpu_proto.h`).)
 
-Chantier **A4** du `TODO.md` (« Plus tard > Vitesse ») : *déplacer le travail vers
+Chantier **A4** de `docs/chantiers/plus-tard.md` (Vitesse) : *déplacer le travail vers
 l'hôte*. Trois volets en parallèle (état, textures, géométrie) ; celui-ci est le
 **bloc d'état** : `compute_state` et `send_state` doivent sortir du profil.
 L'intégrateur passera l'ensemble en v23 ; ce volet n'incrémente pas

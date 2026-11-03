@@ -1,0 +1,40 @@
+# Alléger le plugin de l'invité
+
+> Fiche de chantier ; index et priorités : [`TODO.md`](../../TODO.md).
+
+Actif sur les deux hôtes : chaque pourcent gagné vaut sur x86 et sur arm64 sans portage.
+
+- [ ] **[Plugin — les deux hôtes] Alléger le plugin de l'invité, suite de PACKBITS**
+  (`docs/plugin-allegement.md` §8, profil `bench/tcg/ab/xprof-0111-cmr-pb`). Le coût est
+  maintenant étalé : `geom_draw_client` 3,7 % du vCPU de cmr, `geom_draw_native` 1,5,
+  `send_state` 1,3, `prog_sync` 1,1, `geom_dispatch_locked` 1,1, **`___stub_getrealaddr` 1,0**
+  (étiquette à résoudre avant d'en tirer un levier : sur le M4, résolveur du stub de
+  `fprintf`, suivi des 82 stubs d'importation ; `docs/re/plugin-symboles-tiger.md`),
+  `texture_unit_ok` 0,9, `geom_format` 0,8, `us_fill`/`us_get` 1,3,
+  `prog_params_arena`/`prog_state` 1,4 ; dans libSystem, le bloc `0x90131200` fait 1,8 % sur
+  cmr et 0,7 % sur d3/mb (identifié sur le M4 dans `memcmp`/`bcmp`, libSystem MD5
+  `80719800…` ; appelants et empreinte du PC à vérifier). Méthode du §2 : un levier par
+  variable `POMPPC_GL_*`, mode `=2` de contrôle, `plugmd5` 0 écart, A/B des cinq jeux sur le
+  PC ; le M4 a le bundle depuis le 01/11 (VM quotidienne), A/B PACKBITS neuf terminé le
+  02/11 : UT −3,19 %, cmr −7,08 %, autres écarts inconclusifs (`profil-m4-0211.md` §1).
+  S'y rattache l'**avis borné** des
+  surfaces non simples (QE, 01/11) : le
+  coût de l'avis d'ombre (mb-fen +6 % mesuré sur le PC quand une fenêtre est posée sur le jeu)
+  vient d'un avis sur toute la surface ; le relevé M4 du 02/11 n'a pas d'avis actifs en régime
+  stable, son coût reste à mesurer sous une fenêtre posée. Le kext connaît le rectangle
+  englobant de la partie non visible : le renvoyer par la méthode 6 et n'aviser que lui, puis
+  remonter la cadence (fermeture : mb-fen sous fenêtre posée au niveau de
+  `POMPPC_GL_QE_NONSIMPLE=0`, bande toujours juste). **Fermeture :** plugin sous 20 % du vCPU
+  sur cmr et d3, aucun jeu en perte, matrice verte.
+
+## Piste proposée le 01/11 (à arbitrer par l'utilisateur)
+
+2. **Régime de compilation du plugin de l'invité.** Le plugin fait 11-28 % du vCPU selon le jeu :
+   10 % de mieux sur lui vaut 1-3 % sur chaque jeu, sur les deux hôtes, sans portage. Leviers :
+   PGO et LTO du plugin lui-même (le gcc 4.0 de Tiger a `-fprofile-generate/-fprofile-use` ;
+   profil pris en jouant la matrice dans la VM de dev), appels internes directs (`static`,
+   visibilité cachée, gain à mesurer ; l'étiquette `___stub_getrealaddr` à 1 % sur cmr doit
+   d'abord être résolue sur ses adresses, `docs/re/plugin-symboles-tiger.md`),
+   configuration lue une fois (A5 : plus de `getenv` dans le chemin chaud). **Fermeture :**
+   plugmd5 0 écart, A/B des cinq jeux, tous en gain. Coût : deux à trois jours (agent Opus).
+   Risque : la maturité du PGO de gcc 4.0 sur PowerPC.

@@ -27,7 +27,7 @@ trois cellules vertes, capture/rejeu 0,00 %, respectivement 9,9, 34,1 et 70,6 ms
 La série de dix tours consécutifs DOOM 3/Prey est **reportée à la demande de
 l'utilisateur** ; ce premier tour ne la remplace pas.
 
-`tools/matrice/` joue chaque jeu de la matrice (`TODO.md`, « Matrice de jeux ») dans chaque mode — **fenêtre** et
+`tools/matrice/` joue chaque jeu de la matrice (§0) dans chaque mode — **fenêtre** et
 **plein écran** — sur la VM quotidienne, et produit un tableau vert/rouge avec, pour chaque
 cellule, ses preuves rangées. C'est le harnais qui doit autoriser A2 (découpage du plugin) et
 A4 (travail déplacé vers l'hôte) sans peur : on le rejoue avant et après.
@@ -57,9 +57,36 @@ verrou en 60 s, elle s'arrête sans rien relancer. Sorties dans
 `bench/matrice/<AAAAMMJJ-HHMM>/` du dépôt principal (non versionné) : `tableau.md`,
 `resultats.csv`, un dossier par cellule ; `bench/matrice/dernier` pointe sur le dernier tour.
 
+## 0. État de la matrice
+
+Une cellule verte exige une image juste (rejeu = VM et référence validée), zéro repli
+hors rafraîchissements admis (2 par 90 images en fenêtre), et une mesure à scène fixe
+sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve chaque notion
+nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
+
+**M4, dernier tour complet : `bench/matrice/20261028-1854`** (28/10, QE, série du PC) : **17
+vertes sur 17 automatisées**. **PC, dernier tour complet : `bench/matrice/20261007-0709`** (07/10) ;
+depuis, les cellules sont rejouées par les A/B (`bench/tcg/ab/*`), un tour complet avec le cœur
+corrigé du 31/10 reste à faire.
+
+| Jeu / chemin | Fenêtre | Plein écran | M4 01/10 (ms/image fen. / pe) | M4 02/11 (QE, sans attente précise) | Travail restant |
+|---|---|---|---|---|---|
+| Marble Blast Gold | vert | vert | 9,0 / 9,6 | 6,2 / — | fenêtre sur bureau 800×600 en session |
+| Zenerchi | vert | non automatisé | 4,0 / — | 2,6 / — | automatiser plein écran |
+| DOOM 3 | vert | vert | 56,1 / 56,2 | 28,9 / — | changements de mode, combat |
+| Prey | vert | vert | 50,5 / 49,5 | — | changements de mode, combat |
+| UT2004 | vert | vert | 25,0 / 25,4 | 19,3 / — | — |
+| Warcraft III | non automatisé | vert | — / 15,4 | — | fenêtre, texte des menus |
+| Colin McRae | non applicable | vert | — / 48,1 | — / 41,7 (1920×1080) | 1920×1080 (ralentissements signalés, `docs/chantiers/performances-resolution.md`) ; mesuré **en course** sur les deux hôtes |
+| Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | — | tableaux clients déroulés (suites A4) |
+| Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 33,4 / 33,5 | — | attente des requêtes d'occlusion |
+| RTCW | non automatisé | non automatisé | — / — | — | réinstallation puis diagnostic |
+
+Ces scènes ne prouvent pas le jeu entier.
+
 ## 1. Les trois preuves d'une cellule
 
-Un jeu est **vert** dans un mode quand les trois preuves y sont (`TODO.md`, « Matrice de jeux ») :
+Un jeu est **vert** dans un mode quand les trois preuves y sont (§0) :
 
 1. **Image juste.** Le plugin vide les soumissions à partir du déclencheur
    (`POMPPC_GL_DUMP_TRIGGER`, vidage autonome : tout l'état et toutes les textures réémis). Le

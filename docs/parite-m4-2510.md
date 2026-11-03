@@ -19,7 +19,7 @@ générique, `docs/tcg-zone-froide-arm64.md` §7). `tcg/0057`-`0058` et `0065`, 
 et éteints ;
 `0060`-`0063` ne sont pas nommés dans `build_qemu_qfb.sh`. Le M4 tourne toujours sur le binaire
 de référence (pas de `build-fast`), reconstruit en dernier le 02/11 à 23 h 36. Ce qui reste à faire
-sur le M4 : `docs/etat-des-hotes.md` §3 et `TODO.md`, « Maintenant », non le plan des §1-§2.
+sur le M4 : `docs/etat-des-hotes.md` §3 et `TODO.md`, non le plan des §1-§2.
 
 ## 1. Le retard, patch par patch
 
@@ -391,4 +391,4 @@ journaux : `docs/endurance.md` §9. Une nuit plus longue reste à faire.
 
 Ce résultat porte sur les réglages du banc. La validation des résolutions reste
 ouverte : ralentissements importants signalés dans Colin McRae en 1980 × 1024,
-à rechercher aussi sur les autres jeux et résolutions (`TODO.md`, rubrique Jeux).
+à rechercher aussi sur les autres jeux et résolutions (`docs/chantiers/performances-resolution.md`).

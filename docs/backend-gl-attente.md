@@ -11,7 +11,7 @@ de ~2 % du temps d'image d'au moins un jeu.
 (01/11 : les deux « éteints par défaut » ci-dessous sont dépassés. `QGPU_GL_FLUSH=1` est posé par
 `run_tiger.sh` et `POMPPC_GL_QFLUSH` est allumé dans le plugin depuis le 01/10 (`ccebdda`), sans
 l'A/B du §6 ; `QGPU_GL_FLUSH=0` et `POMPPC_GL_QFLUSH=0` les éteignent. L'A/B reste à jouer :
-`TODO.md`, « [Métrologie] A/B de l'attente ».)
+`docs/chantiers/metrologie.md`, « A/B de l'attente ».)
 
 - **Colin McRae n'attend pas l'hôte** : 0,12 ms par image affichée (0,2 %). Les « 10 %, ~7 ms
   par image » venaient d'une fenêtre de mesure tombée dans un menu (§1).

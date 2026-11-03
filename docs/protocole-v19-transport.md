@@ -101,7 +101,7 @@ d'objets laissés vivants en silence.
 | contrat structurel (copies identiques, kext sans sémantique, ABI sans sémantique) | `tests/run-all.sh` §5 bis | OK |
 | `CLIENT_RESET` de bout en bout depuis Open Firmware (rejouer la scène : `LIMIT` avant, OK après ; `BAD_ARG` hors table ; barrière) | `tests/qgpu_smoke.py` (`--slow`) | OK (55 vérifications) |
 | kext v19 chargé contre le device v19, `READ_REG` (MAGIC, VERSION, CLIENTS, table, classe inconnue, non aligné refusé, hors BAR refusé, au-delà de TOPADDR = `0xFFFFFFFF`), `GET_SLOT` = table, bit de `len` inconnu refusé, `QGPU_UC_RESET` → recréation par le device | `guest/qgpu-test` dans Tiger | 44/44, kext « protocol v19, 4 clients x 16384 KiB » |
-| plugin v19 : scènes `gltest` inchangées | invité | `tri texup texcache texdelmid cube arbvp arbfp varray varrayvbo caps blendc logicop polymode stipple occl sepspec spin game` OK ; `tex3d tex13 tex14 gl15 texlod` cassées **avant** A1 (`TODO.md` du 24/09, §5 « Points ouverts », `git show f82eed9:TODO.md` ; `tex14` reste dans `TODO.md`, « Jeux ») |
+| plugin v19 : scènes `gltest` inchangées | invité | `tri texup texcache texdelmid cube arbvp arbfp varray varrayvbo caps blendc logicop polymode stipple occl sepspec spin game` OK ; `tex3d tex13 tex14 gl15 texlod` cassées **avant** A1 (`TODO.md` du 24/09, §5 « Points ouverts », `git show f82eed9:TODO.md` ; `tex14` reste dans `docs/chantiers/jeux.md`) |
 | **la preuve d'A1** : ajouter une clé fictive à `qgpu_proto.h`, ne reconstruire que QEMU et le plugin, `gltest` vert avec le kext installé | par construction (le kext n'inclut pas le fichier) + harnais §5 bis | — |
 
 ## Ce qui reste hors périmètre

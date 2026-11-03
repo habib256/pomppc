@@ -21,18 +21,49 @@ Au début d'une séance :
 
 ## 1. Règles communes
 
-- **Parité** : toute accélération prouvée sur un hôte reçoit son pendant sur l'autre, **au même
-  niveau de preuve**, avant d'y être allumée. Si elle ne peut pas l'être, la raison est écrite
-  dans la doc du patch.
-- **Vitesse générique** : un levier se juge sur **toute la matrice** (mb, zen, ut, d3, cmr),
-  jamais sur DOOM 3 seul.
-- **A/B seulement l'hôte au repos** : aucune construction, aucun autre QEMU, aucun agent
-  parallèle pendant la mesure (`tools/tcg/chargehote.py attendre`).
-- **Ne jamais supprimer `.run/tiger.lock`** (flock : deux QEMU écriraient le même disque).
-- Le PC n'est **pas publié** (paquets, annonces) tant que sa vitesse n'est pas acceptable.
+Avant et après un lot touchant le plugin, le device ou le cœur : `tools/matrice/matrice.py`
+(ou `-j … -m …`), résultats dans `bench/matrice/dernier/tableau.md`.
+À la reprise : `pgrep -x qemu-system-ppc`, `tools/guest/tssh.sh uptime`. Mesurer au premier
+plan ; DOOM 3 se mesure en parties réelles (`timedemo` refusé par la démo).
+
+- **Vitesse générique** : un levier se juge sur toute la matrice (mb, zen, ut, d3, cmr), jamais
+  sur DOOM 3 seul ; il n'est allumé que s'il ne perd sur aucun jeu.
+- **A/B au repos** : aucune construction, aucun autre QEMU, aucun agent parallèle pendant une
+  mesure ; `MATAB_AVANT="python3 tools/tcg/chargehote.py attendre JOURNAL 1800"`. Trois parties
+  par bras ne prouvent pas un écart sous 3 % (bruit mesuré, `vitesse-doom3-x86.md` §18.3).
+- **Parité** : une accélération x86 a son pendant arm64 au même niveau de preuve avant
+  d'être allumée là-bas, et inversement. Le plugin de l'invité est commun : rien à porter.
+- **Patch TCG** : une propriété de CPU ou d'accélérateur, éteinte par défaut, une preuve
+  d'équivalence, un A/B entrelacé ; **jamais nommé dans `build_qemu_qfb.sh` pendant une
+  campagne** (l'empreinte de la série change, `build-fast` est refusé). Les essais écartés
+  restent sous `archive/*`.
+- **Pas de repli : étendre le protocole.** Sous programme ARB, tout repli vers le rendu d'Apple
+  finit dans `gleBuildInterpolateFunc` → `exit(1)`.
+- **`qgpu_proto.h` ⇒ QEMU + plugin** ; **`qgpu_abi.h` ⇒ QEMU + kext (redémarrage) + plugin**,
+  et c'est rare.
+- **Mesurer avant d'optimiser** : `perf` + `-perfmap` + `tools/re/perfpart.py` sur le PC,
+  `sample` dans l'invité et sur le M4 ; `frames.csv` à scène égale. Le self % localise, il ne
+  valide pas.
+- **Un lot = un changement + une épreuve + un commit**, une ligne dans `TODO.md` tant qu'il est ouvert, une
+  entrée dans `CHANGELOG.md` quand il est fini.
+- **Endurance** : chaque entrée du TODO passe par le banc quand elle s'y prête.
+- **Un seul agent sur la VM à la fois** ; les autres travaillent en copie isolée. L'implémentation
+  non triviale passe par des sous-agents Opus ; la session principale orchestre, mesure et
+  committe (demande de l'utilisateur, 01/11).
+- **Après un `killall` de DOOM 3, redémarrer l'invité.** Ne jamais supprimer `.run/tiger.lock`.
+  Jamais `pgrep -f`/`pkill -f` avec un motif présent dans sa propre ligne de commande.
+- **Parité, précision** : si une accélération ne peut pas recevoir son pendant, la raison est écrite dans la doc du patch.
+- **Publication** : le PC n'est **pas publié** (paquets, annonces) tant que sa vitesse n'est pas acceptable.
   Cible : DOOM 3 à 50 ms/image en fenêtre.
-- Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
+- **Commits** : ils vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
+- **Preuve d'une entrée du TODO** : une entrée décrit le travail restant et la preuve qui la fermera. Pour les optimisations :
+preuve d'équivalence (`plugmd5` à l'octet, `x-*-verify`, mutants) et A/B entrelacé à scène
+égale, hôte au repos, sur **toute la matrice** (mb, zen, ut, d3, cmr) : un levier n'est allumé
+que s'il ne perd sur aucun jeu ; un écart sous 3 % sur trois parties ne prouve rien (six parties
+ou un bras témoin). Pour les défauts : reproduction avant correction et contrôle après. Les
+travaux clos sont dans [CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
+L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## 2. PC x86-64 : état au 01/11/2026, 14 h 30 (aucune VM ne tourne : A/B PRESENTQ raté et arrêté à 14 h 20 ; `build/` et `build-fast/` à reconstruire, voir « À faire »)
 
@@ -62,7 +93,7 @@ cette liste ; la séance suivante se fait sur le M4)
   ppc64 pose maintenant `PPC32MT=0`. Les profils déjà construits ne changent pas.
 - **`POMPPC_GL_PRESENTQ` rouvert** (demande de l'utilisateur) : A/B au repos en plein écran
   lancé à 13 h 28 (`bench/tcg/ab/presentq-0111-{cmr,mb,ut}`, 3 parties par bras) ;
-  verdict et suite dans `TODO.md` (« Ensuite », PRESENTQ). Code de l'invité : s'il est allumé,
+  verdict et suite dans `docs/chantiers/presentq.md`. Code de l'invité : s'il est allumé,
   le M4 le reçoit avec le bundle. **A/B RATÉ, à rejouer entièrement au retour sur le PC** :
   les 5 parties jouées (13 h 28-14 h 17) ont toutes fini « pas de ssh » parce que le binaire
   rapide a été **refusé** : « construit sur une autre série de patches » (`run_tiger.log` des
@@ -84,7 +115,7 @@ cette liste ; la séance suivante se fait sur le M4)
   de la série change ; `build/` et `build-fast/` du PC sont à reconstruire avant toute mesure**
   (`./scripts/build_qemu_qfb.sh` puis `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh`, profil
   `pgo-fast/` = 31/10), et le M4 reconstruit de toute façon. A/B en jeu de `TBHEAD=3` à faire
-  (TODO, « Plus tard », Vitesse).
+  (`docs/chantiers/plus-tard.md`, Vitesse).
 
 **Fait dans la nuit du 31/10 au 01/11** (objectif de l'utilisateur : vitesse x86 jusqu'à 7 h)
 - **Fenêtre de cmr** : depuis le 28/10, le PC mesurait une transition d'avant la course, pas la
@@ -121,27 +152,8 @@ cette liste ; la séance suivante se fait sur le M4)
    valider les chemins x86-64 sur cet hôte ; les preuves natives M4 ne le remplacent pas.
    Vérifier à l'œil le curseur unique du frontal et la bande d'ombre avec le kext du 01/11 ;
    une cellule de preuve verte de la matrice en fenêtre (les tours du 01/11 étaient sans vidage).
-1. PGO avec cmr : réentraîné le 01/11 (7 h-8 h 20) ; A/B neuf contre ancien neutre en fenêtre,
-   cmr +6 % sur 2 parties (une polluée par mes dépouillements de profils, charge 3,1 ; une
-   quittée `exit 138`) : **ancien binaire remis** (`build-fast`), nouveau dans
-   `~/src/qemu/build-fast-pgo0111cmr/`. À refaire : A/B cmr 3 parties au repos strict avant de
-   trancher (`vitesse-doom3-x86.md` §25). Le binaire instrumenté n'atteint pas la course en
-   901 s : allonger `delai_scene` pour l'entraînement, ou entraîner cmr sur le binaire -O2.
-2. Plugin sur cmr, suite de PACKBITS : profil de la course refait avec packbits
-   (`xprof-0111-cmr-pb`, plugin-allegement §8) : plugin 28,2 % du vCPU, coût étalé
-   (`geom_draw_client` 3,7 %, `geom_draw_native`, `send_state`, `prog_sync`, `__stub_getrealaddr`
-   1-1,5 % chacun). Piste : `texture_unit_ok` ; qualifier d'abord les adresses de
-   `__stub_getrealaddr` avant d'en déduire un coût d'appels par pointeur (relevé M4 du 01/11,
-   `docs/re/plugin-symboles-tiger.md`).
-3. `tcg/0063` : témoin sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063 sur cmr. La panique de
-   délai de verrou vient-elle des vérificateurs ? A/B en fenêtre mitigé (d3 −3,0 %, mb −2,2 %,
-   ut +3,7 %, 2 parties) : à rejouer à 3 parties si le témoin innocente 0063.
-4. x8 (0060) : la seule perte propre à cmr qui reste ; à instruire après le point 1.
-5. Base de temps en ligne (`mftb` sans helper), gain modeste attendu.
-6. Avis borné pour les surfaces non simples (TODO, chantier plugin) : ramener mb-fen sous
-   fenêtre posée au niveau d'avant.
-7. Les « sans traduction » de `x-ret-verify` en fin de session (`tcg-g4.md` §44) : peut-être
-   parents de la rafale « sans PTE » de `tcg/0061` (§45, non reproduite).
+1. Puis la liste de `TODO.md`, section « Sur le PC » ; l'ancienne liste détaillée de cette page est dans
+   `docs/chantiers/leviers-jit-x86.md`.
 
 **Défauts du PC** (`run_tiger.sh`, branche `Linux:x86_64`) : Quartz Extreme (depuis le 30/10 au
 soir, `QE=0` l'éteint) et la série TCG jusqu'à `tcg/0056`, dont la **zone froide `x-tcg-cold`**
@@ -189,7 +201,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   dans `/Users/tiger/gltrap/` de la VM quotidienne.
 - **Premiers essais de `tcg/0060` et `tcg/0061`** (`tcg-g4.md` §44-§45) : repris en course le
   01/11 (§46, section 2). De `0061` reste un défaut d'origine de QEMU : l'ancien BAT est vidé
-  avec le masque de la nouvelle valeur (`tcg/0062` le relève ; TODO, « Plus tard »).
+  avec le masque de la nouvelle valeur (`tcg/0062` le relève ; `docs/chantiers/plus-tard.md`).
 - **cmr à plusieurs résolutions** (`bench/tcg/ab/cmr-res-3110/`, sous ImGuiDock) : rejeux
   identiques partout (0,00 %), captures `<mode>/capture.png`. Les temps de ce tour sont pris
   **avant la course** (fenêtre de mesure d'avant `6054367`) : le « 16 bits ×2 » qui en sortait
@@ -198,7 +210,9 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 03/11/2026, 07 h 20 (0.4.1 publiée, lot 4 fini sur main, aucune VM ne tourne)
+## 3. Mac M4 : état au 03/11/2026, 13 h 07 (0.4.1 publiée, lot 4 fini sur main, aucune VM ne tourne)
+
+**TODO réorganisé (3/11, 13 h 07, demande de l'utilisateur).** `TODO.md` devient un index par hôte, au plus trois chantiers actifs par hôte, avec une fiche par chantier dans `docs/chantiers/`. Texte déplacé tel quel. Règles de travail au §1 de cette page, référence validée au §5, état de la matrice dans `docs/matrice-jeux.md` §0, table des lectures dans `docs/README.md`. Aucun fichier de `patches/` touché : l'empreinte de la série ne change pas. Rien de mesuré, aucune VM lancée.
 
 **Dérive de documentation (3/11, matin, demande de l'utilisateur).** Relecture contre le code de ce qui a bougé
 depuis le 01/11 : README, TODO, frontal, recette de publication, `patches/README`, `tcg-g4`, parité M4 ; puis
@@ -214,7 +228,7 @@ jour (ancien : `bench/prebuilt-0211/avant-modes.tar`), VM quotidienne installée
 18 h 16 (anciens binaires dans `/var/tmp/avant-0211/` de l'invité). 44 changements de mode justes,
 467 OK. **Le disque quotidien reste réglé en 1920×1080×16 par l'utilisateur** : la matrice de
 preuve y sortirait d'un autre réglage que ses références ; revenir au réglage d'origine pour la
-jouer. Matrice, A/B et DOOM 3/UT2004/cmr à ces résolutions **pas faits** (TODO, « Maintenant »).
+jouer. Matrice, A/B et DOOM 3/UT2004/cmr à ces résolutions **pas faits** (`docs/chantiers/qe-resolutions.md`).
 **Curseur en plein écran : réglé, confirmé par l'utilisateur le 02/11.**
 
 **Version 0.4 publiée le 02/11 à 20 h 10** à la demande de l'utilisateur
@@ -594,7 +608,7 @@ et preuves dans le bilan du matin ci-dessus. Kext du 02/11 et plugin
 - Les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque de
   l'invité** (16 Go) le 29/10 : les effacer après usage.
 
-**À faire sur le M4** : `TODO.md`, « Maintenant » (essai de la 0.4.1 sur le M1, preuve de QE aux
+**À faire sur le M4** : `TODO.md`, sections « Actifs » et « Geste de l'utilisateur » (essai de la 0.4.1 sur le M1, preuve de QE aux
 résolutions, plugin et coût d'un avis d'ombre actif) ; la liste venue du PC, au §4, est faite. Seulement
 si besoin : parité de **tcg/0055**
 (si les traces de second niveau reprennent, arrêtées depuis le 22/10) ; `vperm` en ligne
@@ -646,3 +660,16 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
   l'invité, la matrice et ses jeux. Un changement de `patches/qgpu/qgpu_abi.h` impose de
   reconstruire le kext et de redémarrer l'invité sur **les deux** hôtes ; un changement de
   `qgpu_proto.h` impose de reconstruire QEMU et le plugin.
+
+## 5. Référence validée
+
+Repères au 03/11 ; le détail de chaque hôte est aux §2 et §3.
+
+| Élément | État |
+|---|---|
+| Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit en dernier le 02/11 à 23 h 36, série incluant `0066/0067` et `usbhid/0002`) |
+| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059`, `0064`-`0067` compilés sur le M4, options éteintes ; zone froide arm64 disponible via `0066`. PC : reconstruire référence + rapide depuis `0066/0067` et `usbhid/0002`, puis valider le finaliseur de pools. `0060`-`0063` éteints, non nommés |
+| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre`, ceux du 02/11 à installer (`docs/etat-des-hotes.md` §2) ; M4 : kext du 02/11 et plugin `20261102-modes`, VM quotidienne depuis le 02/11 à 18 h 16 (anciens dans `/var/tmp/avant-0211/` de l'invité) |
+| Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 ; le 01/11, mb et d3 fen/pe vertes avec le nouveau bundle, cmr-pe reprise (faux reflet, `docs/re/cmr-rendu-vers-texture.md` §7), six références renouvelées et validées à l'œil dans la nuit, six preuves vertes avec `0066/0067` le 02/11 |
+| Contrôle général | PC 245 OK / 0 échec (14/10, `docs/binaire-rapide-x86.md`) ; M4 : 485 OK / 0 échec / 4 ignorés (03/11) ; `--slow` : 470 OK / 0 échec / 1 ignoré (02/11 matin), 49 scripts ShellCheck corrigés |
