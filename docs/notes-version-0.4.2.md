@@ -1,4 +1,4 @@
-POMPPC 0.4.2 adds **Linux x86-64**: a single-file AppImage that runs on Debian 11, Ubuntu 20.04 and anything newer. It's slower than on an Apple Silicon Mac, and the numbers are below. Nothing changes for macOS beyond the fixes listed here.
+POMPPC 0.4.2 adds **Linux x86-64**: a single-file AppImage that runs on Debian 11, Ubuntu 20.04 and anything newer. It's slower than on an Apple Silicon Mac, and the numbers are below. It also adds an **experimental Windows x64 package**, which nobody has yet run on a real PC: read its section before trying it. Nothing changes for macOS beyond the fixes listed here.
 
 ## What's new
 
@@ -27,6 +27,7 @@ So a demanding game runs about two to three times slower than on an M4. The goal
 | File | Contents |
 |---|---|
 | `POMPPC-0.4.2-x86_64.AppImage` | **Linux x86-64. Start here on a PC.** |
+| `POMPPC-0.4.2-windows-x64.zip` | Windows 10 1903 or newer. **Experimental**, see below. |
 | `POMPPC-0.4.2-macos-arm64.dmg` | The Mac app. Start here on a Mac. |
 | `pomppc-0.4.2-macos-arm64.tar.xz` | The same in a folder, with the launch scripts, for Terminal use |
 | `pomppc-0.4.2-guest.iso` | Guest CD only (`POMPPC_GUEST`), already in all of the above |
@@ -53,8 +54,25 @@ If your system lacks FUSE 2, run it with `--appimage-extract-and-run`.
 - The development host is Ubuntu 26.04 with an NVIDIA card. AMD and Intel drivers, other distributions and the oldest supported glibc haven't been tried.
 - **Dropping files on the window and sharing a folder aren't available on Linux yet.** Dropping a disc image works.
 
+## Windows x64 (experimental)
+
+Unzip the folder anywhere and run `POMPPC.exe`. Your disks and settings live in `%USERPROFILE%\POMPPC`. You need Windows 10 1903 or newer and an OpenGL driver for your graphics card; POMPPC never bundles one.
+
+**This package has only been built and tested by an automated machine with no graphics card, no sound and no Mac OS disk.** That machine proves that the package loads, that QEMU reaches Open Firmware with two processors, that the display reaches the front end, and that a second POMPPC is refused while one holds the disk. Everything else is unproven:
+
+- OpenGL rendering on NVIDIA, AMD and Intel drivers. If the driver is refused, POMPPC falls back to software rendering, which most games can't use.
+- Booting Tiger and the first-run assistant from start to finish.
+- Two emulated processors under the Windows scheduler, over hours.
+- Speed. Windows lacks several of the accelerations of the Linux build (native floating point, the fast clock, the near code buffer), so expect it to be slower than the Linux figures above. Nobody has measured how much.
+- Sound through DirectSound, the keyboard, the mouse, high-density screens and full screen.
+- Windows SmartScreen and antivirus software: the program isn't signed and it generates code at run time, so expect a warning at least.
+
+Not available on Windows: Tiger's web relay, USB gamepad passthrough, the startup chime, sharing a folder and dropping files on the window. What's known and what isn't: [docs/publier-windows.md](https://github.com/habib256/pomppc/blob/0.4.2/docs/publier-windows.md), in French.
+
+## Older limitations
+
 The limitations of 0.4.1 still apply: Colin McRae hasn't been retried since the resolution fix on the Mac, Warcraft III sometimes fails to reach its first scene (starting it again works), Return to Castle Wolfenstein doesn't work yet, and Core Image isn't implemented. Project docs and code comments are in French. The README and these notes are in English.
 
 ## Licenses
 
-POMPPC is GPL-3.0-or-later. Code compiled into QEMU is GPL-2.0-or-later. The Screamer device is MIT. Bundled third-party libraries are listed with their licenses in the package (`usr/share/pomppc/THIRD-PARTY-LICENSES` in the AppImage).
+POMPPC is GPL-3.0-or-later. Code compiled into QEMU is GPL-2.0-or-later. The Screamer device is MIT. Bundled third-party libraries are listed with their licenses in the package (`usr/share/pomppc/THIRD-PARTY-LICENSES` in the AppImage, `THIRD-PARTY-LICENSES` in the Windows folder).

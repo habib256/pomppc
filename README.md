@@ -304,6 +304,13 @@ The assistant also uses `curl`, `unzip` and either `zenity` or `kdialog`. Droppi
 sharing a folder aren't available on Linux yet. The recipe, in French, is in
 [docs/publier-linux.md](docs/publier-linux.md).
 
+### Windows x64 (experimental)
+
+Unzip `POMPPC-<version>-windows-x64.zip` from the Releases page anywhere and run `POMPPC.exe`, on Windows 10 1903 or newer with
+an OpenGL driver. Your data lives in `%USERPROFILE%\POMPPC`. **Nobody has run this package on a real PC yet**: it's only
+built and tested by an automated machine with no graphics card, so rendering, booting Tiger and speed are all unproven.
+What's known and what isn't, in French: [docs/publier-windows.md](docs/publier-windows.md).
+
 ## Building from source
 
 Works on macOS (Apple Silicon) and Linux x86-64. QEMU 11.1.2 is cloned from upstream and patched;
@@ -326,7 +333,8 @@ missing). `scripts/package_release_macos.sh` produces the release archive and
 `scripts/package_app_macos.sh` the app and its `.dmg`
 (`scripts/package_release_linux.sh` for a Linux x86-64 archive, not published); the full recipe is in
 [docs/publier-macos.md](docs/publier-macos.md) (in French). The Linux AppImage is built by GitHub Actions
-([docs/publier-linux.md](docs/publier-linux.md), in French).
+([docs/publier-linux.md](docs/publier-linux.md), in French), and so is the experimental Windows package
+([docs/publier-windows.md](docs/publier-windows.md), in French).
 
 On a Linux x86-64 PC, `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` also builds `~/src/qemu/build-fast/`
 (`-O3 -march=native`, LTO, PGO; about 10 % faster in DOOM 3 than the reference build at equal

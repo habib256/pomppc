@@ -20,8 +20,20 @@ find_package(PkgConfig REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
 
-# GDBus lives in gio-unix-2.0 (we pass FDs → need the Unix bits).
-pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0)
+if(WIN32)
+    # Pas de gio-unix sous Windows : les sockets passent par WSADuplicateSocketW (src/QemuBridge.cpp).
+    pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0 glib-2.0 gobject-2.0)
+    enable_language(RC)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    # Ce qui remplace bash et POSIX. Le reste du frontal y fait appel par #ifdef _WIN32.
+    set(POMPPC_WIN_SOURCES src/WinHost.cpp src/LaunchPlan.cpp)
+    set(POMPPC_WIN_LIBS ws2_32 comdlg32 shell32 ole32)
+else()
+    # GDBus lives in gio-unix-2.0 (we pass FDs → need the Unix bits).
+    pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0 gio-unix-2.0 glib-2.0 gobject-2.0)
+    set(POMPPC_WIN_SOURCES "")
+    set(POMPPC_WIN_LIBS "")
+endif()
 
 # GLFW (system, or vendored via pkg-config).
 find_package(glfw3 3.3 QUIET CONFIG)
@@ -38,18 +50,29 @@ endif()
 # qemu/tests/qtest/dbus-display-test.c.
 find_program(GDBUS_CODEGEN gdbus-codegen REQUIRED)
 set(DBUS_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/dbus-gen)
+# Le contrat est prétraité par hôte, comme dans QEMU (ui/meson.build, HOST_OS) : RegisterListener y prend
+# `h` ou `ay`, et Listener.Unix.Map devient Listener.Win32.Map. dbus-display1-win32.xml est
+# QEMU ui/dbus-display1.xml @ v11.1.2 passé par scripts/xml-preprocess.py avec HOST_OS=windows.
+if(WIN32)
+    set(DBUS_XML ${CMAKE_CURRENT_SOURCE_DIR}/dbus/dbus-display1-win32.xml)
+    # gdbus-codegen y est un script Python sans .exe : CreateProcess ne sait pas le lancer seul.
+    set(DBUS_CODEGEN_CMD ${Python3_EXECUTABLE} ${GDBUS_CODEGEN})
+else()
+    set(DBUS_XML ${CMAKE_CURRENT_SOURCE_DIR}/dbus/dbus-display1.xml)
+    set(DBUS_CODEGEN_CMD ${GDBUS_CODEGEN})
+endif()
 set(DBUS_GEN_C ${DBUS_GEN_DIR}/dbus-display1.c)
 set(DBUS_GEN_H ${DBUS_GEN_DIR}/dbus-display1.h)
 file(MAKE_DIRECTORY ${DBUS_GEN_DIR})
 add_custom_command(
     OUTPUT ${DBUS_GEN_C} ${DBUS_GEN_H}
-    COMMAND ${GDBUS_CODEGEN} ${CMAKE_CURRENT_SOURCE_DIR}/dbus/dbus-display1.xml
+    COMMAND ${DBUS_CODEGEN_CMD} ${DBUS_XML}
             --glib-min-required 2.64
             --output-directory ${DBUS_GEN_DIR}
             --interface-prefix org.qemu.
             --c-namespace QemuDBus
             --generate-c-code dbus-display1
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/dbus/dbus-display1.xml
+    DEPENDS ${DBUS_XML}
     COMMENT "gdbus-codegen: org.qemu.Display1 bindings")
 add_library(dbus_display1 STATIC ${DBUS_GEN_C})
 target_include_directories(dbus_display1 PUBLIC ${DBUS_GEN_DIR})
@@ -98,6 +121,13 @@ if(APPLE)
     target_compile_definitions(pomppc PRIVATE GL_SILENCE_DEPRECATION)
     # objc runtime: main.cpp unbinds Cocoa's Ctrl+Cmd+F "Enter Full Screen".
     target_link_libraries(pomppc PRIVATE objc)
+elseif(WIN32)
+    # POMPPC.exe : la fenêtre seule, sans console ; manifeste UTF-8 (src/WinHost.h). Pas de carillon :
+    # StartupChime.cpp garde son talon, qui le dit, et l'invité a son propre son.
+    set_target_properties(pomppc PROPERTIES WIN32_EXECUTABLE ON OUTPUT_NAME POMPPC)
+    target_sources(pomppc PRIVATE src/pomppc.rc ${POMPPC_WIN_SOURCES})
+    target_compile_definitions(pomppc PRIVATE POMPPC_VERSION_TEXT="${PROJECT_VERSION}")
+    target_link_libraries(pomppc PRIVATE ${POMPPC_WIN_LIBS})
 else()
     # Linux: the chime through PulseAudio (PipeWire's pulse server too); without
     # libpulse-simple the frontend keeps the stub, which plays nothing and says so.
@@ -120,6 +150,14 @@ target_link_libraries(pomppc PRIVATE
 
 # ─── Headless verification probe (no GLFW/X) ─────────────────────────────
 include(CTest)
+if(WIN32 OR BUILD_TESTING)
+    # La ligne de QEMU du paquet Windows : se teste sur tous les hôtes, sans QEMU ni Windows.
+    add_executable(launchplan_test tests/launchplan_test.cpp src/LaunchPlan.cpp)
+    target_include_directories(launchplan_test PRIVATE src)
+    target_compile_options(launchplan_test PRIVATE -UNDEBUG)
+    add_test(NAME launch_plan COMMAND launchplan_test)
+endif()
+# Sous Windows : -DBUILD_TESTING=OFF en CI (ces tests lancent bash, sh, cp).
 if(BUILD_TESTING)
     add_executable(pointer_test tests/pointer_test.cpp)
     target_include_directories(pointer_test PRIVATE src)
@@ -154,7 +192,7 @@ if(BUILD_TESTING)
     add_test(NAME frontend_settings COMMAND settings_test)
 endif()
 
-add_executable(bridge_probe tests/bridge_probe.cpp src/QemuBridge.cpp)
+add_executable(bridge_probe tests/bridge_probe.cpp src/QemuBridge.cpp ${POMPPC_WIN_SOURCES})
 target_include_directories(bridge_probe PRIVATE src)
 target_link_libraries(bridge_probe PRIVATE
-    dbus_display1 PkgConfig::GIO Threads::Threads ${CMAKE_DL_LIBS})
+    dbus_display1 PkgConfig::GIO Threads::Threads ${CMAKE_DL_LIBS} ${POMPPC_WIN_LIBS})

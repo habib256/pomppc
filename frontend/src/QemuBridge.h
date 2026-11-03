@@ -38,6 +38,7 @@ public:
         std::string launcher;               // run script, e.g. ".../run_tiger.sh"
         std::vector<std::string> env;       // extra "KEY=VAL" for the launcher
         std::string runtimeDir;             // where the QMP socket lives
+        std::string packageRoot;            // Windows : les .exe, share/qemu (LaunchPlan) ; ailleurs vide
     };
 
     QemuBridge();
@@ -122,6 +123,9 @@ public:
     void mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
                     uint32_t stride, uint32_t pixmanFormat);
     void mapUpdate(int x, int y, int w, int h);
+    // Windows : le même chemin, par un handle de section (Listener.Win32.Map) déjà dans ce processus.
+    void mapScanoutHandle(uint64_t handle, uint32_t offset, uint32_t w, uint32_t h,
+                          uint32_t stride, uint32_t pixmanFormat);
     // Inline Scanout/Update: keep the GVariant alive and let latchFrame copy.
     // `variant` is a GVariant* (glib stays out of this header).
     void queueInline(bool scanout, int x, int y, int w, int h,

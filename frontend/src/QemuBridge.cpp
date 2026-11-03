@@ -2,8 +2,21 @@
 /* Copyright (c) 2026 VERHILLE Arnaud */
 #include "QemuBridge.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <winsock2.h>
+#include <windows.h>
+#include <afunix.h>
+#include <filesystem>
+#include "LaunchPlan.h"
+#include "WinHost.h"
+#endif
+
 #include <gio/gio.h>
+#ifndef _WIN32
 #include <gio/gunixfdlist.h>
+#endif
 
 #if defined(__APPLE__)
 #include <pthread/qos.h>
@@ -15,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#ifndef _WIN32
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/mman.h>
@@ -26,12 +40,30 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <unistd.h>
+#endif
 
 extern "C" {
 #include "dbus-display1.h"
 }
 
+#ifndef _WIN32
 extern char** environ;
+#endif
+
+// Un socket se ferme et se lit par read/close sous POSIX, par recv/closesocket sous Windows. Sous
+// Windows il tient dans un int : [B] MSDN, « Interprocess Communications » (handles de 32 bits utiles en
+// 64 bits) ; [D] QEMU ui/dbus-console.c:237 @ v11.1.2 fait de même pour g_socket_new_from_fd.
+namespace {
+#ifdef _WIN32
+inline void closeSock(int s) { closesocket((SOCKET)(intptr_t)s); }
+inline long readSock(int s, char* buf, size_t n) { return recv((SOCKET)(intptr_t)s, buf, (int)n, 0); }
+inline long writeSock(int s, const char* buf, size_t n) { return send((SOCKET)(intptr_t)s, buf, (int)n, 0); }
+#else
+inline void closeSock(int s) { close(s); }
+inline long readSock(int s, char* buf, size_t n) { return read(s, buf, n); }
+inline long writeSock(int s, const char* buf, size_t n) { return write(s, buf, n); }
+#endif
+}  // namespace
 
 // ─── GLib/GDBus state (kept out of the header) ───────────────────────────
 struct QemuBridge::Impl {
@@ -54,7 +86,14 @@ struct QemuBridge::Impl {
 
     GDBusObjectManagerServer* server = nullptr;
     QemuDBusDisplay1Listener* listenerIface = nullptr;
+#ifdef _WIN32
+    QemuDBusDisplay1ListenerWin32Map* mapIface = nullptr;
+    winhost::Child child;            // QEMU ; ni bash ni waitpid ici
+    void* instanceLock = nullptr;    // .run/tiger.lock, tenu pendant toute la vie de QEMU
+    int listenerPeerSock = -1;       // l'autre bout, gardé jusqu'à ce que QEMU ait importé le sien
+#else
     QemuDBusDisplay1ListenerUnixMap* mapIface = nullptr;
+#endif
 
     // Unix.Map shared-memory scanout. The last latch keeps the previous
     // mapping alive (shared_ptr) so a new ScanoutMap can munmap without
@@ -65,7 +104,11 @@ struct QemuBridge::Impl {
         const uint8_t* data = nullptr;
         uint32_t w = 0, h = 0, stride = 0;
         ~MappedSurface() {
+#ifdef _WIN32
+            if (addr) UnmapViewOfFile(addr);
+#else
             if (addr) munmap(addr, len);
+#endif
         }
     };
     std::shared_ptr<MappedSurface> mapped;
@@ -86,7 +129,9 @@ struct QemuBridge::Impl {
     std::atomic<bool> quitRequested{false};
 
     // Listener-registration handshake bookkeeping.
+#ifndef _WIN32
     GUnixFDList* regFdList = nullptr;
+#endif
     int listenerLocalFd = -1;        // our end of the listener socket
 };
 
@@ -106,7 +151,7 @@ bool qmpReadLine(int fd, std::string& buf, std::string& line) {
             return true;
         }
         char tmp[4096];
-        ssize_t n = read(fd, tmp, sizeof tmp);
+        long n = readSock(fd, tmp, sizeof tmp);
         if (n <= 0) return false;
         buf.append(tmp, n);
     }
@@ -159,9 +204,50 @@ bool qmpWaitId(int fd, std::string& buf, const std::string& idTag, bool* fatal,
 
 bool qmpSend(int fd, const std::string& json) {
     std::string line = json + "\n";
-    return write(fd, line.data(), line.size()) == (ssize_t)line.size();
+    return writeSock(fd, line.data(), line.size()) == (long)line.size();
 }
 
+#ifdef _WIN32
+// Une paire AF_UNIX, seule famille où QEMU retrouve notre PID et peut nous passer sa surface
+// (dbus_display_listener_setup_peer_process exige G_IS_UNIX_CONNECTION).
+// [D] QEMU util/oslib-win32.c:337-440 @ v11.1.2 (qemu_socketpair) : même suite d'appels, dont le connect
+// non bloquant, qui se termine une fois accept passé. Windows 10 1809 et plus.
+bool winSocketPair(int sv[2]) {
+    static long serial = 0;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const std::string path = winhost::tempDir() + "/pomppc-" + std::to_string((unsigned long)GetCurrentProcessId()) +
+                             "-" + std::to_string(InterlockedIncrement(&serial)) + ".sock";
+    if (path.size() >= sizeof addr.sun_path) return false;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof addr.sun_path - 1);
+    SOCKET listener = socket(AF_UNIX, SOCK_STREAM, 0), client = INVALID_SOCKET, server = INVALID_SOCKET;
+    u_long arg = 1;
+    bool ok = false;
+    if (listener != INVALID_SOCKET && bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0 &&
+        listen(listener, 1) == 0) {
+        client = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (client != INVALID_SOCKET && ioctlsocket(client, FIONBIO, &arg) == 0 &&
+            (connect(client, reinterpret_cast<sockaddr*>(&addr), sizeof addr) == 0 ||
+             WSAGetLastError() == WSAEWOULDBLOCK)) {
+            server = accept(listener, nullptr, nullptr);
+            arg = 0;
+            ok = server != INVALID_SOCKET && ioctlsocket(client, FIONBIO, &arg) == 0;
+        }
+    }
+    if (listener != INVALID_SOCKET) closesocket(listener);
+    DeleteFileW(winhost::wide(path).c_str());
+    if (!ok) {
+        if (client != INVALID_SOCKET) closesocket(client);
+        if (server != INVALID_SOCKET) closesocket(server);
+        return false;
+    }
+    sv[0] = (int)server;
+    sv[1] = (int)client;
+    return true;
+}
+#endif
+
+#ifndef _WIN32
 // Send a QMP command carrying one file descriptor via SCM_RIGHTS (getfd).
 bool qmpSendWithFd(int fd, const std::string& json, int passfd) {
     std::string line = json + "\n";
@@ -204,6 +290,20 @@ int connectUnix(const std::string& path) {
     }
     return fd;
 }
+#else
+int connectUnix(const std::string& path) {
+    SOCKET fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd == INVALID_SOCKET) return -1;
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) {
+        closesocket(fd);
+        return -1;
+    }
+    return (int)fd;
+}
+#endif
 
 // {"QMP": {"version": {"qemu": {"micro": 2, "minor": 1, "major": 11}, ...}}}
 // → "11.1.2" ; vide si l'accueil n'a pas cette forme.
@@ -245,6 +345,23 @@ static gboolean on_update(QemuDBusDisplay1Listener* obj,
     return G_DBUS_METHOD_INVOCATION_HANDLED;
 }
 
+#ifdef _WIN32
+// Win32.Map : le pendant d'Unix.Map. QEMU a dupliqué la section dans ce processus (DuplicateHandle) et
+// nous en passe la valeur. [D] QEMU ui/dbus-listener.c:417-468 @ v11.1.2.
+static gboolean on_scanout_map(QemuDBusDisplay1ListenerWin32Map* obj, GDBusMethodInvocation* inv,
+                               guint64 handle, guint offset, guint width, guint height, guint stride,
+                               guint pixman_format, gpointer user_data) {
+    static_cast<QemuBridge*>(user_data)->mapScanoutHandle(handle, offset, width, height, stride, pixman_format);
+    qemu_dbus_display1_listener_win32_map_complete_scanout_map(obj, inv);
+    return G_DBUS_METHOD_INVOCATION_HANDLED;
+}
+static gboolean on_update_map(QemuDBusDisplay1ListenerWin32Map* obj, GDBusMethodInvocation* inv, gint x, gint y,
+                              gint w, gint h, gpointer user_data) {
+    static_cast<QemuBridge*>(user_data)->mapUpdate(x, y, w, h);
+    qemu_dbus_display1_listener_win32_map_complete_update_map(obj, inv);
+    return G_DBUS_METHOD_INVOCATION_HANDLED;
+}
+#else
 // Unix.Map fast path: QEMU passes a shared-memory fd (ScanoutMap), then only
 // tells us which region changed (UpdateMap) — no pixels cross the bus.
 static gboolean on_scanout_map(QemuDBusDisplay1ListenerUnixMap* obj,
@@ -274,6 +391,7 @@ static gboolean on_update_map(QemuDBusDisplay1ListenerUnixMap* obj,
     qemu_dbus_display1_listener_unix_map_complete_update_map(obj, inv);
     return G_DBUS_METHOD_INVOCATION_HANDLED;
 }
+#endif
 
 // Stubs so QEMU's fire-and-forget calls don't return D-Bus errors.
 static gboolean on_disable(QemuDBusDisplay1Listener* o,
@@ -326,8 +444,15 @@ static void on_listener_registered(GObject* src, GAsyncResult* res,
     auto* self = static_cast<QemuBridge*>(user_data);
     QemuBridge::Impl* impl = self->impl();
     GError* err = nullptr;
+#ifdef _WIN32
+    qemu_dbus_display1_console_call_register_listener_finish(
+        QEMU_DBUS_DISPLAY1_CONSOLE(src), res, &err);
+    // QEMU a importé son bout, ou ne le fera plus.
+    if (impl->listenerPeerSock >= 0) { closeSock(impl->listenerPeerSock); impl->listenerPeerSock = -1; }
+#else
     qemu_dbus_display1_console_call_register_listener_finish(
         QEMU_DBUS_DISPLAY1_CONSOLE(src), nullptr, res, &err);
+#endif
     if (err) {
         std::fprintf(stderr, "RegisterListener failed: %s\n", err->message);
         g_clear_error(&err);
@@ -338,7 +463,9 @@ static void on_listener_registered(GObject* src, GAsyncResult* res,
     // call) — build our client end on this (D-Bus) thread.
     impl->listenerConn = p2p_client_from_fd(impl->listenerLocalFd);
     impl->listenerLocalFd = -1;  // now owned by the GSocket/connection
+#ifndef _WIN32
     if (impl->regFdList) { g_object_unref(impl->regFdList); impl->regFdList = nullptr; }
+#endif
     if (!impl->listenerConn) return;
 
     // Export the Listener object; QEMU pushes Scanout/Update onto it.
@@ -352,7 +479,11 @@ static void on_listener_registered(GObject* src, GAsyncResult* res,
     // if the surface has no share handle QEMU silently falls back to inline
     // Scanout/Update, which we also handle.
     {
+#ifdef _WIN32
+        const gchar* ifaces[] = {"org.qemu.Display1.Listener.Win32.Map", nullptr};
+#else
         const gchar* ifaces[] = {"org.qemu.Display1.Listener.Unix.Map", nullptr};
+#endif
         g_object_set(impl->listenerIface, "interfaces", ifaces, nullptr);
     }
     g_signal_connect(impl->listenerIface, "handle-scanout",
@@ -369,7 +500,11 @@ static void on_listener_registered(GObject* src, GAsyncResult* res,
         obj, G_DBUS_INTERFACE_SKELETON(impl->listenerIface));
 
     // Unix.Map interface on the same object.
+#ifdef _WIN32
+    impl->mapIface = qemu_dbus_display1_listener_win32_map_skeleton_new();
+#else
     impl->mapIface = qemu_dbus_display1_listener_unix_map_skeleton_new();
+#endif
     g_signal_connect(impl->mapIface, "handle-scanout-map",
                      G_CALLBACK(on_scanout_map), self);
     g_signal_connect(impl->mapIface, "handle-update-map",
@@ -474,8 +609,57 @@ static gpointer bridge_thread_trampoline(gpointer p) {
     return nullptr;
 }
 
+#ifdef _WIN32
+// Pas de bash, donc pas de run_tiger.sh : LaunchPlan écrit la ligne, ce fil lance QEMU et tient le verrou.
+static bool launchWindows(const QemuBridge::Config& cfg, QemuBridge::Impl* d, std::string* qmpPath, std::string* err) {
+    namespace fs = std::filesystem;
+    std::string dir = winhost::qemuPath(cfg.runtimeDir);
+    const std::string name = "/qmp-" + std::to_string((unsigned long)GetCurrentProcessId()) + ".sock";
+    if (dir.empty() || dir.size() + name.size() >= sizeof(sockaddr_un{}.sun_path)) dir = winhost::tempDir();
+    *qmpPath = dir + name;
+    if (dir.empty() || qmpPath->size() >= sizeof(sockaddr_un{}.sun_path)) {
+        if (err) *err = "POMPPC can't place QEMU's control socket: " + *qmpPath;
+        return false;
+    }
+    DeleteFileW(winhost::wide(*qmpPath).c_str());   // celui d'un frontal mort sous le même PID
+
+    LaunchInput in;
+    in.packageRoot = cfg.packageRoot;
+    in.dataRoot = fs::u8path(cfg.runtimeDir).parent_path().u8string();
+    in.qmpPath = *qmpPath;
+    in.tiger = cfg.launcher.find("run_tiger") != std::string::npos;
+    std::vector<std::string> vars = cfg.env;
+    const LaunchPlan plan = buildLaunchPlan(in, winhost::launchHost(vars));
+    if (!plan.ok) {
+        if (err) *err = plan.error;
+        return false;
+    }
+    // AVANT QEMU, et jusqu'après sa fin. [D] block/file-win32.c:331-335,365 @ v11.1.2 : QEMU ne verrouille
+    // rien ici, et ouvre l'image en partage.
+    if (!plan.lockFile.empty()) {
+        d->instanceLock = winhost::lockInstance(plan.lockFile);
+        if (!d->instanceLock) {
+            if (err) *err = "POMPPC is already running on this system. Close it first.";
+            return false;
+        }
+    }
+    vars.insert(vars.end(), plan.childEnv.begin(), plan.childEnv.end());
+    if (!winhost::spawnQemu(plan.exe, plan.args, vars, cfg.runtimeDir + "/qemu.log", &d->child, err)) {
+        winhost::unlockInstance(d->instanceLock);
+        d->instanceLock = nullptr;
+        return false;
+    }
+    return true;
+}
+#endif
+
 bool QemuBridge::start(const Config& cfg, std::string* err) {
     cfg_ = cfg;
+#ifdef _WIN32
+    std::string qmpPath;
+    if (!launchWindows(cfg, impl_, &qmpPath, err)) return false;
+    qemuPid_ = (long)impl_->child.pid;
+#else
     // Un socket par frontend : deux ImGuiDock lancés depuis le même dépôt
     // (Tiger et une VM jetable, par exemple) partageaient .run/qmp.sock, que
     // chaque lancement supprimait sous l'autre. QEMU l'efface en sortant.
@@ -521,6 +705,7 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
         return false;
     }
     qemuPid_ = pid;
+#endif
 
     // ── 2. Connect to the QMP socket (QEMU creates it asynchronously).
     int qmp = -1;
@@ -528,6 +713,15 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
         qmp = connectUnix(qmpPath);
         if (qmp >= 0) break;
         // QEMU déjà sorti (disque illisible ou déjà utilisé) : inutile d'attendre les 10 s.
+#ifdef _WIN32
+        if (WaitForSingleObject(impl_->child.process, 50) == WAIT_OBJECT_0) {
+            qemuReaped_ = true;
+            if (err) *err = "It may be using a damaged disk, or another POMPPC may be using this disk. "
+                            "QEMU's messages are in .run/qemu.log.";
+            stop();
+            return false;
+        }
+#else
         int status = 0;
         if (waitpid(pid, &status, WNOHANG) == pid) {
             qemuReaped_ = true;
@@ -536,6 +730,7 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
             return false;
         }
         usleep(50 * 1000);
+#endif
     }
     if (qmp < 0) {
         if (err) *err = "could not connect to QMP socket " + qmpPath;
@@ -550,12 +745,36 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
     if (!qmpSend(qmp, "{\"execute\":\"qmp_capabilities\"}") ||
         !qmpWaitReturn(qmp, buf)) {
         if (err) *err = "qmp_capabilities failed";
-        close(qmp); stop(); return false;
+        closeSock(qmp); stop(); return false;
     }
 
     // ── 3. socketpair → give one end to QEMU (add_client), keep the other as
     //       our p2p bus. QEMU authenticates as SERVER on its end.
     int sv[2];
+#ifdef _WIN32
+    // Pas de SCM_RIGHTS : on duplique pour QEMU, et QMP lui passe la description (getfd n'existe pas ici).
+    // [D] QEMU tests/qtest/libqtest.c:1939-1952 @ v11.1.2 (qtest_qmp_add_client).
+    if (!winSocketPair(sv)) {
+        if (err) *err = "POMPPC couldn't create a local socket (Windows 10 1809 or newer is required).";
+        closeSock(qmp); stop(); return false;
+    }
+    {
+        WSAPROTOCOL_INFOW info;
+        bool passed = false;
+        if (WSADuplicateSocketW((SOCKET)(intptr_t)sv[1], impl_->child.pid, &info) == 0) {
+            gchar* b64 = g_base64_encode(reinterpret_cast<const guchar*>(&info), sizeof info);
+            passed = qmpSend(qmp, std::string("{\"execute\":\"get-win32-socket\",\"arguments\":{\"info\":\"") + b64 +
+                                      "\",\"fdname\":\"pomfd\"}}") &&
+                     qmpWaitReturn(qmp, buf);
+            g_free(b64);
+        }
+        closeSock(sv[1]);   // QEMU a importé le sien, ou ne le fera pas
+        if (!passed) {
+            if (err) *err = "QMP get-win32-socket failed";
+            closeSock(sv[0]); closeSock(qmp); stop(); return false;
+        }
+    }
+#else
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
         if (err) *err = std::string("socketpair: ") + strerror(errno);
         close(qmp); stop(); return false;
@@ -569,19 +788,26 @@ bool QemuBridge::start(const Config& cfg, std::string* err) {
         close(sv[0]); close(sv[1]); close(qmp); stop(); return false;
     }
     close(sv[1]);  // QEMU dup'd it
+#endif
     if (!qmpSend(qmp, "{\"execute\":\"add_client\",\"arguments\":"
                       "{\"protocol\":\"@dbus-display\",\"fdname\":\"pomfd\"}}") ||
         !qmpWaitReturn(qmp, buf)) {
         if (err) *err = "QMP add_client @dbus-display failed";
-        close(sv[0]); close(qmp); stop(); return false;
+        closeSock(sv[0]); closeSock(qmp); stop(); return false;
     }
     // Keep the QMP channel for machine control (reset, pause, CD…). Bound the
     // reads so a wedged QEMU can't hang the UI thread. 10 s plutôt que 3 :
     // toutes ces commandes sont rapides sauf un changement de médium sur disque
     // lent, et un timeout coûte désormais le canal de contrôle entier (voir
     // qmpCommand) — autant ne l'atteindre que pour un QEMU réellement bloqué.
+#ifdef _WIN32
+    const DWORD readTimeoutMs = 10000;   // [B] MSDN, SO_RCVTIMEO : un DWORD en ms, pas un timeval
+    setsockopt((SOCKET)(intptr_t)qmp, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&readTimeoutMs),
+               sizeof readTimeoutMs);
+#else
     struct timeval tv { 10, 0 };
     setsockopt(qmp, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
     qmpFd_ = qmp;
     qmpBuf_ = buf;  // carry over any bytes already read past the add_client reply
 
@@ -628,15 +854,20 @@ void QemuBridge::teardownGlib() {
     g_clear_object(&d->console);
     g_clear_object(&d->keyboard);
     g_clear_object(&d->mouse);
+#ifndef _WIN32
     g_clear_object(&d->regFdList);
+#endif
     for (GDBusConnection** c : {&d->listenerConn, &d->mainConn}) {
         if (!*c) continue;
         g_dbus_connection_close_sync(*c, nullptr, nullptr);
         g_clear_object(c);
     }
-    if (d->listenerLocalFd >= 0) { close(d->listenerLocalFd); d->listenerLocalFd = -1; }
+    if (d->listenerLocalFd >= 0) { closeSock(d->listenerLocalFd); d->listenerLocalFd = -1; }
+#ifdef _WIN32
+    if (d->listenerPeerSock >= 0) { closeSock(d->listenerPeerSock); d->listenerPeerSock = -1; }
+#endif
     // mainFd appartient au GSocket dès que g_socket_new_from_fd a réussi.
-    if (d->mainFd >= 0) { close(d->mainFd); d->mainFd = -1; }
+    if (d->mainFd >= 0) { closeSock(d->mainFd); d->mainFd = -1; }
 }
 
 bool QemuBridge::setupGlib() {
@@ -723,6 +954,29 @@ bool QemuBridge::setupGlib() {
 
     // Register our display listener (second socketpair; QEMU = auth server).
     int lp[2];
+#ifdef _WIN32
+    // [D] QEMU tests/qtest/dbus-display-test.c:269-296 @ v11.1.2 : le contrat windows passe la description
+    // du socket en octets (`ay`), sans liste de descripteurs.
+    if (!winSocketPair(lp)) {
+        std::fprintf(stderr, "listener socketpair failed\n");
+        return false;
+    }
+    {
+        WSAPROTOCOL_INFOW info;
+        if (WSADuplicateSocketW((SOCKET)(intptr_t)lp[1], d->child.pid, &info) != 0) {
+            std::fprintf(stderr, "listener WSADuplicateSocketW: %d\n", WSAGetLastError());
+            closeSock(lp[0]);
+            closeSock(lp[1]);
+            return false;
+        }
+        d->listenerLocalFd = lp[0];
+        d->listenerPeerSock = lp[1];
+        qemu_dbus_display1_console_call_register_listener(
+            d->console, g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, &info, sizeof info, 1),
+            G_DBUS_CALL_FLAGS_NONE, -1, nullptr, on_listener_registered, this);
+    }
+    return true;
+#else
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, lp) != 0) {
         std::fprintf(stderr, "listener socketpair: %s\n", strerror(errno));
         return false;
@@ -739,11 +993,17 @@ bool QemuBridge::setupGlib() {
         d->console, g_variant_new_handle(handle), G_DBUS_CALL_FLAGS_NONE, -1,
         d->regFdList, nullptr, on_listener_registered, this);
     return true;
+#endif
 }
 
 void QemuBridge::stop() {
     running_.store(false, std::memory_order_relaxed);
-    if (qmpFd_ >= 0) { close(qmpFd_); qmpFd_ = -1; }
+#ifdef _WIN32
+    // Pas de SIGTERM ici : QMP demande à QEMU de sortir proprement (le qcow2 refermé, son drapeau de
+    // sale levé). Si le canal est perdu, stopQemu finit par TerminateProcess.
+    if (qmpFd_ >= 0 && impl_ && impl_->child.process && !qemuReaped_) qmpCommand("{\"execute\":\"quit\"}");
+#endif
+    if (qmpFd_ >= 0) { closeSock(qmpFd_); qmpFd_ = -1; }
     // Quitter la boucle de façon fiable : le drapeau couvre un fil pas encore
     // entré dans g_main_loop_run, la source un fil qui y est (ou y entre).
     // Pas g_main_context_invoke : si personne ne tient encore le contexte, il
@@ -772,11 +1032,28 @@ void QemuBridge::stop() {
         impl_->mapped.reset();
         if (impl_->loop) { g_main_loop_unref(impl_->loop); impl_->loop = nullptr; }
         if (impl_->ctx) { g_main_context_unref(impl_->ctx); impl_->ctx = nullptr; }
-        if (impl_->mainFd >= 0) { close(impl_->mainFd); impl_->mainFd = -1; }
+        if (impl_->mainFd >= 0) { closeSock(impl_->mainFd); impl_->mainFd = -1; }
     }
 }
 
 void QemuBridge::stopQemu() {
+#ifdef _WIN32
+    winhost::Child& child = impl_->child;
+    if (child.process) {
+        // 10 s : l'écriture finale du qcow2 sur un disque lent, comparée à perdre ce qui reste à écrire.
+        if (WaitForSingleObject(child.process, 10000) != WAIT_OBJECT_0) {
+            TerminateProcess(child.process, 1);
+            WaitForSingleObject(child.process, 5000);
+        }
+        CloseHandle(child.process);
+        child.process = nullptr;
+    }
+    if (child.job) { CloseHandle(child.job); child.job = nullptr; }
+    child.pid = 0;
+    // QEMU parti, et pas avant. Le fichier reste : c'est le handle qui fait le verrou.
+    winhost::unlockInstance(impl_->instanceLock);
+    impl_->instanceLock = nullptr;
+#else
     if (qemuPid_ > 0 && !qemuReaped_) {
         kill(qemuPid_, SIGTERM);
         bool reaped = false;
@@ -793,16 +1070,28 @@ void QemuBridge::stopQemu() {
             waitpid(qemuPid_, nullptr, 0);
         }
     }
+#endif
     qemuPid_ = -1;
     qemuReaped_ = false;
 }
 
 bool QemuBridge::checkAlive() {
     if (qemuPid_ <= 0 || qemuReaped_) return false;
+#ifdef _WIN32
+    if (WaitForSingleObject(impl_->child.process, 0) == WAIT_OBJECT_0) {
+        DWORD code = 1;
+        GetExitCodeProcess(impl_->child.process, &code);
+        qemuReaped_ = true;
+        exitedCleanly_ = code == 0;
+        // Le disque est libre dès maintenant, pas seulement à la prochaine relance.
+        winhost::unlockInstance(impl_->instanceLock);
+        impl_->instanceLock = nullptr;
+#else
     int status = 0;
     if (waitpid(qemuPid_, &status, WNOHANG) == qemuPid_) {
         qemuReaped_ = true;
         exitedCleanly_ = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
         running_.store(false, std::memory_order_relaxed);
         std::fprintf(stderr, "QemuBridge: QEMU (pid %ld) exited\n", qemuPid_);
         return false;
@@ -943,6 +1232,48 @@ void QemuBridge::ingestUpdate(int x, int y, int w, int h, uint32_t stride,
     ingestUpdateLocked(x, y, w, h, stride, data, len);
 }
 
+#ifdef _WIN32
+// ── Win32.Map (fil D-Bus) ─────────────────────────────────────────────────
+void QemuBridge::mapScanoutHandle(uint64_t handle, uint32_t offset, uint32_t w, uint32_t h,
+                                  uint32_t stride, uint32_t pixmanFormat) {
+    static bool once = false;
+    if (!once) {
+        std::fprintf(stderr, "QemuBridge: ScanoutMap (Win32.Map) %ux%u stride=%u off=%u fmt=0x%x\n", w, h, stride,
+                     offset, pixmanFormat);
+        once = true;
+    }
+    HANDLE section = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(handle));
+    if (w == 0 || h == 0 || stride < w * 4) { CloseHandle(section); return; }
+    // [B] MSDN, MapViewOfFile : le décalage est un multiple de la granularité d'allocation (64 Kio).
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const uint64_t aoff = (uint64_t)offset & ~(uint64_t)(si.dwAllocationGranularity - 1);
+    const size_t extra = (size_t)(offset - aoff);
+    const size_t maplen = (size_t)h * stride + extra;
+    void* base = MapViewOfFile(section, FILE_MAP_READ, (DWORD)(aoff >> 32), (DWORD)aoff, maplen);
+    const DWORD mapError = GetLastError();
+    CloseHandle(section);    // la vue garde la section vivante
+    if (!base) {
+        std::fprintf(stderr, "ScanoutMap MapViewOfFile failed: %lu\n", mapError);
+        return;
+    }
+    auto hold = std::make_shared<Impl::MappedSurface>();
+    hold->addr = base;
+    hold->len = maplen;
+    hold->data = static_cast<const uint8_t*>(base) + extra;
+    hold->w = w;
+    hold->h = h;
+    hold->stride = stride;
+    std::lock_guard<std::mutex> lk(fbMtx_);
+    impl_->mapped = std::move(hold);
+    mapResize_ = true;
+    mapDirty_ = true;
+    mapY0_ = 0;
+    mapY1_ = (int)h;
+}
+#else
+void QemuBridge::mapScanoutHandle(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+
 // ── Unix.Map fast path (D-Bus thread) ────────────────────────────────────
 void QemuBridge::mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
                             uint32_t stride, uint32_t pixmanFormat) {
@@ -985,6 +1316,7 @@ void QemuBridge::mapScanout(int fd, uint32_t offset, uint32_t w, uint32_t h,
     mapY0_ = 0;
     mapY1_ = (int)h;
 }
+#endif
 
 void QemuBridge::mapUpdate(int x, int y, int w, int h) {
     std::lock_guard<std::mutex> lk(fbMtx_);
@@ -1189,7 +1521,7 @@ bool QemuBridge::qmpCommand(const std::string& json, std::string* reply) {
         // A read timeout leaves half a line in qmpBuf_; every later command
         // would then parse garbage. Drop the channel instead of limping on.
         std::fprintf(stderr, "QemuBridge: QMP channel lost, control disabled\n");
-        close(qmpFd_);
+        closeSock(qmpFd_);
         qmpFd_ = -1;
         qmpBuf_.clear();
     }

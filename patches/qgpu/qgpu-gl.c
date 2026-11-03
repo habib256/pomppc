@@ -7,7 +7,10 @@
  * Contexte hors écran :
  *   - macOS : CGL (OpenGL.framework, profil legacy 2.1 — déprécié mais présent,
  *             Metal derrière) ;
- *   - Linux : EGL + pbuffer 1x1 (Mesa, NVIDIA, ANGLE/Zink vers Vulkan…).
+ *   - Linux : EGL + pbuffer 1x1 (Mesa, NVIDIA, ANGLE/Zink vers Vulkan…) ;
+ *   - Windows : WGL sur une fenêtre cachée 1x1 (profil de compatibilité 3.2 ; ANGLE écarté, il
+ *     n'a pas le pipeline fixe). [F] Jamais exécuté sur un vrai GPU à l'écriture : tranché par un
+ *     jeu sur NVIDIA, AMD et Intel (docs/publier-windows.md §5).
  * Chaque surface qgpu est un FBO + texture RGBA8. Les coordonnées invité
  * (origine en haut à gauche) sont projetées par glOrtho(0, w, 0, h) : la ligne
  * 0 de la surface est la ligne 0 de la texture, donc glReadPixels rend les
@@ -34,19 +37,35 @@
 
 #if defined(__APPLE__)
 #  define QGPU_GL_CGL 1
+#elif defined(_WIN32)
+#  define QGPU_GL_WGL 1
 #elif defined(__has_include)
 #  if __has_include(<EGL/egl.h>) && __has_include(<GL/gl.h>)
 #    define QGPU_GL_EGL 1
 #  endif
 #endif
 
-#if defined(QGPU_GL_CGL) || defined(QGPU_GL_EGL)
+#if defined(QGPU_GL_CGL) || defined(QGPU_GL_EGL) || defined(QGPU_GL_WGL)
 
 #ifdef QGPU_GL_CGL
 #  define GL_SILENCE_DEPRECATION 1
 #  include <OpenGL/OpenGL.h>
 #  include <OpenGL/gl.h>
 #  include <OpenGL/glext.h>
+#elif defined(QGPU_GL_WGL)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN 1
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX 1
+#  endif
+#  include <windows.h>
+#  undef near
+#  undef far
+/* opengl32.dll n'exporte que GL 1.1 : pas de GL_GLEXT_PROTOTYPES ici. Tout le reste de ce fichier
+   passe par gl_proc, sauf glWindowPos2i, résolu sur place. */
+#  include <GL/gl.h>
+#  include <GL/glext.h>
 #else
 #  define GL_GLEXT_PROTOTYPES 1
 #  include <EGL/egl.h>
@@ -57,6 +76,11 @@
 typedef struct GlState {
 #ifdef QGPU_GL_CGL
     CGLContextObj ctx;
+#elif defined(QGPU_GL_WGL)
+    HWND hwnd;
+    HDC hdc;
+    HGLRC ctx;
+    HANDLE pump;                 /* le fil qui possède hwnd et vide sa file */
 #else
     EGLDisplay dpy;
     EGLSurface surf;
@@ -425,15 +449,168 @@ static void *gl_proc(const char *name)
         h = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", 2);
     }
     return h ? dlsym(h, name) : NULL;
+#elif defined(QGPU_GL_WGL)
+    /* [B] Khronos, OpenGL Wiki « Load OpenGL Functions » : wglGetProcAddress ne rend pas les
+       fonctions de GL 1.1, et certains pilotes rendent alors 1, 2, 3 ou -1 au lieu de NULL. */
+    {
+        static HMODULE h;
+        void *p = (void *)wglGetProcAddress(name);
+        if (p && p != (void *)1 && p != (void *)2 && p != (void *)3 && p != (void *)-1) {
+            return p;
+        }
+        if (!h) {
+            h = LoadLibraryA("opengl32.dll");
+        }
+        return h ? (void *)GetProcAddress(h, name) : NULL;
+    }
 #else
     return (void *)eglGetProcAddress(name);
 #endif
 }
 
+#ifdef QGPU_GL_WGL
+/*
+ * La fenêtre cachée a son propre fil, qui ne fait que vider sa file. Sans lui, personne ne lit les
+ * messages de cette fenêtre de premier niveau, et un SendMessage(HWND_BROADCAST…) d'une autre
+ * application (changement de réglages, DDE) resterait bloqué aussi longtemps que QEMU tourne.
+ * [B] MSDN, Win32 « About Messages and Message Queues ». HWND_MESSAGE éviterait le diffusé, mais
+ * [F] rien ne garantit qu'un pilote GL y accepte un format de pixel. Tranché par : un essai sur
+ * chaque pilote, pas fait.
+ */
+typedef struct WglWindow {
+    HWND hwnd;
+    HDC hdc;
+    HANDLE ready;
+} WglWindow;
+
+static DWORD WINAPI gl_wgl_pump(LPVOID arg)
+{
+    WglWindow *w = arg;
+    HINSTANCE inst = GetModuleHandleA(NULL);
+    WNDCLASSA wc;
+    MSG msg;
+    HWND hwnd;
+    HDC hdc;
+
+    memset(&wc, 0, sizeof(wc));
+    wc.style = CS_OWNDC;         /* un DC propre : valable depuis le fil de rendu aussi */
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = inst;
+    wc.lpszClassName = "POMPPCqgpu";
+    RegisterClassA(&wc);         /* déjà inscrite après un reset du device : sans importance */
+    hwnd = CreateWindowExA(WS_EX_TOOLWINDOW, wc.lpszClassName, "qgpu", WS_POPUP,
+                           0, 0, 1, 1, NULL, NULL, inst, NULL);
+    hdc = hwnd ? GetDC(hwnd) : NULL;
+    w->hwnd = hwnd;
+    w->hdc = hdc;
+    SetEvent(w->ready);          /* w appartient à l'appelant : plus touché après ceci */
+    if (!hdc) {
+        if (hwnd) {
+            DestroyWindow(hwnd);
+        }
+        return 0;
+    }
+    while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+        DispatchMessageA(&msg);
+    }
+    ReleaseDC(hwnd, hdc);
+    DestroyWindow(hwnd);
+    return 0;
+}
+
+static void gl_wgl_close(GlState *g)
+{
+    wglMakeCurrent(NULL, NULL);
+    if (g->ctx) {
+        wglDeleteContext(g->ctx);
+        g->ctx = NULL;
+    }
+    if (g->pump) {
+        if (g->hwnd) {
+            PostMessageA(g->hwnd, WM_QUIT, 0, 0);
+        }
+        WaitForSingleObject(g->pump, 2000);
+        CloseHandle(g->pump);
+        g->pump = NULL;
+    }
+}
+
+/* Fenêtre, format de pixel, contexte. Sur un échec rend false : gl_init passe la main au backend
+   logiciel, comme sur un hôte sans EGL (cas du runner sans GPU, et d'opengl32 seul, en GL 1.1). */
+static bool gl_wgl_open(GlState *g)
+{
+    typedef HGLRC (WINAPI *CreateAttribs)(HDC, HGLRC, const int *);
+    /* WGL_CONTEXT_MAJOR/MINOR_VERSION_ARB, WGL_CONTEXT_PROFILE_MASK_ARB,
+       WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB. Même demande que gl_init sous EGL (G4). */
+    static const int compat[] = { 0x2091, 3, 0x2092, 2, 0x9126, 0x00000002, 0 };
+    PIXELFORMATDESCRIPTOR pfd;
+    WglWindow w;
+    CreateAttribs create;
+    HGLRC first;
+    int fmt;
+
+    memset(&w, 0, sizeof(w));
+    w.ready = CreateEventA(NULL, TRUE, FALSE, NULL);
+    if (!w.ready) {
+        return false;
+    }
+    g->pump = CreateThread(NULL, 0, gl_wgl_pump, &w, 0, NULL);
+    if (!g->pump) {
+        CloseHandle(w.ready);
+        return false;
+    }
+    WaitForSingleObject(w.ready, INFINITE);
+    CloseHandle(w.ready);
+    g->hwnd = w.hwnd;
+    g->hdc = w.hdc;
+    if (!g->hdc) {
+        return false;
+    }
+
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cAlphaBits = 8;
+    pfd.cDepthBits = 16;
+    pfd.iLayerType = PFD_MAIN_PLANE;
+    fmt = ChoosePixelFormat(g->hdc, &pfd);
+    if (!fmt || !DescribePixelFormat(g->hdc, fmt, sizeof(pfd), &pfd) ||
+        !SetPixelFormat(g->hdc, fmt, &pfd)) {
+        return false;
+    }
+
+    /* wglCreateContextAttribsARB ne se résout que sous un contexte courant. Refusée ou absente, on
+       garde le contexte du pilote, et c'est l'auto-test qui tranche : comme sous EGL. */
+    first = wglCreateContext(g->hdc);
+    if (!first || !wglMakeCurrent(g->hdc, first)) {
+        if (first) {
+            wglDeleteContext(first);
+        }
+        return false;
+    }
+    create = (CreateAttribs)(void *)wglGetProcAddress("wglCreateContextAttribsARB");
+    g->ctx = create ? create(g->hdc, NULL, compat) : NULL;
+    wglMakeCurrent(NULL, NULL);
+    if (g->ctx) {
+        wglDeleteContext(first);
+    } else {
+        g->ctx = first;
+    }
+    return true;
+}
+#endif /* QGPU_GL_WGL */
+
 static bool gl_make_current(GlState *g)
 {
 #ifdef QGPU_GL_CGL
     if (CGLSetCurrentContext(g->ctx) != kCGLNoError) {
+        return false;
+    }
+#elif defined(QGPU_GL_WGL)
+    if (!wglMakeCurrent(g->hdc, g->ctx)) {
         return false;
     }
 #else
@@ -1825,6 +2002,10 @@ static bool gl_init(QgpuCore *c)
         }
         CGLDestroyPixelFormat(pix);
     }
+#elif defined(QGPU_GL_WGL)
+    if (!gl_wgl_open(g)) {
+        goto fail;
+    }
 #else
     {
         static const EGLint cfg_attr[] = {
@@ -1991,6 +2172,8 @@ static bool gl_init(QgpuCore *c)
        sur macOS. */
 #ifdef QGPU_GL_CGL
     CGLSetCurrentContext(NULL);
+#elif defined(QGPU_GL_WGL)
+    wglMakeCurrent(NULL, NULL);
 #else
     eglMakeCurrent(g->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 #endif
@@ -2002,6 +2185,8 @@ fail:
     if (g->ctx) {
         CGLDestroyContext(g->ctx);
     }
+#elif defined(QGPU_GL_WGL)
+    gl_wgl_close(g);
 #else
     if (g->dpy != EGL_NO_DISPLAY) {
         eglTerminate(g->dpy);
@@ -2036,6 +2221,8 @@ static void gl_fini(QgpuCore *c)
 #ifdef QGPU_GL_CGL
     CGLSetCurrentContext(NULL);
     CGLDestroyContext(g->ctx);
+#elif defined(QGPU_GL_WGL)
+    gl_wgl_close(g);
 #else
     eglMakeCurrent(g->dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroyContext(g->dpy, g->ctx);
@@ -3848,7 +4035,20 @@ static bool gl_packed_upload(QgpuCore *c, QgpuSurface *s, uint32_t x, uint32_t y
     glPixelTransferi(GL_INDEX_SHIFT, 0);
     glPixelTransferi(GL_INDEX_OFFSET, 0);
     glPixelZoom(1.0f, 1.0f);
+#ifdef QGPU_GL_WGL
+    {
+        /* GL 1.4, absent d'opengl32.dll : le seul appel direct au-delà de 1.1 de ce fichier. */
+        static void (APIENTRY *window_pos)(GLint, GLint);
+        if (!window_pos) {
+            window_pos = (void (APIENTRY *)(GLint, GLint))gl_proc("glWindowPos2i");
+        }
+        if (window_pos) {
+            window_pos((GLint)x, (GLint)y);
+        }
+    }
+#else
     glWindowPos2i((GLint)x, (GLint)y);
+#endif
     glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
     if (depth) {
         glStencilMask(0);

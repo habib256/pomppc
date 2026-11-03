@@ -4,6 +4,9 @@
 
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#define lstat stat   // pas de lien symbolique à distinguer : le dossier partagé reste à macOS
+#endif
 
 #include <algorithm>
 #include <cstdlib>

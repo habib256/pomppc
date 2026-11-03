@@ -67,6 +67,8 @@
 #   QEMU_PROFIL=paquet-linux …       # le binaire de l'AppImage (docs/publier-linux.md) : ni GTK, ni
 #                                    # SDL, ni epoxy, pa seul, -display dbus exigé ; toute capacité
 #                                    # de la série devient exigée, hors le backend GL (sondé en CI)
+#   QEMU_PROFIL=paquet-windows …     # le QEMU du paquet Windows, sous MSYS2 UCRT64 (docs/publier-windows.md) :
+#                                    # dsound, -display dbus exigé, sans GTK, SDL ni epoxy ; qgpu lie opengl32
 #                                    (la publication macOS, scripts/package_release_macos.sh)
 #   JOBS=N                           # parallélisme de ninja (défaut : nombre de cœurs)
 #   NO_TCG=1, NO_FASTFP2=1           # sur un arbre PROPRE : sans la série tcg, sans fastfp/0002
@@ -108,8 +110,8 @@ case "${1:-}" in
   --fast) export QEMU_FAST=1; shift ;;
 esac
 case "${QEMU_PROFIL:-}" in
-  ""|paquet-linux) ;;
-  *) echo "⚠ QEMU_PROFIL : profil inconnu « $QEMU_PROFIL » (paquet-linux)" >&2; exit 1 ;;
+  ""|paquet-linux|paquet-windows) ;;
+  *) echo "⚠ QEMU_PROFIL : profil inconnu « $QEMU_PROFIL » (paquet-linux, paquet-windows)" >&2; exit 1 ;;
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1452,6 +1454,15 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
              --enable-dbus-display --enable-png --enable-libusb --enable-bzip2
              --disable-zstd --disable-selinux --extra-ldflags=-static-libgcc)
   fi
+  # Le paquet Windows : tout l'affichage par le frontal (-display dbus,p2p=on), pas de manette (libusb, le
+  # pilote WinUSB se pose à la main), dsound seul (hostcompat.sh). qgpu lie opengl32 et gdi32 de lui-même
+  # (0003-wire-qgpu-pci-build.patch) ; --disable-opengl ne retire qu'epoxy et le partage D3D11 de la
+  # surface, dont le frontal ne veut pas (il lit par Win32.Map). Sans le guest agent, ni ses dépendances.
+  if [ "${QEMU_PROFIL:-}" = paquet-windows ]; then
+    UI_OPTS=(--disable-gtk --disable-sdl --disable-opengl "--audio-drv-list=dsound" --enable-dbus-display
+             --enable-png --enable-bzip2 --disable-libusb --disable-zstd --disable-guest-agent --disable-spice
+             --disable-gnutls --disable-nettle --disable-gcrypt)
+  fi
   PY_OPTS=()
   [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")
   ../configure --target-list=ppc-softmmu,ppc64-softmmu \
@@ -1493,7 +1504,9 @@ check_opt() { # check_opt <étiquette> <prédicat…>
   # Un paquet publié est complet : sa série est posée sur un arbre neuf, un manque est un défaut.
   # Le backend GL reste à part : il dépend de la machine qui sonde, pas du binaire (conteneur sans
   # pilote) ; packaging/linux/check_appimage.sh vérifie à la place que QEMU lie EGL et GL.
-  if [ -n "${QEMU_PROFIL:-}" ] && [ "$1" != qgpu-backend-gl ]; then check "$@"; return; fi
+  # Le paquet Windows ne passe pas par ici : sa liste est celle de LaunchPlan.cpp, et bridge_probe la lance
+  # pour de bon (packaging/windows/smoke_windows.sh). x-jit-near ou x-tb-fast n'y ont pas à exister.
+  if [ "${QEMU_PROFIL:-}" = paquet-linux ] && [ "$1" != qgpu-backend-gl ]; then check "$@"; return; fi
   if "${@:2}" >/dev/null 2>&1; then
     echo "  ✔ $1"; echo "$1=oui" >> "$CAPS"
   else
@@ -1518,6 +1531,7 @@ check_opt qgpu-backend-gl qemu_qgpu_has_backend "$BIN" "mac99,via=pmu" gl
 check slirp      qemu_has_netdev   "$BIN" user
 case "$(uname -s)" in
   Darwin) check audio-coreaudio qemu_has_audiodev "$BIN" coreaudio ;;
+  MINGW*|UCRT*|MSYS*|CLANG*) check audio-dsound qemu_has_audiodev "$BIN" dsound ;;
   *)      check audio-pa        qemu_has_audiodev "$BIN" pa ;;
 esac
 # SMP : sondé sur LE BINAIRE, et sur celui que le lanceur emploie réellement
@@ -1576,6 +1590,10 @@ check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
 if [ "${QEMU_PROFIL:-}" = paquet-linux ]; then
   check dbus-display qemu_has_display "$BIN" dbus
   check qgpu-lie-egl bash -c 'readelf -d "$1" | grep -q "NEEDED.*libEGL\.so"' _ "$BIN"
+fi
+if [ "${QEMU_PROFIL:-}" = paquet-windows ]; then
+  check dbus-display qemu_has_display "$BIN" dbus
+  check qgpu-lie-opengl32 bash -c 'objdump -p "$1.exe" | grep -qi "DLL Name: OPENGL32\.dll"' _ "$BIN"
 fi
 echo
 echo "→ $CAPS"

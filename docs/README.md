@@ -12,7 +12,7 @@ Chemins relatifs à la racine du dépôt. Les chantiers ouverts : `docs/chantier
 | Matrice de jeux (A3) : lancer, preuves, références, pièges | `docs/matrice-jeux.md` |
 | Banc d'endurance, gels et épreuves de fiabilité | `docs/endurance.md`, `docs/gel-doom3-baddisplay.md`, `docs/epreuve-gpu-bloque.md`, `docs/metrologie-boot.md` |
 | Quartz Extreme | `docs/quartz-extreme.md` |
-| Frontal, app macOS, publication | `frontend/README.md`, `docs/publier-macos.md`, `docs/publier-linux.md` (AppImage, CI), `docs/notes-version-*.md` |
+| Frontal, app macOS, publication | `frontend/README.md`, `docs/publier-macos.md`, `docs/publier-linux.md` (AppImage, CI), `docs/publier-windows.md` (zip expérimental), `docs/notes-version-*.md` |
 | Architecture, rétro-ingénierie, offsets, boucle de dev | `docs/architecture.md`, `docs/gpu-3d-tiger.md`, `docs/re/README.md` |
 | Protocole : contrat courant v22 ; historique v7 → v21 (pas de document propre à la v22, ATI combine3) ; les volets A4 `protocole-v23-*` sont entrés en capacités, sans v23 | `docs/protocole.md`, `docs/protocole-v*.md` |
 | Backend GL et attente de l'invité ; textures | `docs/backend-gl-attente.md`, `docs/backend-gl-unites-fixes.md`, `docs/pagination-textures.md` |

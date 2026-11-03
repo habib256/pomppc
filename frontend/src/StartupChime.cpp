@@ -24,6 +24,9 @@ bool ChimeSettings::save(const std::string& path) const {
     std::ofstream out(tmp);
     out << enabled << ' ' << volume << ' ' << std::quoted(file) << '\n';
     out.close();
+#ifdef _WIN32
+    std::remove(path.c_str());   // rename y refuse une destination qui existe
+#endif
     if (!out || std::rename(tmp.c_str(), path.c_str()) != 0) return false;
     return true;
 }

@@ -2,15 +2,21 @@
 // Copyright (c) 2026 VERHILLE Arnaud
 #include "DiskConfig.h"
 
+#ifdef _WIN32
+#include "WinHost.h"
+#else
 #include <spawn.h>
 #include <sys/wait.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 
+#ifndef _WIN32
 extern char** environ;
+#endif
 namespace fs = std::filesystem;
 
 namespace {
@@ -152,6 +158,18 @@ bool createDisk(const std::string& root, const std::string& name, int gigabytes,
     }
     // config.env met qemu-img dans le PATH, celui du paquet comme celui d'un arbre de sources.
     const std::string size = std::to_string(gigabytes) + "G";
+#ifdef _WIN32
+    // qemu-img.exe : à côté de POMPPC.exe, où CreateProcess cherche d'abord.
+    const std::string shortPath = winhost::qemuPath(path);
+    if (shortPath.empty()) {
+        *err = "POMPPC can't create a disk here because of the characters in this path: " + path;
+        return false;
+    }
+    if (!winhost::runTool({"qemu-img", "create", "-q", "-f", "qcow2", shortPath, size}, nullptr, nullptr)) {
+        *err = "qemu-img could not create the disk.";
+        return false;
+    }
+#else
     const std::string config = root + "/config.env";
     const char* script = "source \"$1\" && qemu-img create -q -f qcow2 \"$2\" \"$3\"";
     const char* argv[] = {"bash", "-c", script, "bash", config.c_str(), path.c_str(), size.c_str(),
@@ -166,6 +184,7 @@ bool createDisk(const std::string& root, const std::string& name, int gigabytes,
         *err = "qemu-img could not create the disk.";
         return false;
     }
+#endif
     if (ssd && !setDiskSsd(root, file, true)) {
         *err = "The disk was created, but its type could not be saved.";
         return false;

@@ -2,12 +2,12 @@
 #   version   le tag est la version du projet (frontend/CMakeLists.txt)
 #   quality   bash tests/run-all.sh, dans CE graphe de dépendances
 #   linux     image bullseye épinglée → POMPPC-<version>-x86_64.AppImage
-#   (windows  le lot suivant : un job de plus, et EXPECTED plus bas passe à 2)
+#   windows   MSYS2 UCRT64 → POMPPC-<version>-windows-x64.zip (docs/publier-windows.md)
 #   publish   Release + SHA256SUMS, sur un tag SEULEMENT
 #
 # Le macOS n'est pas ici : il se fait à la main sur le Mac et se dépose sur la même Release
 # (docs/publier-macos.md). `publish` réutilise donc une Release existante et ne touche qu'à SES
-# fichiers. Recette, plancher et ce que cette CI ne prouve pas : docs/publier-linux.md.
+# fichiers. Recette, plancher et ce que cette CI ne prouve pas : docs/publier-linux.md, publier-windows.md.
 #
 # Déclencheurs : un tag publie ; « Run workflow » et le planning hebdomadaire répètent, sans rien
 # publier. La répétition n'est pas un luxe : ce chemin ne tourne qu'à la publication, et une image
@@ -154,8 +154,104 @@ jobs:
           path: dist/*.AppImage
           if-no-files-found: error
 
+  # Les .sh et les .patch doivent arriver avec leurs LF : autocrlf est allumé sur les runners Windows, et
+  # patch_strict refuserait toute la série. Avant le checkout, donc en pwsh : msys2 n'est pas encore là.
+  windows:
+    needs: version
+    runs-on: windows-latest
+    # QEMU compile deux cibles, à quatre cœurs : long sans le cache, et le runner coûte ×2.
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      POMPPC_VERSION: ${{ needs.version.outputs.pomppc_version }}
+      # [D] QEMU .gitlab-ci.d/windows.yml @ v11.1.2 : l'arbre de QEMU porte des liens symboliques.
+      MSYS: winsymlinks:native
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_DIR: D:/ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_DEPEND: 1     # ibid. : le mode préprocesseur rate trop souvent sous MinGW
+      CC: ccache gcc
+    steps:
+      - name: Fins de ligne intactes
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # `update: true` : MSYS2 ne garde pas les anciens paquets, une version épinglée y disparaît. Les
+      # versions prises sont relevées dans le paquet (THIRD-PARTY-LICENSES/README.txt).
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            bison curl diffutils flex git grep make patch sed unzip zip
+            mingw-w64-ucrt-x86_64-binutils
+            mingw-w64-ucrt-x86_64-bzip2
+            mingw-w64-ucrt-x86_64-ca-certificates
+            mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-dtc
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-glfw
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-glib2-devel
+            mingw-w64-ucrt-x86_64-libpng
+            mingw-w64-ucrt-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-certifi
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-setuptools
+            mingw-w64-ucrt-x86_64-python-wheel
+            mingw-w64-ucrt-x86_64-zlib
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: D:/ccache
+          key: ccache-windows-${{ hashFiles('patches/**', 'scripts/build_qemu_qfb.sh', 'config.env') }}
+          restore-keys: ccache-windows-
+
+      - name: Témoins des scripts du paquet
+        run: packaging/windows/check_windows_package.sh --self-test
+
+      - name: CD invité (packaging/guest-iso.lock)
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -eu
+          # Comme le job linux : un tag exige le CD de sa version, une répétition prend celui déclaré.
+          EXIGE=()
+          if [ "$REF_TYPE" = tag ]; then EXIGE=(--exige-version "$POMPPC_VERSION"); fi
+          packaging/linux/fetch_guest_iso.sh build-windows-iso/pomppc-guest.iso "${EXIGE[@]}"
+
+      - name: Construire QEMU, le frontal et le zip
+        env:
+          GUEST_ISO: build-windows-iso/pomppc-guest.iso
+          JOBS: 4
+        run: |
+          ccache --zero-stats
+          packaging/windows/build_windows.sh
+          ccache --show-stats
+
+      - name: Vérifier le paquet (DLL en liste blanche, opengl32 lié et pas embarqué, contenu)
+        run: packaging/windows/check_windows_package.sh "build-windows/POMPPC-$POMPPC_VERSION-windows-x64"
+
+      - name: Épreuve du paquet (QEMU, Open Firmware, QMP, bus D-Bus, Win32.Map, image, verrou)
+        run: packaging/windows/smoke_windows.sh "build-windows/POMPPC-$POMPPC_VERSION-windows-x64" "$POMPPC_VERSION" frontend/build-windows
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: POMPPC-windows-zip
+          path: dist/*.zip
+          if-no-files-found: error
+
   publish:
-    needs: [version, quality, linux]
+    needs: [version, quality, linux, windows]
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
     permissions:
@@ -173,8 +269,7 @@ jobs:
           # Le job n'extrait pas le dépôt : `gh release` ne peut pas le déduire d'un remote git.
           GH_REPO: ${{ github.repository }}
           # Exactement ce nombre : le dossier est plat, deux paquets de même nom n'en feraient qu'un.
-          # Le lot Windows le passera à 2.
-          EXPECTED: 1
+          EXPECTED: 2
         run: |
           set -eu
           mkdir -p staging

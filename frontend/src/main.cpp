@@ -14,6 +14,9 @@
 // Vue ▸ Plein écran (Alt+Enter, Ctrl+Cmd+F or F11 to enter/leave; Escape goes to the guest)
 // puts the host window on its monitor at native size with only the guest
 // shown. Pointer input is mapped on the rectangle actually drawn.
+#ifdef _WIN32
+#define GLFW_INCLUDE_GLEXT   // gl.h de Windows s'arrête à GL 1.1 : GL_BGRA, GL_CLAMP_TO_EDGE…
+#endif
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
@@ -26,13 +29,19 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#ifdef _WIN32
+#include <unistd.h>   // usleep (mingw-w64)
+#else
 #include <spawn.h>
+#endif
 #include <fstream>
 #include <ctime>
 #include <functional>
 #include <vector>
 
+#ifndef _WIN32
 extern char** environ;
+#endif
 
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilder*
@@ -47,6 +56,7 @@ extern char** environ;
 #include "SetupUi.h"
 #include "AppExtras.h"
 #include "SharedFolder.h"
+#include "WinHost.h"
 #include "roboto_font.h"
 
 #ifndef IMGUI_HAS_DOCK
@@ -189,6 +199,9 @@ static QemuBridge::Config makeConfig(const std::string& launcher,
     QemuBridge::Config cfg;
     cfg.launcher = launcher;
     cfg.runtimeDir = runtimeDir;
+#ifdef _WIN32
+    cfg.packageRoot = winhost::exeDir();
+#endif
     if (!sound) cfg.env.push_back("NOSOUND=1");
     if (!pad) cfg.env.push_back("NOPAD=1");
     if (const char* res = std::getenv("RES")) cfg.env.push_back(std::string("RES=") + res);
@@ -357,6 +370,26 @@ static void buildDefaultLayout(ImGuiID dsId, const ImGuiViewport* vp) {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    // Le paquet Windows n'a pas de bash : run_tiger.sh et run_os9.sh n'y sont que des noms, qui disent
+    // le système à lancer (QemuBridge passe alors par LaunchPlan). Les données vivent dans
+    // %USERPROFILE%\POMPPC et le paquet à côté de POMPPC.exe, comme ~/POMPPC et l'AppImage.
+    if (argc > 1 && std::string(argv[1]) == "--version") {
+        std::printf("%s\n", POMPPC_VERSION_TEXT);
+        return 0;
+    }
+    std::string root = winhost::dataRoot();
+    winhost::startup(root + "/.run/app.log");
+    {
+        std::error_code rootEc;
+        for (const char* sub : {"/.run", "/disks", "/images"}) fs::create_directories(fs::u8path(root + sub), rootEc);
+    }
+    _putenv_s("POMPPC_APP", "1");
+    _putenv_s("POMPPC_VERSION", POMPPC_VERSION_TEXT);
+    std::string defLauncher = root + "/run_os9.sh";
+    if (argc > 1) defLauncher = std::string(argv[1]).find("tiger") != std::string::npos ? root + "/run_tiger.sh" : root + "/run_os9.sh";
+    const auto launcherThere = [](const std::string&) { return true; };
+#else
     fs::path exeDir = fs::weakly_canonical(fs::path(argv[0])).parent_path();
     // Default boot = Mac OS 9. The "OS" menu switches to Mac OS X and back.
     std::string defLauncher =
@@ -367,6 +400,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::string root = fs::path(defLauncher).parent_path().string();
+    const auto launcherThere = [](const std::string& path) { return fs::exists(path); };
+#endif
     std::string runtimeDir = root + "/.run";
     fs::create_directories(runtimeDir);
     std::string tigerSh = root + "/run_tiger.sh";
@@ -407,7 +442,7 @@ int main(int argc, char** argv) {
     // Un lanceur passé en argument (run_tiger.sh délègue ainsi) prime sur
     // l'OS retenu à l'arrêt précédent.
     std::string curLauncher = defLauncher;   // boots Mac OS 9 by default
-    if (argc <= 1 && fe.os == "tiger" && fs::exists(tigerSh)) curLauncher = tigerSh;
+    if (argc <= 1 && fe.os == "tiger" && launcherThere(tigerSh)) curLauncher = tigerSh;
     bool sound = fe.sound;  // on by default (Screamer; pa or coreaudio); RAM capped ≤768
     bool pad = fe.pad;      // usb-host passthrough; the run script self-guards
     auto bridge = std::make_unique<QemuBridge>();
@@ -1569,12 +1604,14 @@ int main(int argc, char** argv) {
                         relaunch(curLauncher);
                     });
                 }
+#ifndef _WIN32   // pas de libusb au paquet (LaunchPlan.cpp)
                 if (ImGui::MenuItem("USB Gamepad", nullptr, pad)) {
                     confirmRestart(pad ? "Turn the USB gamepad off?" : "Turn the USB gamepad on?", [&] {
                         pad = !pad;
                         relaunch(curLauncher);
                     });
                 }
+#endif
                 ImGui::EndMenu();
             }
             ImGui::EndDisabled();
@@ -2070,7 +2107,9 @@ int main(int argc, char** argv) {
                 }
                 ImGui::Checkbox("Sound", &draftSound);
                 ImGui::SameLine();
+#ifndef _WIN32
                 ImGui::Checkbox("USB gamepad", &draftPad);
+#endif
                 ImGui::Spacing();
                 const bool changed = draftMem != savedMem || (tiger && draftCores != fe.coresTiger) ||
                                      draftSound != sound || draftPad != pad;

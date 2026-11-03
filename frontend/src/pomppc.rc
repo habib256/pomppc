@@ -1,0 +1,3 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Le manifeste de POMPPC.exe (voir pomppc.manifest). 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST.
+1 24 "pomppc.manifest"

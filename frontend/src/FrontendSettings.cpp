@@ -131,5 +131,8 @@ bool FrontendSettings::save(const std::string& path) const {
         out.close();
         if (!out) { std::remove(tmp.c_str()); return false; }
     }
+#ifdef _WIN32
+    std::remove(path.c_str());   // rename y refuse une destination qui existe
+#endif
     return std::rename(tmp.c_str(), path.c_str()) == 0;
 }

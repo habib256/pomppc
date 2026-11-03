@@ -2,10 +2,12 @@
 // Copyright (c) 2026 VERHILLE Arnaud
 #include "SetupFlow.h"
 
+#ifndef _WIN32
 #include <signal.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cstdlib>
@@ -13,8 +15,11 @@
 #include <fstream>
 
 #include "DiskConfig.h"
+#include "WinHost.h"
 
+#ifndef _WIN32
 extern char** environ;
+#endif
 namespace fs = std::filesystem;
 
 namespace {
@@ -51,9 +56,26 @@ std::string firstWord(const std::string& s) {
     return s.substr(0, s.find_first_of(" \t\r\n"));
 }
 
+#ifdef _WIN32
+// [B] MSDN, « certutil -hashfile » : l'empreinte est sur la deuxième ligne, le reste est traduit. Les
+// versions d'avant Windows 10 séparent les octets par des espaces.
+std::string certutilHash(const std::string& file, const char* algo) {
+    std::string got;
+    if (!SetupFlow::runTool({"certutil", "-hashfile", file, algo}, &got)) return "";
+    const size_t first = got.find('\n');
+    if (first == std::string::npos) return "";
+    std::string line = got.substr(first + 1, got.find('\n', first + 1) - first - 1);
+    line.erase(std::remove_if(line.begin(), line.end(), [](unsigned char c) { return c == ' ' || c == '\r'; }), line.end());
+    std::transform(line.begin(), line.end(), line.begin(), ::tolower);
+    return line;
+}
+#endif
+
 std::string md5Of(const std::string& file) {
     std::string got;
-#ifdef __APPLE__
+#ifdef _WIN32
+    return certutilHash(file, "MD5");
+#elif defined(__APPLE__)
     SetupFlow::runTool({"md5", "-q", file}, &got);
 #else
     SetupFlow::runTool({"md5sum", file}, &got);
@@ -63,7 +85,9 @@ std::string md5Of(const std::string& file) {
 
 std::string sha1Of(const std::string& file) {
     std::string got;
-#ifdef __APPLE__
+#ifdef _WIN32
+    return certutilHash(file, "SHA1");
+#elif defined(__APPLE__)
     SetupFlow::runTool({"shasum", "-a", "1", file}, &got);
 #else
     SetupFlow::runTool({"sha1sum", file}, &got);
@@ -71,7 +95,7 @@ std::string sha1Of(const std::string& file) {
     return firstWord(got);
 }
 
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(_WIN32)
 // Le dialogue de fichier vient du bureau de l'hôte, s'il en a un. Sans aucun des deux, le dire :
 // le bouton ne doit pas sembler ne rien faire. Annuler rend un chemin vide, sans message.
 std::string pickFileOnHost(const std::string& prompt, std::string* err) {
@@ -163,13 +187,18 @@ std::string SetupFlow::discFile() const { return tiger_ ? kTigerFile : kOs9File;
 std::string SetupFlow::discMd5() const { return tiger_ ? kTigerMd5 : kOs9Md5; }
 std::string SetupFlow::downloadedDisc() const {
     const char* forced = std::getenv("POMPPC_DOWNLOADS");
-    const char* home = std::getenv("HOME");
     if (forced) return std::string(forced) + "/" + discFile();
+#ifdef _WIN32
+    static const std::string host = winhost::downloadsDir();
+    return host + "/" + discFile();
+#else
+    const char* home = std::getenv("HOME");
     const std::string homeDir = home ? home : "";
     const std::string fallback = homeDir + "/Downloads";
-#ifdef __APPLE__
+#endif
+#if defined(__APPLE__)
     return fallback + "/" + discFile();
-#else
+#elif !defined(_WIN32)
     // Sur un bureau en français, ce dossier est ~/Téléchargements.
     // Appelée à chaque seconde par la page d'attente : le dossier ne se demande qu'une fois.
     static const std::string host = [] {
@@ -202,9 +231,16 @@ std::vector<std::string> SetupFlow::vmEnv() const {
 }
 
 bool SetupFlow::diskLooksInstalled() const {
+#ifdef _WIN32
+    // La taille du fichier : un qcow2 ne grandit que de ce qui y est écrit. Pas de du ici.
+    std::error_code sizeEc;
+    const long kb = (long)(fs::file_size(fs::u8path(diskPath()), sizeEc) / 1024);
+    if (sizeEc) return false;
+#else
     std::string out;
     if (!runTool({"du", "-k", diskPath()}, &out)) return false;
     const long kb = std::strtol(out.c_str(), nullptr, 10);
+#endif
     return kb > (tiger_ ? 1024L * 1024L : 200L * 1024L);
 }
 
@@ -249,7 +285,13 @@ bool SetupFlow::importDisk(const std::string& path, std::string* err) {
         *err = "This file is not a .qcow2 disk.";
         return false;
     }
+#ifdef _WIN32
+    std::error_code copyEc;
+    fs::copy_file(fs::u8path(path), fs::u8path(diskPath()), fs::copy_options::overwrite_existing, copyEc);
+    if (copyEc) {
+#else
     if (!runTool({"cp", "-c", path, diskPath()}) && !runTool({"cp", path, diskPath()})) {
+#endif
         *err = "Copying the disk failed.";
         return false;
     }
@@ -260,6 +302,9 @@ bool SetupFlow::importDisk(const std::string& path, std::string* err) {
 // ── Outils ──────────────────────────────────────────────────────────────────
 
 bool SetupFlow::runTool(const std::vector<std::string>& args, std::string* output, int* pidOut) {
+#ifdef _WIN32
+    return winhost::runTool(args, output, [pidOut](int pid) { if (pidOut) *pidOut = pid; });
+#else
     std::vector<char*> argv;
     for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);
@@ -290,6 +335,7 @@ bool SetupFlow::runTool(const std::vector<std::string>& args, std::string* outpu
     int status = 0;
     if (waitpid(pid, &status, 0) < 0) return false;
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
 }
 
 bool SetupFlow::downloadReady(const std::string& path) {
@@ -308,7 +354,12 @@ bool SetupFlow::placeMedia(const std::string& file, const std::string& out, bool
         const std::string dir = runtimeDir_ + "/extraction";
         fs::remove_all(dir, ec);
         fs::create_directories(dir, ec);
+#ifdef _WIN32
+        // [B] tar.exe de Windows 10 1803 et plus (bsdtar) lit le zip ; pas d'unzip sur cet hôte.
+        if (!runTool({"tar", "-xf", file, "-C", dir})) {
+#else
         if (!runTool({"unzip", "-q", "-o", file, "-d", dir})) {
+#endif
             *err = "POMPPC couldn't open this archive.";
             fs::remove_all(dir, ec);
             return false;
@@ -341,7 +392,17 @@ bool SetupFlow::placeMedia(const std::string& file, const std::string& out, bool
         }
         return true;
     }
+#ifdef _WIN32
+    // Un lien symbolique demande un droit que l'utilisateur n'a pas, sauf mode développeur. Le lien
+    // dur ne coûte rien sur le même volume ; ailleurs, une copie.
+    fs::create_hard_link(fs::u8path(file), fs::u8path(out), ec);
+    if (ec) {
+        ec.clear();
+        fs::copy_file(fs::u8path(file), fs::u8path(out), ec);
+    }
+#else
     fs::create_symlink(file, out, ec);
+#endif
     if (ec) { *err = "POMPPC couldn't use this file."; return false; }
     return true;
 }
@@ -365,7 +426,11 @@ bool SetupFlow::convertDmg(const std::string& dmg, const std::string& out, std::
     //     monte-t-il dans Tiger ? Tranché par : l'étape Update de l'assistant, sur le PC.
     const std::string tmp = out + ".tmp";
     fs::remove(tmp, ec);
+#ifdef _WIN32
+    if (!runTool({"qemu-img", "convert", "-q", "-f", "dmg", "-O", "raw", winhost::qemuPath(dmg), winhost::qemuPath(tmp)})) {
+#else
     if (!runTool({"qemu-img", "convert", "-q", "-f", "dmg", "-O", "raw", dmg, tmp})) {
+#endif
         fs::remove(tmp, ec);
         *err = "POMPPC couldn't convert this .dmg.";
         return false;
@@ -377,7 +442,9 @@ bool SetupFlow::convertDmg(const std::string& dmg, const std::string& out, std::
 }
 
 void SetupFlow::openExternal(const std::string& target) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    winhost::openExternal(target);
+#elif defined(__APPLE__)
     runTool({"open", target});
 #else
     // En arrière-plan : xdg-open peut vivre aussi longtemps que le navigateur, et ceci tourne sur
@@ -430,7 +497,11 @@ void SetupFlow::cancelJob() {
     if (!busy()) return;
     job_->cancelled.store(true);
     const int pid = job_->pid.load();
+#ifdef _WIN32
+    winhost::terminate(pid);
+#else
     if (pid > 0) kill(pid, SIGTERM);
+#endif
 }
 
 bool SetupFlow::takeChosen(std::string* path) {
@@ -454,6 +525,8 @@ void SetupFlow::chooseFile(const std::string& prompt) {
                 out.erase(out.find_last_not_of("\r\n") + 1);
                 j.chosen = out;
             }
+#elif defined(_WIN32)
+            j.chosen = winhost::chooseFile(prompt);
 #else
             j.chosen = pickFileOnHost(prompt, &j.error);
 #endif
@@ -491,6 +564,18 @@ void SetupFlow::downloadUpdate() {
         std::error_code ec;
         if (!fs::exists(dmg, ec)) {
             const std::string tmp = dmg + ".tmp";
+#ifdef _WIN32
+            // curl.exe : dans System32 depuis Windows 10 1803.
+            const bool fetched = winhost::runTool({"curl", "-fsSL", "--retry", "3", "-o", tmp, url}, nullptr,
+                                                  [&j](int pid) { j.pid.store(pid); });
+            j.pid.store(-1);
+            if (j.cancelled.load()) { fs::remove(tmp, ec); return; }
+            if (!fetched) {
+                fs::remove(tmp, ec);
+                j.error = "The download didn't finish. Check your connection and try again.";
+                return;
+            }
+#else
             std::vector<char*> argv;
             const std::vector<std::string> args = {"curl", "-fsSL", "--retry", "3", "-o", tmp, url};
             for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
@@ -510,6 +595,7 @@ void SetupFlow::downloadUpdate() {
                 j.error = "The download didn't finish. Check your connection and try again.";
                 return;
             }
+#endif
             if (sha1Of(tmp) != sha) {
                 fs::remove(tmp, ec);
                 j.error = "The downloaded file doesn't match Apple's checksum. Try again.";

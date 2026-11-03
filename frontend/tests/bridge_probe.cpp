@@ -4,9 +4,11 @@
 // Launches the guest under -snapshot, waits for the first live Scanout, prints
 // its dimensions and a PPM screenshot, then tears down.
 #include "QemuBridge.h"
+#include "WinHost.h"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -29,7 +31,15 @@ int main(int argc, char** argv) {
     cfg.launcher = launcher;
     cfg.runtimeDir = root + "/.run";
     fs::create_directories(cfg.runtimeDir);
-    cfg.env = {"NOPAD=1", "SNAPSHOT=1"};
+#ifdef _WIN32
+    // Le lanceur n'y est qu'un nom : les .exe sont ceux de la sonde, ou de POMPPC_PACKAGE_ROOT.
+    winhost::startup(cfg.runtimeDir + "/probe.log");
+    const char* pack = getenv("POMPPC_PACKAGE_ROOT");
+    cfg.packageRoot = pack ? pack : winhost::exeDir();
+#endif
+    cfg.env = {"NOPAD=1"};
+    // PROBE_PERSISTENT : le disque en vrai, donc le verrou d'instance (packaging/windows/smoke_windows.sh).
+    if (!getenv("PROBE_PERSISTENT")) cfg.env.push_back("SNAPSHOT=1");
     if (!getenv("PROBE_SOUND")) cfg.env.push_back("NOSOUND=1");  // PROBE_SOUND=1 keeps sound (Screamer OpenBIOS)
     if (const char* r = getenv("RES")) cfg.env.push_back(std::string("RES=") + r);
 
@@ -102,8 +112,18 @@ int main(int argc, char** argv) {
     }
     (void)didReset;
     fb = latest; w = lw; h = lh;
-    if (got)
+    if (got) {
         std::fprintf(stderr, "probe: %d frames total, last %dx%d\n", frames, w, h);
+        // Une image pleine d'une seule couleur prouve le canal, pas le rendu. FNV-1a sur les pixels, pour
+        // la CI : packaging/windows/smoke_windows.sh exige plus d'une couleur.
+        uint64_t hash = 1469598103934665603ULL;
+        std::set<uint32_t> colors;
+        for (uint32_t p : fb) {
+            if (colors.size() < 256) colors.insert(p);
+            hash = (hash ^ p) * 1099511628211ULL;
+        }
+        std::fprintf(stderr, "probe: image colors=%zu fnv=%016llx\n", colors.size(), (unsigned long long)hash);
+    }
 
     if (got) {
         FILE* f = fopen("probe.ppm", "wb");

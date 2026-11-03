@@ -19,7 +19,7 @@ diff --git a/hw/display/meson.build b/hw/display/meson.build
 index 51456a5..fd8dd1f 100644
 --- a/hw/display/meson.build
 +++ b/hw/display/meson.build
-@@ -141,6 +141,20 @@ if config_all_devices.has_key('CONFIG_VIRTIO_VGA')
+@@ -141,6 +141,23 @@ if config_all_devices.has_key('CONFIG_VIRTIO_VGA')
  endif
  
  system_ss.add(when: 'CONFIG_QFB_PCI', if_true: files('qfb-pci.c'))
@@ -30,6 +30,9 @@ index 51456a5..fd8dd1f 100644
 +qgpu_ss.add(files('qgpu-pci.c', 'qgpu-core.c', 'qgpu-soft.c', 'qgpu-gl.c'))
 +if host_os == 'darwin'
 +  qgpu_ss.add(dependency('appleframeworks', modules: ['OpenGL']))
++elif host_os == 'windows'
++  # qgpu-gl.c en WGL, sur l'OpenGL de l'hôte (opengl32.dll, jamais embarquée).
++  qgpu_ss.add(cc.find_library('opengl32'), cc.find_library('gdi32'))
 +else
 +  qgpu_egl = dependency('egl', required: false)
 +  qgpu_gl = dependency('gl', required: false)

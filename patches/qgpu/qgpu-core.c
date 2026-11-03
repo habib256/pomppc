@@ -19,6 +19,17 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN 1
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX 1
+#  endif
+#  include <windows.h>
+#  undef near
+#  undef far
+#endif
 
 #include "qgpu-core.h"
 
@@ -1319,9 +1330,18 @@ static bool tex_gen_nomem(QgpuCore *c, QgpuTexture *t, int face);
 
 static uint64_t now_ns(void)
 {
+#ifdef _WIN32
+    /* clock_gettime n'est que dans winpthreads, que QEMU ne lie pas forcément. */
+    LARGE_INTEGER n, f;
+    QueryPerformanceCounter(&n);
+    QueryPerformanceFrequency(&f);
+    return (uint64_t)(n.QuadPart / f.QuadPart) * 1000000000u +
+           (uint64_t)(n.QuadPart % f.QuadPart) * 1000000000u / (uint64_t)f.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
+#endif
 }
 
 /* 27/09 (copie GPU) : ramène dans px un niveau que seule la texture du
@@ -1695,9 +1715,19 @@ bool qgpu_core_init(QgpuCore *c, const char *backend,
        autre total (les tests le baissent). */
     {
         const char *e = getenv("QGPU_MEM_MB");
+#ifdef _WIN32
+        /* sysconf n'existe pas sous Windows. */
+        MEMORYSTATUSEX ms;
+        uint64_t total = (uint64_t)4 << 30;
+        ms.dwLength = sizeof(ms);
+        if (GlobalMemoryStatusEx(&ms) && ms.ullTotalPhys) {
+            total = (uint64_t)ms.ullTotalPhys / 2;
+        }
+#else
         long pages = sysconf(_SC_PHYS_PAGES), psz = sysconf(_SC_PAGESIZE);
         uint64_t total = (pages > 0 && psz > 0) ? (uint64_t)pages * (uint64_t)psz / 2
                                                 : (uint64_t)4 << 30;
+#endif
         if (e && *e) {
             unsigned long long mb = strtoull(e, NULL, 10);
             if (mb) {

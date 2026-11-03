@@ -65,3 +65,6 @@ frontend/build-appimage/
 /Screenshots/
 /Exchange/
 tools/tcg/*.so
+build-windows/
+build-windows-iso/
+frontend/build-windows/

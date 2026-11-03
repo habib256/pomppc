@@ -16,6 +16,13 @@ Linux (`md5sum`, `sha1sum`, `zenity` ou `kdialog`, `xdg-open`, `qemu-img` pour l
 partager un dossier restent propres à macOS. Binaire générique, plus lent que le binaire rapide du PC, et le PC reste
 derrière le M4 : les notes le chiffrent. **Écrit sans compilation : à éprouver sur le PC avant de publier.**
 
+**Paquet Windows x64, expérimental, écrit sans machine Windows.** `POMPPC-0.4.2-windows-x64.zip`, MSYS2 UCRT64 en CI
+(`packaging/windows/`, job `windows`, `docs/publier-windows.md`). QEMU natif, profil `paquet-windows` ; backend WGL de qgpu (fenêtre
+cachée, compatibilité 3.2, repli logiciel) ; frontal sans bash : `LaunchPlan` écrit la ligne de QEMU, paire AF_UNIX et
+`get-win32-socket`, `Listener.Win32.Map`, Job Object, et **verrou `.run/tiger.lock` tenu par le frontal**, QEMU ne verrouillant rien
+sous Windows. Sans flottant natif, rel32 ni TSC. Le comportement Linux et macOS ne change pas. **Rien n'a tourné sur un vrai PC, ni
+même compilé à l'écriture : le rendu GL, Tiger, MTTCG sous Windows, la vitesse et le son restent à prouver.**
+
 **Une seule source pour la version** : `project(POMPPC VERSION …)` de `frontend/CMakeLists.txt`, resté à 0.3 jusqu'ici ;
 `tools/check_version_strings.sh` et `tools/check_workflow_pins.sh` tournent dans `tests/run-all.sh`.
 

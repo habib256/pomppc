@@ -326,3 +326,8 @@ lui-même dérivé du code de Laurent Vivier et Hervé Poussineau.
 Cave-Ayland — en-tête de licence conservé tel quel. Les patches QEMU et les mails
 de liste relèvent de la licence de QEMU (GPL-2.0). Voir aussi `kext/POMPPCQFB/README.md`
 § « Licence et crédits ».
+
+## Windows
+
+Ce que la série n'allume pas sous Windows, et pourquoi : `docs/publier-windows.md` §4 (règle de parité,
+`docs/etat-des-hotes.md` §1). Les branches de `qgpu/` sous `_WIN32` n'ont aucun effet sur Linux et macOS.
