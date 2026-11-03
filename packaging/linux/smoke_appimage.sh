@@ -31,7 +31,7 @@ echo "== chargeur"
 PERDU="$(for f in "$PAY"/bin/* "$PAY"/lib/*; do ldd "$f" 2>/dev/null; done | awk '/not found/ { print $1 }' | sort -u)"
 verifie "aucune bibliothèque introuvable (${PERDU:-rien})" test -z "$PERDU"
 # Qu'elles viennent bien du paquet : hors de lib/, seuls l'hôte du contrat (GL, X, glibc).
-HORS="$(ldd "$PAY/bin/qemu-system-ppc" | awk '$2 == "=>" { print $1, $3 }' | grep -E '^lib(glib|gio|gobject|gmodule|pixman|slirp|pulse)' | grep -v "$PAY/lib/" || true)"
+HORS="$(ldd "$PAY/bin/qemu-system-ppc" | awk '$2 == "=>" { print $1, $3 }' | grep -E '^lib(glib|gio|gobject|gmodule|pixman|slirp|pulse)' | grep -vE "$PAY/(bin/\.\./)?lib/" || true)"
 verifie "glib, pixman, slirp, pulse pris dans le paquet (${HORS:-oui})" test -z "$HORS"
 
 echo "== binaires"

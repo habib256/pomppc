@@ -131,7 +131,17 @@ diff --git a/include/qemu/timer.h b/include/qemu/timer.h
 index 9a62ac8..30ec688 100644
 --- a/include/qemu/timer.h
 +++ b/include/qemu/timer.h
-@@ -835,8 +835,26 @@ static inline int64_t get_clock(void)
+@@ -824,6 +824,9 @@ static inline int64_t cpu_get_host_ticks(void)
+ #ifdef _WIN32
+ extern int64_t clock_freq;
+ 
++/* POMPPC tcg/0015 : pas de compteur brut sous Windows, x-tb-fast reste sur le chemin lent. */
++static inline bool qemu_raw_clock_enable(void) { return false; }
++
+ static inline int64_t get_clock(void)
+ {
+     LARGE_INTEGER ti;
+@@ -835,8 +838,26 @@ static inline int64_t get_clock(void)
  
  extern int use_rt_clock;
  
