@@ -493,6 +493,13 @@ int main(int argc, char** argv) {
     }
 
     glfwSetErrorCallback(glfwErr);
+#ifdef __linux__
+    // AppImage sous Wayland : GNOME ne décore pas les fenêtres, GLFW charge alors le greffon GTK de
+    // libdecor de l'hôte, compilé pour une glib plus récente que celle du paquet : il échoue
+    // (g_once_init_leave_pointer) et la fenêtre reste sans barre de titre (mesuré sur le PC le
+    // 04/11/2026, Ubuntu 26.04). XWayland a sa propre décoration.
+    if (appMode && std::getenv("DISPLAY")) glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_X11);
+#endif
     if (!glfwInit()) { std::fprintf(stderr, "GLFW init failed\n"); return 1; }
 #ifdef __APPLE__
     // macOS only offers 3.2+ core, forward-compatible contexts (a 3.0
