@@ -10,10 +10,11 @@ Préalables déjà relevés : `docs/re/accelerateur-iokit.md` §1, §6 et §9.
 **État au 01/11** : Quartz Extreme est allumé par défaut sur les deux hôtes (M4 le 29/10, PC
 x86-64 le 30/10 ; `QE=0` l'éteint). Les défauts d'ombre sur une fenêtre GL sont corrigés : la
 liaison le 30/10 (`tex_bind_id`, plugin), l'image figée sous l'ombre le 01/11 (kext méthode 6
-`POMPPC_GA_PRESENT2`, plugin `20261101-ombre`). Les deux hôtes ont ce kext et ce plugin (M4 :
-VM quotidienne le 01/11 à 16 h 57, redémarrée, `QGPUVersion` 22 ; bande sous l'ombre encore à
-voir à l'œil sur le M4, et son coût à mesurer par l'A/B `m4-bundle-0111`). Reste : un avis borné au
-rectangle non visible, pour rendre l'avis des surfaces non simples moins cher (TODO).
+`POMPPC_GA_PRESENT2`, plugin `20261101-ombre`) ; bande confirmée à l'œil sur le M4 le 01/11 à
+22 h 39. Le 02/11, toutes les résolutions (kext, plugin `20261102-modes`, cœur qgpu ; journal) : le
+M4 les a, le PC les reçoit avec le bundle. Restent : le coût d'un avis d'ombre actif sous une fenêtre
+posée (l'A/B `m4-bundle-0111n` ne le prouve pas) et un avis borné au rectangle non visible, pour
+rendre l'avis des surfaces non simples moins cher (TODO).
 
 ## 1. Ce que fait le WindowServer (CoreGraphics 10.4.11, relevé statique du 28/10)
 

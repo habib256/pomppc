@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 # package_release_macos.sh — paquet publié pour macOS Apple Silicon : le dépôt au commit
-# courant (git archive) + QEMU patché, qemu-img et le frontend, avec leurs dylibs Homebrew
+# courant (git archive) + QEMU patché, qemu-img et le frontend, avec leurs bibliothèques
 # embarquées (bin/, lib/, share/qemu/), le CD invité (pomppc-guest.iso) et les licences tierces.
 #
-#   QEMU_SRC=~/src/qemu-release scripts/package_release_macos.sh 0.3
-#   (la version nomme le paquet : « v0.1.0 » pour la première publication, « 0.3 »
-#   pour la suivante ; le tag se pose à part)
+#   QEMU_SRC=~/src/qemu-rel04 scripts/package_release_macos.sh 0.4.1
+#   (la version nomme le paquet ; le tag se pose à part ; recette complète et cible
+#   macOS : docs/publier-macos.md)
 #
 # Prérequis :
 #   - QEMU construit par scripts/build_qemu_qfb.sh dans $QEMU_SRC au commit courant, de

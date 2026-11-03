@@ -201,7 +201,8 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
 ## 3. Mac M4 : état au 03/11/2026, 07 h 20 (0.4.1 publiée, lot 4 fini sur main, aucune VM ne tourne)
 
 **Dérive de documentation (3/11, matin, demande de l'utilisateur).** Relecture contre le code de ce qui a bougé
-depuis le 01/11 : README, TODO, frontal, recette de publication, `patches/README`, `tcg-g4`, parité M4. Le chantier
+depuis le 01/11 : README, TODO, frontal, recette de publication, `patches/README`, `tcg-g4`, parité M4 ; puis
+Quartz Extreme, `gpu-3d-tiger` §6, architecture §9, index `docs/re`, aide de `run_os9.sh`. Le chantier
 « TCG — M4 » du TODO a atteint sa fermeture et en sort (détail au CHANGELOG 0.4) ; « TCG — PC » passe en tête
 d'« Ensuite », car il attend le PC. Aucun fichier haché de `patches/` touché : l'empreinte de la série ne change pas.
 

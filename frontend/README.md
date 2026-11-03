@@ -126,7 +126,8 @@ chaque modèle de Mac possède nécessairement un enregistrement différent.
 Vérification : `ctest --test-dir frontend/build --output-on-failure`
 teste le déclenchement unique, la coupure, les valeurs invalides et la
 persistance des préférences du carillon (`startup_chime`), ainsi que la politique du pointeur
-(`pointer_policy`) et `.run/imguidock.conf` (`frontend_settings`) ; cela ne prouve pas l'écoute sur les haut-parleurs.
+(`pointer_policy`), `.run/imguidock.conf` (`frontend_settings`), le choix des disques (`disk_choice`),
+l'assistant (`setup_flow`), le dossier partagé (`shared_folder`) et `AppExtras` (`app_extras`) ; cela ne prouve pas l'écoute sur les haut-parleurs.
 Sur le démarrage réel du 27/09 (`bench/tiger-chime-final.log`, copie du PC sous
 `bench/mac-20261009/`), NSSound accepte
 une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
@@ -157,7 +158,9 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   shows the setup (`SetupFlow`, `SetupUi`): pages without a VM, then a bar above the guest. Steps with an
   installer pass `POMPPC_NO_REBOOT=1`, so QEMU exits when the guest restarts and the next step starts.
   The driver step ends when `qom-get gpu0 guest-driver` is true (IRQ_MASK armed by the kext).
-  `POMPPC_SETUP_CHOOSE=<file>` replaces macOS's file window in a test.
+  `POMPPC_SETUP_CHOOSE=<file>` replaces macOS's file window in a test, `POMPPC_DOWNLOADS=<dir>` the Downloads
+  folder. The app's launcher (`scripts/app-macos/pomppc-app.sh`) sets `POMPPC_APP` and `POMPPC_VERSION`, and keeps
+  the data in `~/POMPPC` (`POMPPC_DATA` for another folder).
 - **Dropping files.** Files or folders become a writable HFS+ disk in `Exchange/`, hot-plugged as
   `usb-storage` (QMP `blockdev-add`, `device_add`); a lone disc image is connected read-only, a `.dmg`
   being converted first. **Devices ▸ Eject** removes the device, then opens the disk on the host. The IDE CD
@@ -227,6 +230,8 @@ mouse and keyboard, no macOS Accessibility permission needed) and takes captures
 POMPPC_FE_SCRIPT="wait 75; fs; wait 3; shot /tmp/fs.png; click 1568 262; click 1568 262; \
 f11; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
 ```
+
+`POMPPC_FE_DISKS=1` opens the **Disks** panel, to check it from a capture.
 
 Steps: `wait <s>`, `move|click <x> <y>` (window points),
 `guestmove <x> <y>` (fractions 0–1 of the drawn guest view, without clicks),

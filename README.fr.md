@@ -202,7 +202,7 @@ pas activés. SMP reste à deux cœurs (profil Tiger), pas au nombre de cœurs h
 `HEADLESS=1`, `DBUS_DISPLAY=1` et un `POMPPC_DISPLAY` explicite contournent
 l'ouverture du frontend ; le banc de jeux conserve son lancement natif.
 
-Chaque lanceur documente ses variables dans son en-tête (`head -160 run_tiger.sh`). Les lanceurs
+Chaque lanceur documente ses variables dans son en-tête (`head -183 run_tiger.sh`). Les lanceurs
 **sondent le binaire** (`scripts/caps.sh`) et n'annoncent jamais une capacité absente. Verrou
 `flock` sur le disque : il meurt avec QEMU, **ne jamais supprimer `.run/tiger.lock`** (le fichier
 resté après un arrêt brutal ne verrouille rien ; le supprimer quand QEMU tourne encore laisse un

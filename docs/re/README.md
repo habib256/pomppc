@@ -36,4 +36,6 @@ le restaurer depuis `~/src` par `zstd -dc /media/gistarcade/TEST/pomppc-re.tar.z
 | `glsl-glengine.md` | GLSL dans GLEngine 10.4.6, relevé pour le protocole v21 (27/09) |
 | `cmr-rendu-vers-texture.md` | Colin McRae : le rendu vers texture d'IndirectX tenu par l'hôte (27/09) ; §7 : les reflets de la carrosserie (31/10) |
 | `ut2004-flyby.md`, `ut2004-fullscreen.md`, `ut2004-m4-profile.md`, `ut2004-texture-cache.md`, `ut2004-arme-noire.md` | UT2004 : banc caméra AS-Convoy, plein écran, profil M4 du 20/09, réutilisation des identifiants de texture, arme noire (texture diffuse perdue) |
+| `plugin-symboles-tiger.md` | noms des symboles du plugin et de libSystem dans les profils, par les binaires de la VM du M4 (01/11) ; `___stub_getrealaddr` ne prouve pas à lui seul un coût d'appels par pointeur |
+| `ut-attente-m4.md` | UT2004 sur le M4 : les horloges chaudes viennent de `delay_idle`, attente active SMP du noyau ; attente progressive `tcg/0067` (02/11) |
 | `apple-headers/` | en-têtes publics d'Apple `gliContext.h` et `gliDispatch.h` (interface GLI du pilote) |

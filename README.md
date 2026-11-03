@@ -166,6 +166,10 @@ only the system, at its real size. **View** opens the other panels, and **Fit Wi
 back the original size. In this archive,
 the scripts' Terminal messages are in French.
 
+## Using POMPPC
+
+This applies to the app and to the archive, unless it says otherwise.
+
 ### Sharing files with Mac OS
 
 **Drop files or folders on the POMPPC window.** A disk named *From Mac* appears on the desktop of Mac OS.
@@ -268,7 +272,7 @@ kextstat | grep pomppc
 system_profiler SPDisplaysDataType | grep -E "Resolution|Quartz"
 ```
 
-Each launcher documents its variables in its header (`head -160 run_tiger.sh`): `GPU=0`,
+Each launcher documents its variables in its header (`head -183 run_tiger.sh`): `GPU=0`,
 `FASTFP=0`, `NET=0`, `SNAPSHOT=1` (throw-away disk), `QFB=1` (second monitor), and more.
 Mac OS 9.2.2 runs with `./run_os9.sh` (single core, no 3D); `./run_os9.sh install` installs it
 from the 9.2.2 CD in `disks/os9-install.iso` (or `OS9_CD=`).

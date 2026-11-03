@@ -20,7 +20,12 @@
 #   SNAPSHOT=1 ./run_os9.sh # disque jetable (writes annulés -> boot toujours propre)
 #   OS9_PROFILE=complet SNAPSHOT=1 ./run_os9.sh disk # optimisations CPU expérimentales
 #   OS9_PROFILE=reference|memoire|flottant|complet|verifie (défaut : reference)
+#   OS9_RAM=512 ./run_os9.sh  # mémoire en Mo (Preferences du frontal)
+#   RES=1024x768x32 ./run_os9.sh # mode du firmware au démarrage
+#   POMPPC_EXTRA_DISKS="a.qcow2;b.qcow2" ./run_os9.sh # disques en plus du démarrage (panneau Disks)
+#   POMPPC_NO_REBOOT=1 ./run_os9.sh # QEMU sort quand l'invité redémarre (fin d'une étape de l'assistant)
 #
+# POMPPC_OS9_MODE=install|disk : même effet que l'argument, le frontal lançant ce script sans argument.
 # Piloté par le frontend ImGui : DBUS_DISPLAY=1 (sortie -display dbus,p2p=on) et
 # QMP_SOCK=<chemin> (socket QMP). POMPPC_SCRATCH déplace .run/ (socket moniteur).
 #

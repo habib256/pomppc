@@ -438,6 +438,8 @@ traite D-Bus ; le framebuffer partagé avec le rendu UI est protégé par
 `fbMtx_`. Le mapping `Unix.Map` est retiré après la jonction du thread D-Bus
 dans `QemuBridge::stop`. Le mutex `qmpMtx_` protège les échanges QMP concernés.
 Ces verrous ne remplacent ni les barrières qgpu ni le protocole de capture.
+Depuis la 0.4.1, le frontend branche aussi à chaud par QMP des disques `usb-storage` (fichiers déposés,
+dossier partagé) et lit `guest-driver` de `gpu0` ; c'est du contrôle, sans lien avec le chemin de rendu.
 La fin de `SURF_PRESENT`, la réception d'une mise à jour D-Bus et l'affichage
 UI sont trois événements distincts.
 
