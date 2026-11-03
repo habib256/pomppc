@@ -108,14 +108,6 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## Maintenant
 
-- [ ] **[Paquet] Éprouver la 0.4.1 sur macOS 15 et M1** (publiée le 03/11, essayée sur M4 sous macOS 27
-  seulement) : accord de Gatekeeper sur l'app réellement téléchargée, démarrage, `x-tb-fast`, un jeu, sur
-  le M1 de l'utilisateur sous 15.8. Aussi, faute de média ou de geste réel ici : clics réels dans
-  l'assistant, vrai installateur de Tiger et d'OS 9, combo sur une vraie 10.4.6, écran Retina ; pour le
-  dossier partagé, accord de confidentialité sur Documents ou Bureau, très gros dossier, fichier avec
-  resource fork écrit sous OS 9 (`docs/etat-des-hotes.md` §3). **Fermeture :** essai juste, ou correctif
-  publié.
-
 - [ ] **[QE — les deux hôtes] Résolutions : finir la preuve** (corrigé le 02/11,
   `docs/quartz-extreme.md`, journal). DOOM 3, UT2004 et Marble Blast passent depuis un bureau en 1920×1080 ou
   2560×1080 (paquet 0.4). Restent : Colin McRae ; matrice de preuve et A/B du plugin `20261102-modes` sur un disque au réglage des
@@ -241,10 +233,6 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   réglages utilisateur préservés.
 - [ ] **[Jeux] Warcraft III** : texte des menus (chemin tableaux, un sommet sans couleur reste
   blanc) ; menu principal juste au 26/09, à revoir en partie.
-- [x] **[Jeux] UT2004 : armes noires dans la démo de test : clos sur les deux hôtes** (PC le
-  07/10 ; M4 le 26/10, `5f25498`, défaut propre au GL d'Apple : éclairage à spot calculé par le
-  device ; démo revidée sur le M4, images ~166-195 justes ; `docs/re/ut2004-arme-noire.md`).
-  Entrée fermée le 01/11 à la relecture.
 - [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre.
 - [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée** — corrigé le 07/10 sur le
   PC ; à confirmer sur le tour `20260926-2156` du M4.
@@ -257,6 +245,13 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
 
 Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
+- [ ] **[Paquet] Éprouver la 0.4.1 sur macOS 15 et M1** (publiée le 03/11, essayée sur M4 sous macOS 27
+  seulement) : accord de Gatekeeper sur l'app réellement téléchargée, démarrage, `x-tb-fast`, un jeu, sur
+  le M1 de l'utilisateur sous 15.8. Aussi, faute de média ou de geste réel ici : clics réels dans
+  l'assistant, vrai installateur de Tiger et d'OS 9, combo sur une vraie 10.4.6, écran Retina ; pour le
+  dossier partagé, accord de confidentialité sur Documents ou Bureau, très gros dossier, fichier avec
+  resource fork écrit sous OS 9 (`docs/etat-des-hotes.md` §3). **Fermeture :** essai juste, ou correctif
+  publié.
 - [ ] **[Frontend] Curseur unique sous ImGuiDock** (`50a9801`, 01/11) : **réglé sur le M4,
   confirmé par l'utilisateur le 02/11** ; à voir à l'œil sur le PC au prochain
   `run_tiger.sh` en fenêtre (un seul curseur sur l'image, flèche de l'hôte de retour sur les
@@ -323,7 +318,7 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 ### Divers
 
 - [ ] **[Système] Quartz Extreme** : allumé sur les deux hôtes (`docs/quartz-extreme.md`).
-  Restes : avis borné (chantier plugin), `install.sh QE=1` et personnalités, Core Image.
+  Restes : `install.sh QE=1` et personnalités, Core Image (avis borné : chantier plugin).
 - [ ] **[Frontend] Ergonomie, hors lots** : empêcher la veille pendant l'installation (point 1 de
   l'étude), barre de menus native.
 - [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche Ctrl+Cmd+F, écran Retina,
@@ -340,7 +335,7 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
 
 | piste | mesure | doc |
 |---|---|---|
-| Traducteur de second niveau par traces (`x-tier2`, `0048`, `0055`) | DOOM 3 +2,7 % (PC), +5,7 % (M4) | `plan-traducteur-rapide.md` §9 |
+| Traducteur de second niveau par traces (`x-tier2`, `0048`, `0055`) ; mis de côté le 25/09, relancé le 21/10, arrêté le 22/10 | DOOM 3 +2,7 % (PC), +5,7 % (M4) ; reprise sur décision explicite de rouvrir ce chantier | `plan-traducteur-rapide.md` §9 |
 | Régions chaudes recompilées par LLVM | +17,6 % sur DOOM 3 | idem, en-tête (§10 sous `archive/tier3-llvm`) ; arrêté le 22/10 |
 | Mémoire directe (« fastmem ») | net ≤ 5 % pour un chantier entier | `vitesse-doom3-x86.md` §21 |
 | Vérification TLB compacte | extrapolé de la zone froide : 0-4 % | §21 |
@@ -354,18 +349,12 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
 | `tcg/0063` `x-dbat-lite` tel quel | cmr neutre, ut +3,7 % | §47 (témoin sous vérificateurs et x8 + 0063 : voir « Ensuite ») |
 | `tcg/0065` `POLLNS=2`, attente sous 1 ms (M4) | zen −8,20 % mais UT +10,06 % | `tcg-g4.md` §42.2, `archive/m4-pollns-court-0211` |
 | Appel MMIO synchrone « plugin vers l'hôte » | natif ×0,6-1,5 sur le travail réel | `plan-plugin-hote.md` (code sous `archive/plugin-hote-phase0`) |
-| 3-4 vCPU | 0 gain sur les jeux | Bloqué |
+| 3-4 vCPU (Tiger démarre sur 3 et 4) | 0 gain sur les jeux ; reprise sur demande explicite d'un mode 3-4 vCPU | `patches/smp-mac99/essais/qemu-mac99-4cpus.patch` |
 
 ## Bloqué
 
 - [ ] **[Jeux] RTCW** quitte après 8 s sans rien dessiner ; absent du disque quotidien.
       **Reprise :** jeu réinstallé sur le disque quotidien, puis diagnostic du lancement.
-- [ ] **[TCG] 3-4 vCPU** : Tiger démarre sur 3 et 4 avec
-      `patches/smp-mac99/essais/qemu-mac99-4cpus.patch` ; 0 gain sur les jeux.
-      **Reprise :** demande explicite d'un mode 3–4 vCPU.
-- [ ] **[TCG] Traducteur de second niveau** (`docs/plan-traducteur-rapide.md`, mis de côté par
-      l'utilisateur le 25/09, relancé le 21/10, arrêté sur chiffres le 22/10 : « Écarté sur
-      chiffres »). **Reprise :** décision explicite de rouvrir ce chantier.
 
 ## Référence validée
 
@@ -393,18 +382,18 @@ vertes sur 17 automatisées**. **PC, dernier tour complet : `bench/matrice/20261
 depuis, les cellules sont rejouées par les A/B (`bench/tcg/ab/*`), un tour complet avec le cœur
 corrigé du 31/10 reste à faire.
 
-| Jeu / chemin | Fenêtre | Plein écran | M4 01/10 (ms/image fen. / pe) | Travail restant |
-|---|---|---|---|---|
-| Marble Blast Gold | vert | vert | 9,0 / 9,6 | fenêtre sur bureau 800×600 en session |
-| Zenerchi | vert | non automatisé | 4,0 / — | automatiser plein écran |
-| DOOM 3 | vert | vert | 56,1 / 56,2 | changements de mode, combat |
-| Prey | vert | vert | 50,5 / 49,5 | changements de mode, combat |
-| UT2004 | vert | vert | 25,0 / 25,4 | — |
-| Warcraft III | non automatisé | vert | — / 15,4 | fenêtre, texte des menus |
-| Colin McRae | non applicable | vert | — / 48,1 | 1920×1080 (ralentissements signalés, « Ensuite ») ; mesuré **en course** sur les deux hôtes |
-| Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | tableaux clients déroulés (suites A4) |
-| Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 33,4 / 33,5 | attente des requêtes d'occlusion |
-| RTCW | non automatisé | non automatisé | — / — | réinstallation puis diagnostic |
+| Jeu / chemin | Fenêtre | Plein écran | M4 01/10 (ms/image fen. / pe) | M4 02/11 (QE, sans attente précise) | Travail restant |
+|---|---|---|---|---|---|
+| Marble Blast Gold | vert | vert | 9,0 / 9,6 | 6,2 / — | fenêtre sur bureau 800×600 en session |
+| Zenerchi | vert | non automatisé | 4,0 / — | 2,6 / — | automatiser plein écran |
+| DOOM 3 | vert | vert | 56,1 / 56,2 | 28,9 / — | changements de mode, combat |
+| Prey | vert | vert | 50,5 / 49,5 | — | changements de mode, combat |
+| UT2004 | vert | vert | 25,0 / 25,4 | 19,3 / — | — |
+| Warcraft III | non automatisé | vert | — / 15,4 | — | fenêtre, texte des menus |
+| Colin McRae | non applicable | vert | — / 48,1 | — / 41,7 (1920×1080) | 1920×1080 (ralentissements signalés, « Ensuite ») ; mesuré **en course** sur les deux hôtes |
+| Nexuiz ARB (`+r_glsl 0`) | vert | vert | 72,4 / 72,8 | — | tableaux clients déroulés (suites A4) |
+| Nexuiz GLSL (`+r_glsl 1`) | vert | vert | 33,4 / 33,5 | — | attente des requêtes d'occlusion |
+| RTCW | non automatisé | non automatisé | — / — | — | réinstallation puis diagnostic |
 
 Ces scènes ne prouvent pas le jeu entier. Sources et critères : `docs/matrice-jeux.md`.
 
