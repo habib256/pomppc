@@ -8,7 +8,7 @@ le GPU de l'hôte. Rien d'Apple n'est modifié dans l'invité : un plugin, un ke
 Tableau de bord : **`TODO.md`**. Historique : **`CHANGELOG.md`**. Conception et relevés :
 `docs/`.
 
-## Où en est le projet (au 01/11/2026)
+## Où en est le projet (au 03/11/2026)
 
 L'état courant détaillé (vitesse, matrice, défauts allumés, binaires de chaque hôte) est dans
 `TODO.md` et `docs/etat-des-hotes.md`.
@@ -124,12 +124,12 @@ protocole** — sous programme ARB, un repli vers Apple tue le jeu
 
 Sans construire : `POMPPC-<version>-macos-arm64.dmg` des
 [publications](https://github.com/habib256/pomppc/releases) contient une app à glisser dans
-Applications (données dans `~/POMPPC`). L'archive `pomppc-<version>-macos-arm64.tar.xz` demande **macOS 15 ou
-plus récent**, sans Homebrew (la 0.4 embarque ses bibliothèques, construites pour macOS 15.0 ; mise
-au point et mesurée sur un M4 sous macOS 27 ; recette de
-construction : `docs/publier-macos.md` ; installation, résolutions, mise à jour et dépannage :
-[README.md](README.md#quick-start-prebuilt-release-macos-on-apple-silicon)). C'est le dépôt
-au tag de la publication, plus `bin/` (`qemu-system-ppc`, `qemu-system-ppc64`, `qemu-img`
+Applications (données dans `~/POMPPC`), avec un assistant de premier lancement. L'app et l'archive
+`pomppc-<version>-macos-arm64.tar.xz` demandent **macOS 15 ou plus récent**, sans Homebrew (depuis la
+0.4, le paquet embarque ses bibliothèques, construites pour macOS 15.0 ; mis au point et mesuré sur
+un M4 sous macOS 27 ; recette de construction : `docs/publier-macos.md` ; installation, partage de
+fichiers, résolutions, mise à jour et dépannage : [README.md](README.md#install-the-app-macos-on-apple-silicon)).
+L'archive est le dépôt au tag de la publication, plus `bin/` (`qemu-system-ppc`, `qemu-system-ppc64`, `qemu-img`
 patchés, frontal `pomppc`), `lib/`, `share/qemu/` et `pomppc-guest.iso` (paquet de l'invité) ;
 `config.env` prend `bin/` de lui-même. Binaires signés ad hoc, non notariés :
 `xattr -dr com.apple.quarantine .` après extraction. Puis le média Tiger et l'installation
@@ -155,9 +155,9 @@ Deux pièges, durement acquis :
 ### Installer le GPU 3D dans l'invité
 
 Avec le paquet publié (`pomppc-guest.iso` à la racine), `./run_tiger.sh` insère le CD
-`POMPPC_GUEST` de binaires construits par le gcc 4.0 de Tiger ; une fois, dans Tiger,
-`sudo sh /Volumes/POMPPC_GUEST/install.sh` (Xcode inutile ; `--remove` désinstalle), puis
-redémarrer. Une application OpenGL annonce alors `GL_RENDERER = "POMPPC qgpu (OpenGL host GPU)"`.
+`POMPPC_GUEST` de binaires construits par le gcc 4.0 de Tiger ; une fois, dans Tiger, double-clic
+sur **Install POMPPC** ou `sudo sh /Volumes/POMPPC_GUEST/install.sh` (Xcode inutile ; `--remove`
+désinstalle), puis redémarrer. Une application OpenGL annonce alors `GL_RENDERER = "POMPPC qgpu (OpenGL host GPU)"`.
 
 Depuis le dépôt, `./run_tiger.sh` grave un CD `POMPPCSRC` avec les sources du kext et du plugin.
 Une fois, dans Tiger (gcc 4.0 des Xcode Tools 2.5 requis, SDK 10.4u) :
@@ -269,7 +269,7 @@ conservée : le self % du profil localise, il ne valide pas. En jeu, la mesure e
 | `guest/net/` | réglage du proxy web dans l'invité |
 | `tools/` | rétro-ingénierie, générateur de trampolines, boucle de dev, décodage de vidages (`tools/README.md`) |
 | `tests/` | harnais, tests natifs du cœur, rejoueur, tests de bout en bout |
-| `frontend/` | frontend Dear ImGui (`frontend/README.md`) |
+| `frontend/` | frontal Dear ImGui : assistant, disques, partage de fichiers, préférences (`frontend/README.md`) |
 | `docs/` | conception, protocole par version, relevés (`docs/re/`), bilans, archives (`docs/archive/`) |
 | `disks/`, `images/`, `shared/`, `bench/`, `.run/` | données locales et éphémères, gitignorées (sauf `disks/extras/`) |
 
@@ -277,6 +277,8 @@ conservée : le self % du profil localise, il ne valide pas. En jeu, la mesure e
 
 | Fichier | Contenu |
 |---|---|
+| `docs/etat-des-hotes.md` | où en est chaque hôte (PC, M4), à lire en premier |
+| `docs/publier-macos.md` | recette du paquet macOS et de l'app |
 | `docs/architecture.md` | propriété des ressources, threads, barrières, clients morts, resets et limites connues |
 | `docs/gpu-3d-tiger.md` | GPU 3D : architecture, rétro-ingénierie d'OpenGL.framework, protocole, mesures, boucle de dev |
 | `docs/re/README.md` | index des relevés (GLEngine, accélérateur IOKit, UT2004, programmes ARB, étude GLEngine) |

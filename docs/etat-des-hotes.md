@@ -34,7 +34,7 @@ Au début d'une séance :
 - Les commits vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 
-## 2. PC x86-64 : état au 01/11/2026, 14 h 30 (aucune VM ne tourne : A/B PRESENTQ raté et arrêté à 14 h 20 ; `build/` et `build-fast/` à reconstruire depuis `tcg/0064`)
+## 2. PC x86-64 : état au 01/11/2026, 14 h 30 (aucune VM ne tourne : A/B PRESENTQ raté et arrêté à 14 h 20 ; `build/` et `build-fast/` à reconstruire, voir « À faire »)
 
 **Fait le 01/11** (matinée close vers 12 h ; l'après-midi : `pgo-train.sh` et PRESENTQ, fin de
 cette liste ; la séance suivante se fait sur le M4)
@@ -113,8 +113,9 @@ cette liste ; la séance suivante se fait sur le M4)
 ~82 ms/image **en course** (plein écran).
 
 **À faire sur le PC, dans l'ordre** (au retour du M4)
-0. **Reconstruire `build/` et `build-fast/` depuis la série 0066/0067**, avant
-   toute mesure (profil PGO du 31/10). Le cœur qgpu a aussi changé le 02/11 au soir ; installer
+0. **Reconstruire `build/` et `build-fast/` depuis la série du 03/11** (`tcg/0064` à `0067`,
+   `usbhid/0002`, `guest-driver` de `qgpu-pci.c`), avant toute mesure (profil PGO du 31/10). Le cœur
+   qgpu a aussi changé le 02/11 au soir ; installer
    le kext et le plugin `20261102-modes` du bundle, redémarrer l'invité, puis balayer les modes
    avec `guest/gltest/setmode.c` (`quartz-extreme.md`, journal du 02/11 ; jamais essayé sous NVIDIA). 0066 modifie le finaliseur générique de pools :
    valider les chemins x86-64 sur cet hôte ; les preuves natives M4 ne le remplacent pas.
@@ -146,7 +147,8 @@ cette liste ; la séance suivante se fait sur le M4)
 soir, `QE=0` l'éteint) et la série TCG jusqu'à `tcg/0056`, dont la **zone froide `x-tcg-cold`**
 (depuis le 31/10, `TCGCOLD=0` l'éteint). Plugin `20261101-ombre` (PACKBITS, UVWIDE et leviers
 A+B allumés, avis d'ombre à 20 Hz), kext du 01/11. `tcg/0057`-`0059` sont compilés et
-éteints ; `tcg/0064` (`x-tb-head`, `TBHEAD=N`) est nommé depuis le 01/11 et éteint ;
+éteints ; `tcg/0064` (`x-tb-head`, `TBHEAD=N`) est nommé depuis le 01/11 et éteint ; `tcg/0065`-`0067` sont
+nommés depuis le 02/11, éteints ou propres à l'autre hôte ;
 `tcg/0060`-`0063` sont éteints et **non nommés** dans `build_qemu_qfb.sh` (arbre de
 mesure `~/src/qemu-nuit`). Binaire rapide : profil PGO du 31/10 (2 bis), construit avant
 `tcg/0064` : refusé par le lanceur jusqu'à sa reconstruction.
@@ -196,7 +198,12 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 03/11/2026, 00 h 47 (0.4.1 publiée, lot 4 fini sur main, aucune VM ne tourne)
+## 3. Mac M4 : état au 03/11/2026, 07 h 20 (0.4.1 publiée, lot 4 fini sur main, aucune VM ne tourne)
+
+**Dérive de documentation (3/11, matin, demande de l'utilisateur).** Relecture contre le code de ce qui a bougé
+depuis le 01/11 : README, TODO, frontal, recette de publication, `patches/README`, `tcg-g4`, parité M4. Le chantier
+« TCG — M4 » du TODO a atteint sa fermeture et en sort (détail au CHANGELOG 0.4) ; « TCG — PC » passe en tête
+d'« Ensuite », car il attend le PC. Aucun fichier haché de `patches/` touché : l'empreinte de la série ne change pas.
 
 **Soir du 02/11, demande de l'utilisateur : QE doit tenir toutes les résolutions.** Corrigé
 (`docs/quartz-extreme.md`, journal du 02/11) : kext (VRAM entière), plugin `20261102-modes`, cœur
@@ -229,8 +236,7 @@ frontal : son entrée du menu OS reste grisée.
 **Ergonomie, lots 1 et 2 (22 h, dans la 0.4.1).** Arrêt propre par la touche d'alimentation (`send-key
 power` ; `system_powerdown` sans effet sur mac99), confirmations, écran d'arrêt ou d'échec, panneaux fermés
 et fenêtre à l'invité, pomme d'Apple dans l'app (`POMPPC_BOOT_ARGS`). `POMPPC_FE_SCRIPT` joue de vrais clics
-dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une capture de l'écran. Reste le lot 3
-(assistant unique, installateur à double-cliquer, détection du pilote), puis le 4.
+dans ImGui, et `glshot` capture la fenêtre seule : à utiliser plutôt qu'une capture de l'écran.
 
 **Ergonomie, lot 4 (3/11, après la 0.4.1, non publié).** Le lot 4 de l'étude (dossier partagé, glisser-déposer,
 Preferences) était déjà livré pour l'essentiel. Restait : son et manette dans Preferences, sous le même
@@ -261,14 +267,14 @@ vrai installateur, A/B de vitesse non rejoué.
 **Ergonomie, lot 3 (23 h, dans la 0.4.1).** Assistant unique dans le frontal (`SetupFlow`, `SetupUi`), reprise
 par `.run/setup.state` ; `-no-reboot` enchaîne les étapes d'installation ; installateur `Install POMPPC.app`
 compilé dans Tiger (job `prebuilt`) ; propriété `guest-driver` de qgpu-pci. Essayé au clic (`POMPPC_FE_SCRIPT`) depuis le `.dmg` : pages, reprise, faux CD (Open Firmware), étape écourtée, vrai combo téléchargé chez Apple et son CD dans Tiger, puis pilote retiré d'un clone, **Install POMPPC**, mot de passe, redémarrage, détection. **Pas éprouvé : un vrai installateur de Tiger ou d'OS 9 (pas de média ici : le démarrage `cd:,\\\\:tbxi`, le `-no-reboot` à la fin réelle), l'application réelle du combo sur une 10.4.6, la fenêtre de fichiers de macOS (remplacée par `POMPPC_SETUP_CHOOSE`), le vrai navigateur.** **`patches/qgpu/qgpu-pci.c` a changé :
-le PC reconstruit `build/` et `build-fast/`.** Reste le lot 4.
+le PC reconstruit `build/` et `build-fast/`.**
 
 **Panneau Disks (21 h 30, dans la 0.4.1).** Démarrage + 2 disques au plus, HD ou SSD, création.
 Essayé ici : Tiger voit 3 disques, formate le SSD, le volume revient au redémarrage ; démarrage en SSD
 seul ; lancement d'OS 9 avec un disque attaché (QEMU l'attache, sa vue dans OS 9 n'est pas contrôlée).
 Le SSD n'est qu'une étiquette, Tiger n'en a pas la notion.
 
-**Pour reprendre après le matin :** QEMU reconstruit avec **0066/0067**, kext,
+**État du 02/11 à 13 h 34, avant le soir :** QEMU reconstruit avec **0066/0067**, kext,
 plugin et paquet `prebuilt` à jour. Zone froide arm64 implantée et validée ; attente
 courte corrigée par un budget progressif. Matrice des cinq jeux close, **60 cellules
 sans anomalie ni repli**, six preuves d'image séparées vertes. Aucun nouveau levier
@@ -535,8 +541,8 @@ personnalité « auto » le suit). `tcg/0057`–`0059`, `0064`–`0067` compilé
 options éteintes. `x-tcg-cold` est disponible sur arm64 système depuis `0066`,
 **éteint par défaut sur le M4** ; attente progressive via `POLLNS=3`, éteinte aussi.
 
-**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit le 02/11 à 17 h 40 (cœur qgpu ;
-série TCG du matin),
+**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit en dernier le 02/11 à 23 h 36
+(`usbhid/0002` et `guest-driver`, en plus du cœur qgpu de 17 h 40 et de la série TCG du matin),
 série jusqu'à `0059` et `0064`–`0067`, correctif de contrat de 0058 ; empreintes
 et preuves dans le bilan du matin ci-dessus. Kext du 02/11 et plugin
 `20261102-modes` (soir).
@@ -586,8 +592,9 @@ et preuves dans le bilan du matin ci-dessus. Kext du 02/11 et plugin
 - Les traces du plugin (`POMPPC_GLTRACE`, vidages de tampons) ont **rempli le disque de
   l'invité** (16 Go) le 29/10 : les effacer après usage.
 
-**À faire sur le M4** : la liste ordonnée est **au §4, « Venu du PC le 01/11 »** (même ordre que
-le chantier M4 de `TODO.md`). Hors de cette liste, seulement si besoin : parité de **tcg/0055**
+**À faire sur le M4** : `TODO.md`, « Maintenant » (essai de la 0.4.1 sur le M1, preuve de QE aux
+résolutions, plugin et coût d'un avis d'ombre actif) ; la liste venue du PC, au §4, est faite. Seulement
+si besoin : parité de **tcg/0055**
 (si les traces de second niveau reprennent, arrêtées depuis le 22/10) ; `vperm` en ligne
 (TBL/TBX, gain plafonné vers 0,3 %).
 

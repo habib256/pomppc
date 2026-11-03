@@ -54,11 +54,11 @@ newer than the binary (on failure it warns and launches the old one), and always
 launcher — `run_os9.sh` when given none — so the OS kept in `.run/imguidock.conf` only applies
 to `./build/pomppc` started without an argument.
 
-The window title shows the version of the QEMU actually launched, read from its QMP
-greeting (`POMPPC — PowerPC Macintosh (QEMU 11.1.2)`), so a `QEMU_BIN` pointing at
-another tree is visible at a glance.
+The window title names the system (`POMPPC — Mac OS X 10.4 Tiger`). The version of the QEMU actually
+launched, read from its QMP greeting, is shown in the window instead, so a `QEMU_BIN` pointing at
+another tree stays visible.
 
-**Réglages gardés** : à l'arrêt (menu Quitter, fermeture de la fenêtre, Ctrl+C ou `SIGTERM`),
+**Réglages gardés** : à l'arrêt (**Machine ▸ Quit**, fermeture de la fenêtre, Ctrl+C ou `SIGTERM`),
 ImGuiDock écrit `.run/imguidock.conf` — OS, son, manette, clavier et souris, vue et zoom,
 fenêtres affichées, plein écran, géométrie de la fenêtre — et le relit au lancement suivant
 (un lanceur passé en argument prime sur l'OS retenu ; le plein écran est écrit pour
@@ -135,9 +135,9 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
 
 ### Layout, ratio, plein écran (F1)
 
-- The guest screen (**Screen**) is docked in the centre of a full-frame DockSpace, with
-  **Library** on the right and **Log** / **Status** below; every panel can be
-  re-docked, the layout is saved in `<repo>/.run/imgui2.ini` and **View ▸ Default Layout** rebuilds it.
+- The guest screen (**Screen**) is docked in the centre of a full-frame DockSpace. Panels are closed
+  by default (see *Window size*); once opened, **Library** goes on the right and **Log** / **Status**
+  below. Every panel can be re-docked, the layout is saved in `<repo>/.run/imgui2.ini` and **View ▸ Default Layout** rebuilds it.
 - The guest is always drawn at the largest rectangle with **its own aspect ratio**, centred,
   black bands around it — never stretched (**View ▸ Fit to Window**, the default).
   **View ▸ 50/100/150/200 %** still fixes the size in window mode (scrollbars if larger).
@@ -169,7 +169,9 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   shutdown. The image is never overwritten while it exists: a crash leaves it to be brought back at the next run.
   QEMU's `vvfat` was rejected: 503 MB at most, and files shown empty under Tiger. `POMPPC_SHARED_CHOOSE=<dir>`
   replaces macOS's window and `POMPPC_TRASH=<dir>` the Trash in a test.
-- **Preferences, image, session.** Memory and processors go to the launchers (`RAM_MB`, `OS9_RAM`, `SMP`).
+- **Preferences, image, session.** Memory and processors go to the launchers (`RAM_MB`, `OS9_RAM`, `SMP`);
+  sound and gamepad are set there too, under the same **Apply and Restart**. The window shows the current
+  resolution and where to change it in Mac OS: `RES` doesn't reach the guests' desktop.
   **Sharp Image** multiplies the pixels by an integer through an FBO, then scales in bilinear; **Smooth**
   is bilinear. **Try Without Saving** passes `SNAPSHOT=1` for this session only.
 - **Quit and restarts.** Closing the window, or **Machine ▸ Quit**, asks first while the guest runs:
@@ -212,12 +214,13 @@ une seule lecture du WAV G4 à 50 %, après le premier scanout ; le passage
   cursor); it comes back over menus and bands, in pause and when the VM is stopped. In
   relative mode without capture it stays visible (`wantsHiddenHostCursor`,
   `src/PointerPolicy.h`, tested by `pointer_policy`).
+- **Help** has the guide, the data folder, the log, a problem report, the update check and About
+  (`AppExtras`, like the dropped files, the hot-plugged disks and the screenshot).
 - **Status** shows the guest size, the drawn rectangle and scale, the window size and the
   pointer mode; **Log** records launches, CDs, scanout changes, switches and left clicks
   (host point → guest pixel).
 
-`drop <path>` acts like a file dropped on the window. `glshot <file.ppm>` captures the window alone, without screen-recording rights, and `close` acts like
-the window's close button. `POMPPC_FE_SCRIPT` plays a test script through ImGui's input queue (same path as the real
+`POMPPC_FE_SCRIPT` plays a test script through ImGui's input queue (same path as the real
 mouse and keyboard, no macOS Accessibility permission needed) and takes captures, e.g.:
 
 ```sh
@@ -228,7 +231,9 @@ f11; wait 2; shot /tmp/win.png; quit" ./build/pomppc ../run_os9.sh
 Steps: `wait <s>`, `move|click <x> <y>` (window points),
 `guestmove <x> <y>` (fractions 0–1 of the drawn guest view, without clicks),
 `fs` (Ctrl+Cmd+F), `altenter`, `f11`, `esc`,
-`type <a-z 0-9 space .>`, `enter`, `shot <png>` (`screencapture -x`, so macOS host only), `quit`.
+`type <a-z 0-9 space .>`, `enter`, `shot <png>` (`screencapture -x`, so macOS host only),
+`glshot <file.ppm>` (the window alone, without screen-recording rights: prefer it),
+`drop <path>` (like a file dropped on the window), `close` (like the window's close button), `quit`.
 
 The headless probe defaults to the *other* guest, and always runs `-snapshot`:
 
@@ -246,7 +251,7 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
 - **P3 (menus → QMP)** ✅ — persistent QMP channel; menu bar drives
   `system_reset` (Machine ▸ Restart), `stop`/`cont` (Pause), CD insert/eject
   on the `gamecd` drive (`blockdev-change-medium`/`eject`), and an OS selector
-  that relaunches Tiger ↔ Mac OS 9. `Vue` zooms 50–200 %.
+  that relaunches Tiger ↔ Mac OS 9. **View** zooms 50–200 %.
 - **P4 (in progress)** —
   - ✅ **Unix.Map shared-memory fast path**: advertises
     `org.qemu.Display1.Listener.Unix.Map`; QEMU passes an fd we `mmap`
@@ -254,7 +259,7 @@ The headless probe defaults to the *other* guest, and always runs `-snapshot`:
     the bus. Silently falls back to inline `Scanout`/`Update` for
     non-shareable surfaces. Verified: mac99 surfaces are shareable.
   - ✅ **Sound / Gamepad** (Devices menu): both **on by default** (Screamer output
-    through PulseAudio on Linux, CoreAudio on macOS, menu item « Son (Screamer) » since 01/11 + `usb-host` gamepad passthrough); toggling relaunches QEMU.
+    through PulseAudio on Linux, CoreAudio on macOS, menu item « Sound (Screamer) » + `usb-host` gamepad passthrough); toggling relaunches QEMU.
     The run scripts self-guard (no device → skipped).
   - ✅ **Clipboard peer** (`org.qemu.Display1.Clipboard`): we export our
     skeleton + a proxy on the main connection, `Register()`, and bridge the

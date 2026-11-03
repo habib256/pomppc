@@ -88,8 +88,9 @@
 #                             # éteint par défaut, neutre) ; VPERMVERIFY=1 : preuve
 #   VCPUQOS=1 POLLNS=1 ./run_tiger.sh # macOS : fils vCPU en QoS interactive (x-vcpu-qos, tcg/0057) et
 #                             # attente de la boucle principale à la µs (POMPPC_POLL_NS, tcg/0058) ;
-#                             # éteints par défaut tant que l'A/B n'est pas fait
-#   POLLNS=3 ./run_tiger.sh  # macOS : budget de réveils précis, repli progressif de 250 ms à 2 s
+#                             # éteints par défaut : QoS neutre, attente sans gain générique (tcg-g4 §42)
+#   POLLNS=3 ./run_tiger.sh  # macOS : budget de réveils précis, repli progressif de 250 ms à 2 s ;
+#                             # POLLNS=2 (tcg/0065, délais sous 1 ms) est écarté, UT +10 %
 #                             # (tcg/0067, éteint par défaut ; repli seulement sur rafales denses)
 #   MEMSTATS=1 ./run_tiger.sh # compteurs mémoire toutes les 10 s sur stderr (x-mem-stats, tcg/0031, 0042)
 #   PMUREAL=1 ./run_tiger.sh  # ppc64 : le PMU POWER8 ne compte plus sur un G4 (PMC5 fantôme à chaque

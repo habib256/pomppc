@@ -3,7 +3,7 @@
 > **Deux hôtes (PC x86-64 et Mac M4) en alternance** : l'état de chacun et ce qui y reste à faire
 > sont dans [docs/etat-des-hotes.md](docs/etat-des-hotes.md), à lire en premier.
 
-État au 02/11/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 03/11/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
@@ -108,68 +108,19 @@ L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## Maintenant
 
-- [ ] **[Paquet] Éprouver la 0.4 sur macOS 15 et M1** (publiée le 02/11, essayée sur M4 sous macOS 27
-  seulement) : démarrage, `x-tb-fast`, un jeu, sur le M1 de l'utilisateur sous 15.8. **Fermeture :**
-  essai juste, ou correctif publié.
+- [ ] **[Paquet] Éprouver la 0.4.1 sur macOS 15 et M1** (publiée le 03/11, essayée sur M4 sous macOS 27
+  seulement) : accord de Gatekeeper sur l'app réellement téléchargée, démarrage, `x-tb-fast`, un jeu, sur
+  le M1 de l'utilisateur sous 15.8. Aussi, faute de média ou de geste réel ici : clics réels dans
+  l'assistant, vrai installateur de Tiger et d'OS 9, combo sur une vraie 10.4.6, écran Retina ; pour le
+  dossier partagé, accord de confidentialité sur Documents ou Bureau, très gros dossier, fichier avec
+  resource fork écrit sous OS 9 (`docs/etat-des-hotes.md` §3). **Fermeture :** essai juste, ou correctif
+  publié.
 
 - [ ] **[QE — les deux hôtes] Résolutions : finir la preuve** (corrigé le 02/11,
   `docs/quartz-extreme.md`, journal). DOOM 3, UT2004 et Marble Blast passent depuis un bureau en 1920×1080 ou
   2560×1080 (paquet 0.4). Restent : Colin McRae ; matrice de preuve et A/B du plugin `20261102-modes` sur un disque au réglage des
   références ; balayage `guest/gltest/setmode.c` sur le PC (EGL/NVIDIA). **Fermeture :** ces
   essais justes, ou leur écart écrit.
-
-Ordre du 01/11 : la séance de l'après-midi est sur le M4, son chantier passe en tête (même ordre
-que `docs/etat-des-hotes.md` §4) ; le plugin est
-commun ; les leviers du JIT x86 attendent le retour sur le PC.
-
-- [ ] **[TCG — M4] Mesurer le M4 avant de l'optimiser, puis rattraper le PC.** Profils croisés
-  renouvelés le 02/11 (`docs/profil-m4-0211.md`). Dans l'ordre :
-  1. **Rattrapage** (01/11, en partie fait) : `~/src/qemu` reconstruit ; kext, plugin et GA
-     compilés et installés dans la VM quotidienne, invité redémarré ; mb et d3 fen/pe vertes ;
-     nuit du 01 au 02/11 : artefacts locaux absents, six preuves reconstituées et vertes
-     (mb/zen/d3/ut fen, mb/cmr pe), références regardées et validées, cmr en course sans le
-     faux reflet. Ombre de DOOM 3 confirmée par l'utilisateur à 22 h 39. Restent : curseur net
-     en plein écran à l'œil. A/B neuf `m4-bundle-0111n` terminé le 02/11 à 1 h 36 :
-     PACKBITS UT −3,19 %, cmr en course −7,08 %, autres cellules sous 3 % et inconclusives
-     sur trois parties ; bras non-simple sous 1 %, avis actifs non comptés.
-     Détail : `docs/profil-m4-0211.md` §1, `docs/etat-des-hotes.md` §3-§4.
-  2. **Profil croisé des 5 jeux** (`sample` du processus QEMU, fils vCPU et `qgpu-render`,
-     comme `tools/re/perfpart.py` sur le PC) : part du JIT, recherche de blocs, `mftb`,
-     helpers, et **part du fil de rendu hôte** : fait le 02/11, §2 du profil. Sur d3,
-     `qgpu-render` travaille environ 0,178 cœur, attend en condition 82,2 % du relevé :
-     pas de justification pour faire passer la piste 3 (`nat_conv_attr`) en tête.
-  3. **`tcg/0058` délais courts** : l'attente à la microseconde fait zen −18 % mais ut +6,6 % ;
-     variante `select` pour les seuls délais sous la milliseconde, profil d'UT (verrou).
-     Contrat de `g_poll` corrigé le 01/11 nuit (`tcg/fixes/0058`, 42 cas et deux mutants) ;
-     les chiffres du 30/10 précèdent cette correction. Variante `tcg/0065` préparée le
-     02/11 (`POLLNS=2`, strictement sous 1 ms), 56 cas et deux mutants de routage. **A/B
-     des cinq jeux clos à 4 h 30 : écartée**, zen −8,20 % mais UT +10,06 % (mode 1
-     corrigé : −9,60 / +10,59 %) ; autres écarts sous 3 % et inconclusifs, cmr inclus.
-     `archive/m4-pollns-court-0211`, `tcg-g4.md` §42.2. Le levier reste éteint. Sur UT,
-     travail d'horloge 0,013→0,18 cœur et charge vCPU 1,07→1,63 : **appelant identifié**
-     sur le M4 dans `delay_idle` (noyau xnu-792.24.17, attente active SMP),
-     `docs/re/ut-attente-m4.md`. Reprise du matin : diagnostic de cadence
-     (UT ~11 000 expirations/s en mode 2, zen ~2 000), prototypes écartés
-     et archivés. **0067, `POLLNS=3`** : budget par fil, retour temporaire au
-     poll courant en rafale, paliers 250 ms à 2 s ; **1 635 contrôles, neuf mutants**.
-     Matrice finale : trois passages et témoin identique, zen −9,08 %, UT +1,01 %
-     (ensemble avec froid : −10,06 / +0,23 %), d3 petit coût possible. Aucun gain
-     générique établi : option disponible, **éteinte par défaut**. Trois prototypes
-     écartés sont archivés. Aucun raccourci du noyau ni changement d'horloge.
-  4. **Zone froide arm64 implantée le 02/11 matin (`tcg/0066`)** : relais chauds
-     imm26 pour les cinq familles mémoire/FP/tlbb, régions nominales ≤64 Mio
-     même en SMP=1, pools froids séparés. 53 cas natifs et cinq mutants ;
-     preuves invitées SMP=1/JIT éloigné et SMP=2/tampon 64 Mio réussies,
-     sorties identiques au témoin, fautes au PC/DAR exact et **2 560 exceptions FP**.
-     Six preuves d'image vertes avec 0066+0067 ; matrice finale des cinq jeux
-     **60 cellules, zéro anomalie/repli**, témoin identique et charge valide.
-     **Portage clos, `TCGCOLD=1` disponible, éteint par défaut** : aucun gain
-     générique établi, gain PC non transféré (`docs/tcg-zone-froide-arm64.md` §7).
-     Restent les causes des alertes TLB/RETVERIFY du témoin, séparées du portage.
-  5. Tranche d'endurance du kext du 01/11 **faite dans la nuit** : 15 démarrages de contrôle
-     et 4 cycles, puis 55 démarrages et 4 cycles avec le binaire final : **70 démarrages
-     et 8 jeux sains** (`endurance.md` §16–17). Restauration détachée corrigée et vérifiée.
-  **Fermeture :** doc de profil M4, PACKBITS mesuré, A/B de chaque levier, `etat-des-hotes.md`.
 
 - [ ] **[Plugin — les deux hôtes] Alléger le plugin de l'invité, suite de PACKBITS**
   (`docs/plugin-allegement.md` §8, profil `bench/tcg/ab/xprof-0111-cmr-pb`). Le coût est
@@ -194,7 +145,11 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
   `POMPPC_GL_QE_NONSIMPLE=0`, bande toujours juste). **Fermeture :** plugin sous 20 % du vCPU
   sur cmr et d3, aucun jeu en perte, matrice verte.
 
-- [ ] **[TCG — PC] Les leviers génériques restants du JIT x86** (`docs/tcg-g4.md` §44-§47) :
+## Ensuite
+
+Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
+
+- [ ] **[TCG — PC] Les leviers génériques restants du JIT x86** (attendent le retour sur le PC) (`docs/tcg-g4.md` §44-§47) :
   1. **PGO entraîné avec cmr** : `pgo-train.sh --plein-ecran cmr` (01/11), réentraînement
      fait, A/B neuf contre ancien (`bench/tcg/ab/pgo-0111-*`) : neutre en fenêtre, cmr non
      prouvé (+6 % sur 2 parties, l'une polluée par une charge de l'hôte, `neuf-1` quittée
@@ -219,10 +174,6 @@ commun ; les leviers du JIT x86 attendent le retour sur le PC.
      accélérer cette boucle n'est pas en soi un gain utile au jeu (−2,4 % mesuré pour
      helper lent → rapide).
   **Fermeture de chaque levier :** preuve, A/B des cinq jeux, allumé ou archivé avec le chiffre.
-
-## Ensuite
-
-Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête.
 
 - [ ] **[Matrice — PC] Un tour complet avec le kext et le plugin du 01/11** : les tours du 01/11
   étaient `--sans-vidage` (cellules rouges par construction) ; il faut des cellules de preuve
@@ -276,6 +227,8 @@ Dans l'ordre. Chaque entrée passe par le banc d'endurance quand elle s'y prête
   cellule régresse.
 - [ ] **[Métrologie] Troisième facteur de lenteur** (`docs/tcg-g4.md` §14.7) : une partie DOOM 3
   sur huit lente de bout en bout ; la matrice relève la charge avant et après la fenêtre.
+- [ ] **[TCG — M4] Alertes TLB/RETVERIFY du témoin** : présentes sans `tcg/0066`, séparées de son portage,
+  cause inconnue [F] ; procédure dans `docs/tcg-zone-froide-arm64.md` §6.
 - [ ] **[TCG] Les « sans traduction » de `x-ret-verify` en fin de session** (`tcg-g4.md` §44) :
   peut-être parents de la rafale « sans PTE » de `tcg/0061` (§45, non reproduite).
 
@@ -371,6 +324,8 @@ Le travail est fait ; il ne manque que l'essai ou la décision de l'utilisateur.
 
 - [ ] **[Système] Quartz Extreme** : allumé sur les deux hôtes (`docs/quartz-extreme.md`).
   Restes : avis borné (chantier plugin), `install.sh QE=1` et personnalités, Core Image.
+- [ ] **[Frontend] Ergonomie, hors lots** : empêcher la veille pendant l'installation (point 1 de
+  l'étude), barre de menus native.
 - [ ] **[Frontend] Frontend F1, restes non joués** : la vraie touche Ctrl+Cmd+F, écran Retina,
   plusieurs moniteurs.
 - [ ] **[Son] Arrêt de la boucle principale de 186 ms** en fin de cinématique de DOOM 3
@@ -394,9 +349,10 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
 | `tcg/0053` AltiVec flottant connu | neutre en jeu | `tcg-g4.md` §41, `archive/0053-vfp-known` |
 | `tcg/0057` QoS des vCPU (M4) | neutre au repos | §42 |
 | `tcg/0059` `vperm` en PSHUFB | exact, neutre | §43 |
-| `tcg/0060` x8 tel quel | cmr +4,2 % en course | §46 (voir « Maintenant » pour x8 + 0063) |
+| `tcg/0060` x8 tel quel | cmr +4,2 % en course | §46 (voir « Ensuite » pour x8 + 0063) |
 | `tcg/0061` `x-bat-skip` | neutre partout en course, rafale non expliquée | §46 |
-| `tcg/0063` `x-dbat-lite` tel quel | cmr neutre, ut +3,7 % | §47 (témoin sous vérificateurs et x8 + 0063 : voir « Maintenant ») |
+| `tcg/0063` `x-dbat-lite` tel quel | cmr neutre, ut +3,7 % | §47 (témoin sous vérificateurs et x8 + 0063 : voir « Ensuite ») |
+| `tcg/0065` `POLLNS=2`, attente sous 1 ms (M4) | zen −8,20 % mais UT +10,06 % | `tcg-g4.md` §42.2, `archive/m4-pollns-court-0211` |
 | Appel MMIO synchrone « plugin vers l'hôte » | natif ×0,6-1,5 sur le travail réel | `plan-plugin-hote.md` (code sous `archive/plugin-hote-phase0`) |
 | 3-4 vCPU | 0 gain sur les jeux | Bloqué |
 
@@ -414,16 +370,16 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée.
 ## Référence validée
 
 L'état exact de chaque hôte (binaires, défauts allumés, plugin installé, VM) est tenu dans
-`docs/etat-des-hotes.md`, section 2 (PC) et 3 (M4). Repères au 01/11 :
+`docs/etat-des-hotes.md`, section 2 (PC) et 3 (M4). Repères au 03/11 :
 
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
-| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit le 02/11 matin, série incluant `0066/0067`, empreintes dans `docs/etat-des-hotes.md`) |
-| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059`, `0064`-`0067` compilés sur le M4, options éteintes ; zone froide arm64 disponible via `0066`. PC : reconstruire référence + rapide depuis `0066/0067`, puis valider le finaliseur de pools. `0060`-`0063` éteints, non nommés |
-| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre` (`disks/prebuilt`) ; M4 : les mêmes depuis le 01/11 à 16 h 57 (VM quotidienne, compilés dans l'invité, redémarrée ; anciens dans `/var/tmp/avant-0111/` de l'invité) |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit en dernier le 02/11 à 23 h 36, série incluant `0066/0067` et `usbhid/0002`) |
+| Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059`, `0064`-`0067` compilés sur le M4, options éteintes ; zone froide arm64 disponible via `0066`. PC : reconstruire référence + rapide depuis `0066/0067` et `usbhid/0002`, puis valider le finaliseur de pools. `0060`-`0063` éteints, non nommés |
+| Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre`, ceux du 02/11 à installer (`docs/etat-des-hotes.md` §2) ; M4 : kext du 02/11 et plugin `20261102-modes`, VM quotidienne depuis le 02/11 à 18 h 16 (anciens dans `/var/tmp/avant-0211/` de l'invité) |
 | Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 ; le 01/11, mb et d3 fen/pe vertes avec le nouveau bundle, cmr-pe reprise (faux reflet, `docs/re/cmr-rendu-vers-texture.md` §7), six références renouvelées et validées à l'œil dans la nuit, six preuves vertes avec `0066/0067` le 02/11 |
-| Contrôle général | PC 245 OK / 0 échec (14/10, `docs/binaire-rapide-x86.md`) ; M4 `--slow` : 470 OK / 0 échec / 1 ignoré (02/11 matin), 49 scripts ShellCheck corrigés |
+| Contrôle général | PC 245 OK / 0 échec (14/10, `docs/binaire-rapide-x86.md`) ; M4 : 485 OK / 0 échec / 4 ignorés (03/11) ; `--slow` : 470 OK / 0 échec / 1 ignoré (02/11 matin), 49 scripts ShellCheck corrigés |
 
 ## Matrice de jeux
 
@@ -493,12 +449,13 @@ plan ; DOOM 3 se mesure en parties réelles (`timedemo` refusé par la démo).
 |---|---|
 | Ce qui est fini (lots, versions du protocole, mesures) | `CHANGELOG.md` |
 | Vitesse sur le PC x86-64 (profils, leviers, chiffres) | `docs/vitesse-doom3-x86.md`, `docs/binaire-rapide-x86.md` (PGO, empreinte de la série) |
-| Parité et vitesse sur le M4 | `docs/parite-m4-2510.md`, `docs/parite-arm64-0031-0035.md`, `docs/jit-m4-2026-10-05.md`, `docs/etat-des-hotes.md` §3 |
+| Parité et vitesse sur le M4 | `docs/parite-m4-2510.md`, `docs/parite-arm64-0031-0035.md`, `docs/jit-m4-2026-10-05.md`, `docs/profil-m4-0211.md`, `docs/tcg-zone-froide-arm64.md`, `docs/re/ut-attente-m4.md`, `docs/etat-des-hotes.md` §3 |
 | Allègement du plugin de l'invité | `docs/plugin-allegement.md`, `docs/d3-plugin-x86.md` |
 | Processeur émulé : relevés, patches, A/B | `docs/tcg-g4.md`, `docs/flottant-rapide.md`, `docs/ppc32-mttcg.md`, `docs/anatomie-ppc32.md`, `docs/smp-coeurs.md` |
 | Matrice de jeux (A3) : lancer, preuves, références, pièges | `docs/matrice-jeux.md` |
 | Banc d'endurance, gels et épreuves de fiabilité | `docs/endurance.md`, `docs/gel-doom3-baddisplay.md`, `docs/epreuve-gpu-bloque.md`, `docs/metrologie-boot.md` |
 | Quartz Extreme | `docs/quartz-extreme.md` |
+| Frontal, app macOS, publication | `frontend/README.md`, `docs/publier-macos.md`, `docs/notes-version-*.md` |
 | Architecture, rétro-ingénierie, offsets, boucle de dev | `docs/architecture.md`, `docs/gpu-3d-tiger.md`, `docs/re/README.md` |
 | Protocole : contrat courant v22 ; historique v7 → v21 (pas de document propre à la v22, ATI combine3) ; les volets A4 `protocole-v23-*` sont entrés en capacités, sans v23 | `docs/protocole.md`, `docs/protocole-v*.md` |
 | Backend GL et attente de l'invité ; textures | `docs/backend-gl-attente.md`, `docs/backend-gl-unites-fixes.md`, `docs/pagination-textures.md` |

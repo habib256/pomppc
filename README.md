@@ -161,7 +161,7 @@ own Tiger installation media.
    also holds small OpenGL test programs (`glwin`, `gltest`).
 
 Your Tiger disk is the single file `disks/tiger.qcow2`: copy it while the VM is off to back it up.
-The front end's menus are **Machine**, **Games**, **OS**, **Devices** and **View**. The window shows
+The front end's menus are **Machine**, **Games**, **OS**, **Devices**, **View** and **Help**. The window shows
 only the system, at its real size. **View** opens the other panels, and **Fit Window to Guest** brings
 back the original size. In this archive,
 the scripts' Terminal messages are in French.
@@ -299,7 +299,8 @@ QEMU's `configure` needs Python ≥ 3.9 with `tomli` (built in as `tomllib` from
 **inside Tiger** with the Xcode 2.5 tools (gcc 4.0, SDK 10.4u): `./run_tiger.sh` burns a
 `POMPPCSRC` CD with their sources, and `guest/gldriver/install.sh` builds and installs them
 (or installs the prebuilt binaries of `disks/prebuilt`, burnt on the same CD, when gcc 4.0 is
-missing). `scripts/package_release_macos.sh` produces the release archive
+missing). `scripts/package_release_macos.sh` produces the release archive and
+`scripts/package_app_macos.sh` the app and its `.dmg`
 (`scripts/package_release_linux.sh` for Linux x86-64, not published); the full recipe is in
 [docs/publier-macos.md](docs/publier-macos.md) (in French).
 

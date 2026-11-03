@@ -2,7 +2,7 @@
 
 Ce que chaque version publiée de POMPPC a changé, de la plus récente à la plus ancienne
 (publications : https://github.com/habib256/pomppc/releases). Le **protocole qgpu**
-(`QGPU_PROTO_VERSION`, v22 en 0.3) a son propre numéro : chaque changement sémantique exige de
+(`QGPU_PROTO_VERSION`, v22 de la 0.3 à la 0.4.1) a son propre numéro : chaque changement sémantique exige de
 reconstruire QEMU et le plugin ; le kext ne change que si l'ABI de transport change. Les mesures
 sont celles prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message
 de commit et dans `docs/`.

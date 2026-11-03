@@ -23,7 +23,7 @@ exacts mais sans gain, `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-in
 
 **État au 01/11/2026** (la liste ci-dessus s'arrête au 01/10 ; la série a continué jusqu'à
 `tcg/0063`, journal daté en §25-§47, puis `tcg/0064` `x-tb-head` fusionné le 01/11, décrit dans
-`docs/anatomie-ppc32.md`). Vérité : `scripts/build_qemu_qfb.sh` (patches nommés),
+`docs/anatomie-ppc32.md`, et `tcg/0065`-`0067` le 02/11, §42.2 et `docs/tcg-zone-froide-arm64.md`). Vérité : `scripts/build_qemu_qfb.sh` (patches nommés),
 `run_tiger.sh` (défauts par hôte), `docs/etat-des-hotes.md` (état des binaires).
 
 | patches | propriétés (lanceur) | PC x86-64 | M4 arm64 |
@@ -32,8 +32,9 @@ exacts mais sans gain, `patches/tcg/essais/0002-ppc-lmw-inline.patch` (`x-lmw-in
 | 0022, 0025/0029, 0026 | `x-vfp-native`, `x-lmw-vector`, `x-jc-word` | allumés | allumés |
 | 0024 | `x-jit-rel32` | allumé (06/10, §31) | sans objet |
 | 0031-0035 (+ 0037-0039 sur arm64), 0040, 0041, 0043, 0045-0047, 0050-0052 | `x-tlb-precise`, `x-lmw-inline`, `x-dcbz-inline`, `x-fp-native-cmp`, `x-vfp-native-cmp`, `x-dirty-skip`, `x-pteg-map`, `x-jc-2way`, `x-fp-known`, `x-fprf-lazy`, `x-stfs-known`, MTTCG 32 bits (`PPC32MT`), `x-lfs-known`, `x-tlb-base` | allumés (06/10 au 25/10) | allumés depuis le 26/10 (`docs/parite-m4-2510.md`) |
-| 0056 | `x-tcg-cold` | allumé depuis le 31/10 (`docs/vitesse-doom3-x86.md` §23) | sans effet tant que le saut long n'est pas écrit : parité à faire |
+| 0056 | `x-tcg-cold` | allumé depuis le 31/10 (`docs/vitesse-doom3-x86.md` §23) | disponible depuis `0066` (`TCGCOLD=1`), éteint : aucun gain générique (`docs/tcg-zone-froide-arm64.md` §7) |
 | 0013, 0048 + 0055, 0049, 0054, 0057-0058 (macOS), 0059, 0064 | `x-fp-flat`, `x-tier2`, `x-pmu-real`, `x-vfp-native-cmp-slow`, `x-vcpu-qos`, `POMPPC_POLL_NS`, `x-vperm-inline`, `x-tb-head` (accélérateur, `TBHEAD=N`) | éteints | éteints |
+| 0065, 0067 (macOS), 0066 (arm64) | `POLLNS=2`, `POLLNS=3`, `x-tcg-cold` | 0066 compilé, à valider ici (finaliseur générique des pools) ; 0065 et 0067 sans objet | compilés, éteints (0065 écarté, UT +10,06 %) |
 | 0042 | compteurs sous `x-mem-stats` / `x-ret-verify` | mesure | mesure |
 | **0060-0063** | `x-jc-clear-exact`/`x-jc-page-bits`, `x-bat-skip`, `x-bat-old-mask`, `x-dbat-lite` | **non nommés** dans `build_qemu_qfb.sh`, absents des binaires (§44-§47) ; arbre de mesure `~/src/qemu-nuit/build-x` | non nommés |
 

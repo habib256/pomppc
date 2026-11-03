@@ -13,11 +13,12 @@ ci-dessous et §5.8.)
 0037-0039) est prouvée sur le M4 et **allumée par défaut** sur `Darwin:arm64` depuis le 26/10
 (§5.8), 0054 et 0055 (outils de preuve, §5.9, §5.12) construits et éteints. Les deux hôtes ont
 les mêmes défauts, sauf `JITREL32` (propre à x86-64) et la zone froide `TCGCOLD` (`tcg/0056`,
-allumée sur le PC le 31/10, sans effet sur arm64 tant que le chemin lent n'a pas de saut long :
-parité à écrire). `tcg/0057`-`0058` (macOS), `0059` et `0064` (`x-tb-head`, fusionné le 01/11 ;
-preuves arm64 à faire, `docs/anatomie-ppc32.md`) sont compilés et éteints ;
+allumée sur le PC le 31/10 ; portée sur arm64 le 02/11 par `0066`, éteinte sur le M4 faute de gain
+générique, `docs/tcg-zone-froide-arm64.md` §7). `tcg/0057`-`0058` et `0065`, `0067` (macOS), `0059` et
+`0064` (`x-tb-head`, fusionné le 01/11 ; preuves arm64 à faire, `docs/anatomie-ppc32.md`) sont compilés
+et éteints ;
 `0060`-`0063` ne sont pas nommés dans `build_qemu_qfb.sh`. Le M4 tourne toujours sur le binaire
-de référence (pas de `build-fast`), reconstruit le 01/11 sur `a0e028e`. Ce qui reste à faire
+de référence (pas de `build-fast`), reconstruit en dernier le 02/11 à 23 h 36. Ce qui reste à faire
 sur le M4 : `docs/etat-des-hotes.md` §3 et §4 (A/B du bundle du 01/11, profil croisé), non le
 plan des §1-§2.
 
