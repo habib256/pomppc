@@ -9,7 +9,7 @@
 # d'où gcc 11 compilé ici (long : c'est le seul poste lourd de l'image). Détail, plancher et
 # ce qui reste à la main : docs/publier-linux.md.
 #
-# Debian 11 est sortie du support LTS fin août 2026 : ses dépôts peuvent passer à tout moment sur
+# Debian 11 est sortie du support LTS fin août 2026 : ses paquets sont passés sur
 # archive.debian.org. L'image se cuit donc UNE fois, se pousse sur GHCR et s'épingle par digest
 # (.github/workflows/builder-image.yml, puis BUILDER_IMAGE dans release.yml). Une publication
 # ne touche plus à apt.
@@ -32,18 +32,18 @@ ARG RUNTIME_SHA256=24da8e0e149b7211cbfb00a545189a1101cb18d1f27d4cfc1895837d2c30b
 ARG TOMLI_SHA256=939de3e7a6161af0c887ef91b7d41a53e7c5a1ca976325f429cb46ea9bc30ecc
 ARG DISTLIB_SHA256=47f8c22fd27c27e25a65601af709b38e4f0a45ea4fc2e710f65755fa8caaaf87
 
-# --- dépendances, avec repli sur l'archive si bullseye a quitté les miroirs ------------------
+# --- dépendances, depuis archive.debian.org ---------------------------------------------------
 # Ce que QEMU et le frontal lient (scripts/build_qemu_qfb.sh, profil paquet-linux). GL et EGL ne
 # servent qu'à la compilation et au lien : aucune de ces bibliothèques ne part dans le paquet.
 # Pas de GTK, de SDL, d'epoxy, de libgbm : un -dev absent ne peut pas s'inviter au configure.
-RUN if ! apt-get update; then \
-        echo "[apt] miroir bullseye injoignable : repli sur archive.debian.org" >&2; \
-        printf '%s\n' \
-            'deb http://archive.debian.org/debian bullseye main' \
-            'deb http://archive.debian.org/debian-security bullseye-security main' \
-            > /etc/apt/sources.list; \
-        apt-get -o Acquire::Check-Valid-Until=false update; \
-    fi; \
+# [A] Relevé le 04/11/2026 : deb.debian.org publie encore l'index de bullseye-security, mais ses
+# paquets répondent 404 (unzip_6.0-26+deb11u2) ; le même index et le même fichier répondent sur
+# archive.debian.org. apt-get update réussit donc et seul l'install échoue : on va droit à l'archive.
+RUN printf '%s\n' \
+        'deb http://archive.debian.org/debian bullseye main' \
+        'deb http://archive.debian.org/debian-security bullseye-security main' \
+        > /etc/apt/sources.list; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
     apt-get install -y --no-install-recommends \
         ca-certificates curl wget git xz-utils unzip file patch make gawk perl gcc g++ libc6-dev pkg-config \
         binutils patchelf ninja-build bison flex python3 python3-venv \
