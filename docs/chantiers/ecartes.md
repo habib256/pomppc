@@ -8,6 +8,7 @@ Ne pas rouvrir sans fait nouveau ; la mesure est dans la doc citée. Les « § �
 |---|---|---|
 | Traducteur de second niveau par traces (`x-tier2`, `0048`, `0055`) ; mis de côté le 25/09, relancé le 21/10, arrêté le 22/10 | DOOM 3 +2,7 % (PC), +5,7 % (M4) ; reprise sur décision explicite de rouvrir ce chantier | `plan-traducteur-rapide.md` §9 |
 | Régions chaudes recompilées par LLVM | +17,6 % sur DOOM 3 | idem, en-tête (§10 sous `archive/tier3-llvm`) ; arrêté le 22/10 |
+| `POMPPC_GL_PRESENTQ`, image n mise en file avant d'attendre la n−1 (04/11) | plein écran, 3 parties : cmr +2,13 %, mb +0,20 %, ut −0,38 % ; aucun gain | `presentq.md` |
 | Mémoire directe (« fastmem ») | net ≤ 5 % pour un chantier entier | `vitesse-doom3-x86.md` §21 |
 | Vérification TLB compacte | extrapolé de la zone froide : 0-4 % | §21 |
 | « Opérande flottant connu partout » | plafond 3,5 %, même sans aucun test | §18.1 |

@@ -23,6 +23,8 @@ cachée, compatibilité 3.2, repli logiciel) ; frontal sans bash : `LaunchPlan` 
 sous Windows. Sans flottant natif, rel32 ni TSC. Le comportement Linux et macOS ne change pas. **Rien n'a tourné sur un vrai PC, ni
 même compilé à l'écriture : le rendu GL, Tiger, MTTCG sous Windows, la vitesse et le son restent à prouver.**
 
+**Quartz Extreme aux résolutions, preuve close sur les deux hôtes.** Sur le PC (EGL/NVIDIA, 03-04/11) : 66 changements de mode sans écart, matrice 8 cellules sur 8, Colin McRae depuis quatre bureaux, A/B du plugin `20261102-modes` sans perte prouvée (`docs/chantiers/qe-resolutions.md`). `POMPPC_GL_PRESENTQ` écarté sur chiffres (`docs/chantiers/presentq.md`).
+
 **Une seule source pour la version** : `project(POMPPC VERSION …)` de `frontend/CMakeLists.txt`, resté à 0.3 jusqu'ici ;
 `tools/check_version_strings.sh` et `tools/check_workflow_pins.sh` tournent dans `tests/run-all.sh`.
 

@@ -38,11 +38,10 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
 ## Actifs
 
 **Sur les deux hôtes**
-- [ ] **[QE] Résolutions** : M4 fait le 03/11 ; reste le PC : matrice, A/B, balayage `setmode.c`. **Fermeture :** essais justes, ou écart écrit. [Fiche](docs/chantiers/qe-resolutions.md)
 - [ ] **[Plugin] L'alléger, suite de PACKBITS, avis borné compris**. **Fermeture :** plugin sous 20 % du vCPU
   sur cmr et d3, aucun jeu en perte, matrice verte. [Fiche](docs/chantiers/alleger-plugin.md)
 
-**Sur le PC.** D'abord reconstruire `build/` et `build-fast/` et installer le bundle (`docs/etat-des-hotes.md` §2).
+**Sur le PC.**
 - [ ] **[TCG] Leviers génériques du JIT x86** : PGO avec cmr, `tcg/0063`, recherche de blocs, base de temps.
   **Fermeture :** par levier, preuve et A/B des cinq jeux, allumé ou archivé. [Fiche](docs/chantiers/leviers-jit-x86.md)
 
@@ -56,16 +55,14 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
 Dans l'ordre, l'hôte entre crochets. Un chantier d'un hôte n'y monte que si une place d'actif s'y libère.
 
 0. **[M4] DOOM 3 à 37 ms/image au lieu de 29 depuis le 03/11** : ni le plugin, ni le binaire, ni QE, ni le son, ni les réglages du jeu ; suspect macOS 27.2 [F]. À trancher avant tout A/B sur d3. [Fiche](docs/chantiers/d3-macos272.md)
-1. **[PC] Matrice** : un tour complet de preuve avec le kext et le plugin du 01/11. [Fiche](docs/chantiers/jeux.md)
-2. **[PC, puis M4] Performances selon la résolution** : le pendant du chantier actif sur le M4. [Fiche](docs/chantiers/performances-resolution.md)
-3. **[Les deux] Endurance sur la configuration par défaut** : gardien ssh, panique #76, une tranche après chaque allumage. [Fiche](docs/chantiers/fiabilite.md)
-4. **[Les deux] Plantages en jeu sans cause** : au prochain gel, `kpanic.py` avant tout reset. [Fiche](docs/chantiers/fiabilite.md)
-5. **[Les deux] OS 9** : A/B des profils CPU, autres jeux, application AltiVec. [Fiche](docs/chantiers/jeux.md)
-6. **[PC] `POMPPC_GL_PRESENTQ`** : A/B raté le 01/11, à rejouer après reconstruction. [Fiche](docs/chantiers/presentq.md)
-7. **[Les deux] A/B de l'attente** et **troisième facteur de lenteur**. [Fiche](docs/chantiers/metrologie.md)
-8. **[M4] Alertes TLB/RETVERIFY du témoin**, cause inconnue [F]. [Fiche](docs/chantiers/metrologie.md)
-9. **[PC] « Sans traduction » de `x-ret-verify`** en fin de session. [Fiche](docs/chantiers/metrologie.md)
-10. **[Les deux] Jeux** : DOOM 3 et Prey en plein écran, Marble Blast 800×600, Warcraft III, A3, rejeu, `tex14`. [Fiche](docs/chantiers/jeux.md)
+1. **[PC, puis M4] Performances selon la résolution** : le pendant du chantier actif sur le M4. [Fiche](docs/chantiers/performances-resolution.md)
+2. **[Les deux] Endurance sur la configuration par défaut** : gardien ssh, panique #76, une tranche après chaque allumage. [Fiche](docs/chantiers/fiabilite.md)
+3. **[Les deux] Plantages en jeu sans cause** : au prochain gel, `kpanic.py` avant tout reset. [Fiche](docs/chantiers/fiabilite.md)
+4. **[Les deux] OS 9** : A/B des profils CPU, autres jeux, application AltiVec. [Fiche](docs/chantiers/jeux.md)
+5. **[Les deux] A/B de l'attente** et **troisième facteur de lenteur**. [Fiche](docs/chantiers/metrologie.md)
+6. **[M4] Alertes TLB/RETVERIFY du témoin**, cause inconnue [F]. [Fiche](docs/chantiers/metrologie.md)
+7. **[PC] « Sans traduction » de `x-ret-verify`** en fin de session. [Fiche](docs/chantiers/metrologie.md)
+8. **[Les deux] Jeux** : DOOM 3 et Prey en plein écran, Marble Blast 800×600, Warcraft III, A3, rejeu, `tex14`. [Fiche](docs/chantiers/jeux.md)
 
 ## Geste de l'utilisateur
 
