@@ -55,8 +55,8 @@ launcher — `run_os9.sh` when given none — so the OS kept in `.run/imguidock.
 to `./build/pomppc` started without an argument.
 
 The window title names the system (`POMPPC — Mac OS X 10.4 Tiger`). The version of the QEMU actually
-launched, read from its QMP greeting, is shown in the window instead, so a `QEMU_BIN` pointing at
-another tree stays visible.
+launched, read from its QMP greeting, is in the **Status** panel and in **Help ▸ About POMPPC**, so a `QEMU_BIN` pointing at
+another tree can be spotted.
 
 **Réglages gardés** : à l'arrêt (**Machine ▸ Quit**, fermeture de la fenêtre, Ctrl+C ou `SIGTERM`),
 ImGuiDock écrit `.run/imguidock.conf` — OS, son, manette, clavier et souris, vue et zoom,
