@@ -4,16 +4,16 @@
 cellule,image,sha256,fichiers,octets,date,validee,note
 cmr-pe,31593,d205de3b93b2a77c3e3cc8af4840575cc1b58d5cab67456f9baa5a3fd6ea132d,101,84136260,2026-11-01,oui,créée par le tour preuve-nuit-0111-pe
 d3-fen,7240,a7b6788278187961f2ad6bb294148c4082b4094d0f25ecfe0fbdf668921fe42e,24,18011661,2026-11-01,oui,créée par le tour preuve-nuit-0111-fen
-d3-pe,3369,112d824dd2e727f9d7d97a19d00ed1b959d63ddef4df8271a1e5ae5c86c31cec,126,57498040,2026-09-26,oui,"créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : hangar de Mars City, joueur immobile"
+d3-pe,6839,eeaa8860f87f4a1a7f4c6c657cc2f880bf94fcbb82eccf7337dd709f4c5e5d7d,29,35354946,2026-11-03,oui,créée par le tour qe-res-0311-pe
 mb-fen,2973,a4ab18874cae395b39dd490a3bf2c1f970430177af82709bfa6158dc31310f04,6,8082781,2026-11-01,oui,créée par le tour preuve-nuit-0111-mb
 mb-pe,2854,cbf1b0de281685f747c6d1ca22664952d05b2eea14a457d89ffff81c7b1cffb6,7,8082874,2026-11-01,oui,créée par le tour preuve-nuit-0111-pe
-nx-fen,872,44fa8d72026d88379d793a29a5c0c77b535af56b0038465ba5ffeeb645b4b8ec,70,80222729,2026-09-27,oui,"créée par le tour 20260927-1008 ; validée à l'œil le 27/09 (agent Nexuiz) : demo1 image 872, chrono 0:38, « You got the Rocket Launcher », armures sur la passerelle"
-nx-pe,872,999937b77e544ea2726537746d8e61a8b0511b60b63947a7b63e064cbe5dd09b,70,82674186,2026-09-27,oui,"créée par le tour 20260927-1008 ; validée à l'œil le 27/09 (agent Nexuiz) : même image de la démo qu'en fenêtre, 1024×768"
-nxg-fen,873,f713d9d626628cd3aac8e05c2de2ce5b84742cc6caa6a4815eca046d9ec78a20,89,87429149,2026-09-27,oui,créée par le tour 20260927-1106
-nxg-pe,873,cedabba4a41ceccaf54ff9afb9fc45d48f813254f6177f419ce8dee912c74e6d,104,70236380,2026-09-27,oui,créée par le tour 20260927-1127
-prey-fen,838,7df0b18ca87ef29ea581b310561f4e6b0b1735b1331b2960771aa8e0d2af3f8b,127,47100856,2026-09-26,oui,créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : cinématique de la sauvegarde Fuite
-prey-pe,769,a2eaf2bfb69917b008589d94f762de380a130b7025f0ba4afcca07a845424a00,32,13428308,2026-09-26,oui,créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : cinématique de la sauvegarde Fuite
+nx-fen,872,44fa8d72026d88379d793a29a5c0c77b535af56b0038465ba5ffeeb645b4b8ec,74,78933539,2026-11-03,oui,créée par le tour qe-res-0311-fen2
+nx-pe,872,59b84bd5ac72a348d6b0eb2977825fa733c2136395113de36e20435e9e06bb38,72,75672288,2026-11-03,oui,créée par le tour qe-res-0311-pe
+nxg-fen,872,36f17feb8782bc75cbc8395b3f9d6e476d8334576ea49599e5dd2d1a3086f6a6,93,62581457,2026-11-03,oui,créée par le tour qe-res-0311-fen2
+nxg-pe,872,b990a58571e22dc9cfdbe21e19eea1773de1c005fffc9f3ba69105e8e62d2f86,93,65032874,2026-11-03,oui,créée par le tour qe-res-0311-pe
+prey-fen,2056,21950af839834a740f1f5d505989288a3c7989581744e064988b13b9a868d1a4,40,23063117,2026-11-03,oui,créée par le tour qe-res-0311-fen2
+prey-pe,819,969ed27abb017ba1a18353163a6256fbb9feab8ae03bc52b525d3d78dede4d7d,40,34198918,2026-11-03,oui,créée par le tour qe-res-0311-pe
 ut-fen,323,797a786b5968807396915df8abf1987faf5faefd063b7cd59a69bcc4847ac811,4,6347753,2026-11-01,oui,créée par le tour preuve-nuit-0111-fen
-ut-pe,369,c9ac8788778e7a841642c17aebcc74fb464cd3ed7ee6c9f30eb050ff6186405e,5,19730252,2026-09-26,oui,"créée par le tour 20260926-0923 ; validée à l œil le 26/09 (agent A3) : intro d AS-Convoy, convoi texturé"
-wc3-pe,1972,41fad2adae7e92dbcaa39d6f88576ca9fe783db216e9664b71f1bd3a999bbf92,26,36681516,2026-09-26,oui,"créée par le tour 20260926-0746 ; validée à l œil le 26/09 (agent A3) : menu principal, texte juste"
+ut-pe,259,ca4a6e019bf97b14b31ee24281c674223ebb69df16db7d60c202585c61b8dc2b,4,7764890,2026-11-03,oui,créée par le tour qe-res-0311-pe
+wc3-pe,2259,f77cd1e4c235f9710fb9bbf9b593074578496528f85b7eba0fc0a8f748f7259a,6,11008198,2026-11-03,oui,créée par le tour qe-res-0311-pe
 zen-fen,4276,f7e93af59c59958d7957e5ffce24ee70ccc19a6d53a06ee77f3bc8203f5b3be3,6,15933845,2026-11-01,oui,créée par le tour preuve-nuit-0111-fen

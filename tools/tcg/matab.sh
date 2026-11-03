@@ -27,6 +27,8 @@
 # sous Linux, avec "mode:EXTRA_ARGS=-perfmap" pour nommer le code JIT).
 # MATAB_AVANT="commande" : barrière lancée avant chaque partie, VM arrêtée (attendre l'hôte au
 # repos : tools/tcg/chargehote.py attendre) ; un code non nul arrête la campagne.
+# MATAB_APRES="commande" : lancée à chaque partie, invité prêt, avant le bureau au repos (p. ex.
+# régler le mode d'écran pour la session : le mode revient à chaque démarrage) ; 03/11.
 # JAMAIS de suppression de .run/tiger.lock : on attend qu'il se libère.
 set -u
 WT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -118,6 +120,9 @@ for p in "${ordre[@]}"; do
   set -- QEMU_FAST=0 ${QB:+QEMU_BIN=$QB} $vars
   start_vm "$D/run_tiger.log" "$@" || { echo "  pas de ssh" | tee -a "$OUT/journal.txt"; continue; }
   grep -h '▶ Tiger' "$D/run_tiger.log" | tee -a "$OUT/journal.txt"
+  if [ -n "${MATAB_APRES:-}" ]; then
+    bash -c "$MATAB_APRES" 2>&1 | tee -a "$OUT/journal.txt"
+  fi
   # bureau au repos (Finder, Dock, mds) : on attend que le QEMU retombe sous 0,25 cœur
   # (au plus 60 s, l'ancienne attente fixe) ; MATAB_REPOS=fixe rend les 60 s d'avant
   qpid=$(pgrep -f "qemu-system.*disks/tiger.qcow2" | head -1)
