@@ -22,8 +22,8 @@ Une AppImage n'embarque jamais la glibc : **son plancher est celui de la machine
 D'où le plancher : **glibc 2.31**, soit Debian 11, Ubuntu 20.04, Fedora 32 et suivantes. `check_appimage.sh`
 l'exige de chaque binaire et de chaque bibliothèque du paquet.
 
-Bullseye est sortie du support LTS fin août 2026 : ses dépôts peuvent passer sur `archive.debian.org`
-(`Dockerfile.bullseye` a le repli). L'image se cuit une fois et ne retouche plus apt.
+Bullseye est sortie du support LTS fin août 2026 : ses paquets ne sont plus que sur `archive.debian.org`,
+d'où le Dockerfile les prend (constaté le 04/11/2026). L'image se cuit une fois et ne retouche plus apt.
 
 ## 2. L'image, à faire une fois
 

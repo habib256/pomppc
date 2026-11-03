@@ -1,7 +1,7 @@
 # Cuit l'image de construction de l'AppImage (packaging/linux/Dockerfile.bullseye) et la pousse
 # sur GHCR, à la main (« Run workflow »). Lire le digest imprimé, puis l'épingler dans release.yml
 # (BUILDER_IMAGE). À relancer seulement quand le Dockerfile change : l'image est faite pour être
-# ennuyeuse, et bullseye peut quitter les miroirs Debian à tout moment (d'où le repli du Dockerfile).
+# ennuyeuse, et bullseye n'a plus ses paquets que sur archive.debian.org.
 #
 # Long : gcc 11 s'y compile, d'où le budget. Rien ne s'y publie d'autre que l'image.
 name: Image de construction Linux

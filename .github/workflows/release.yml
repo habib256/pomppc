@@ -89,11 +89,8 @@ jobs:
       contents: read
       packages: read       # tirer l'image de GHCR
     env:
-      # À REMPLIR AU PREMIER PASSAGE : lancer le workflow builder-image.yml, puis coller ici le digest
-      # qu'il imprime, sous la forme
-      #   BUILDER_IMAGE: ghcr.io/habib256/pomppc-bullseye-builder@sha256:<64 hex>
-      # Tant que c'est vide, ce job s'arrête à sa première étape (docs/publier-linux.md §2).
-      BUILDER_IMAGE: ''
+      # Digest imprimé par le workflow builder-image.yml, cuit le 04/11/2026 (docs/publier-linux.md §2).
+      BUILDER_IMAGE: ghcr.io/habib256/pomppc-bullseye-builder@sha256:d87ce2fdf93f73ad543c3cfa4c26f3aab36ab6c41e80c105c74d6761b5a1f950
       POMPPC_VERSION: ${{ needs.version.outputs.pomppc_version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
