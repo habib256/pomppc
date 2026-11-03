@@ -36,6 +36,7 @@ OUT="$ROOT/dist/POMPPC-$VER-x86_64.AppImage"
 EXCLU='^(ld-linux.*|libc|libm|libdl|librt|libpthread|libresolv|libutil|libanl|libnss_.*|libmvec|libstdc\+\+|libgcc_s|libGL|libEGL|libGLX|libOpenGL|libGLdispatch|libGLES.*|libgbm|libdrm|libglapi|libvulkan|libwayland-.*|libxkbcommon.*|libX11|libX11-xcb|libxcb.*|libXau|libXdmcp|libXext|libXrender|libXcursor|libXi|libXrandr|libXinerama|libXfixes)\.so'
 
 log() { printf '\n▶ %s\n' "$*"; }
+trap 'echo "build_appimage.sh : échec ligne $LINENO" >&2' ERR
 
 [ "$(uname -s)/$(uname -m)" = Linux/x86_64 ] || { echo "Linux x86-64 seulement" >&2; exit 1; }
 [ -z "$(git status --porcelain --untracked-files=no)" ] ||
@@ -77,7 +78,9 @@ while [ "${#queue[@]}" -gt 0 ]; do
     [ -n "$so" ] && [ -z "${VU[$so]:-}" ] || continue
     VU[$so]=1
     if [[ "$so" =~ $EXCLU ]]; then continue; fi
-    reel="$(ldd "$f" | awk -v s="$so" '$1 == s && $2 == "=>" { print $3; exit }')"
+    # Sans `exit` dans awk (ldd mourrait sur SIGPIPE) et sans croire le code de ldd : avec pipefail,
+    # l'un ou l'autre tuait le script sans un mot. Le contrôle qui suit dit ce qui manque.
+    reel="$( { ldd "$f" 2>/dev/null || true; } | awk -v s="$so" '$1 == s && $2 == "=>" && !v { v = $3 } END { if (v) print v }')"
     [ -n "$reel" ] && [ -e "$reel" ] || { echo "$so (demandée par $f) introuvable" >&2; exit 1; }
     cp -L "$reel" "$PAY/lib/$so"; chmod u+w "$PAY/lib/$so"
     echo "$so $(readlink -f "$reel")" >> "$ORIG"

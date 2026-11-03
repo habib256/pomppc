@@ -66,6 +66,21 @@
    passe par gl_proc, sauf glWindowPos2i, résolu sur place. */
 #  include <GL/gl.h>
 #  include <GL/glext.h>
+#  include <string.h>
+/* mingw-w64 n'a pas memmem. */
+static void *memmem(const void *h, size_t hn, const void *n, size_t nn)
+{
+    const char *p = h;
+    if (nn == 0) {
+        return (void *)h;
+    }
+    for (; hn >= nn; p++, hn--) {
+        if (!memcmp(p, n, nn)) {
+            return (void *)p;
+        }
+    }
+    return NULL;
+}
 #else
 #  define GL_GLEXT_PROTOTYPES 1
 #  include <EGL/egl.h>

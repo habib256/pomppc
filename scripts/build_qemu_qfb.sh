@@ -1471,7 +1471,7 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
                ${OPT_CFLAGS:+--extra-cflags="$OPT_CFLAGS"} ${OPT_LDFLAGS:+--extra-ldflags="$OPT_LDFLAGS"} \
                ${OPT_CONF[@]+"${OPT_CONF[@]}"}
 fi
-ninja -j"$JOBS"
+ninja -j"$JOBS" ${NINJA_ARGS:-}
 
 # --- 6. Vérification de capacités (fait foi, et sert aux lanceurs) ---
 BIN="$SRC/$BDIR/qemu-system-ppc"

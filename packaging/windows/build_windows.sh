@@ -29,7 +29,8 @@ export JOBS="${JOBS:-$(nproc)}"
 
 # --- QEMU : profil paquet, générique. Un chemin court : meson et ninja y passent des lignes longues. ---
 export QEMU_SRC="${QEMU_SRC:-/d/q}"
-QEMU_PROFIL=paquet-windows scripts/build_qemu_qfb.sh
+# -k 0 : toutes les erreurs d'un coup, un passage de CI coûte dix minutes.
+NINJA_ARGS='-k 0' QEMU_PROFIL=paquet-windows scripts/build_qemu_qfb.sh
 
 # --- Frontal ---
 frontend/setup.sh
