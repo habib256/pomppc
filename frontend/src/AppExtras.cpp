@@ -33,16 +33,7 @@ bool isCompressedImage(const std::string& path) {
 }
 
 bool convertDiscImage(const std::string& dmg, const std::string& out, std::string* err) {
-    const std::string base = out.substr(0, out.find_last_of('.'));
-    std::error_code ec;
-    fs::remove(base + ".cdr", ec);
-    if (!SetupFlow::runTool({"hdiutil", "convert", dmg, "-quiet", "-format", "UDTO", "-o", base})) {
-        *err = "POMPPC couldn't convert this .dmg.";
-        return false;
-    }
-    fs::rename(base + ".cdr", out, ec);
-    if (ec) { *err = "POMPPC couldn't save the disc."; return false; }
-    return true;
+    return SetupFlow::convertDmg(dmg, out, err);
 }
 
 bool buildExchangeDisk(const std::vector<std::string>& paths, const std::string& mountDir,

@@ -1,0 +1,12 @@
+# guest-iso.lock — le CD invité (POMPPC_GUEST) que la CI met dans l'AppImage.
+#
+# Il ne peut pas être produit en CI : ses binaires se compilent dans Tiger (docs/publier-macos.md
+# §3, disks/prebuilt est ignoré par git). Le PC le grave, le dépose sur une URL publique et relève
+# sa somme ici (docs/publier-linux.md §3). fetch_guest_iso.sh télécharge et vérifie.
+#
+# Un tag exige `version` = version du tag : une répétition (schedule, workflow_dispatch) accepte
+# le CD de la version précédente, un paquet publié jamais. Ces trois lignes visent pour l'instant
+# la 0.4.1 : le tag 0.4.2 échouera, avec ce message, tant que le PC ne les aura pas refaites.
+version=0.4.1
+url=https://github.com/habib256/pomppc/releases/download/0.4.1/pomppc-0.4.1-guest.iso
+sha256=97e6700be67d6d3c951f35aef4a6adfecf6f95b5a789ba988a3c5f0434694454

@@ -51,6 +51,48 @@ std::string firstWord(const std::string& s) {
     return s.substr(0, s.find_first_of(" \t\r\n"));
 }
 
+std::string md5Of(const std::string& file) {
+    std::string got;
+#ifdef __APPLE__
+    SetupFlow::runTool({"md5", "-q", file}, &got);
+#else
+    SetupFlow::runTool({"md5sum", file}, &got);
+#endif
+    return firstWord(got);
+}
+
+std::string sha1Of(const std::string& file) {
+    std::string got;
+#ifdef __APPLE__
+    SetupFlow::runTool({"shasum", "-a", "1", file}, &got);
+#else
+    SetupFlow::runTool({"sha1sum", file}, &got);
+#endif
+    return firstWord(got);
+}
+
+#ifndef __APPLE__
+// Le dialogue de fichier vient du bureau de l'hôte, s'il en a un. Sans aucun des deux, le dire :
+// le bouton ne doit pas sembler ne rien faire. Annuler rend un chemin vide, sans message.
+std::string pickFileOnHost(const std::string& prompt, std::string* err) {
+    const auto has = [](const std::string& tool) {
+        return SetupFlow::runTool({"sh", "-c", "command -v " + tool + " >/dev/null"});
+    };
+    std::string out;
+    if (has("zenity")) {
+        if (!SetupFlow::runTool({"zenity", "--file-selection", "--title=" + prompt}, &out)) return "";
+    } else if (has("kdialog")) {
+        if (!SetupFlow::runTool({"kdialog", "--getopenfilename", ".", "", "--title", prompt}, &out)) return "";
+    } else {
+        *err = "POMPPC needs zenity or kdialog to show a file chooser. Install one of them, or put your "
+               "disc in the images folder of ~/POMPPC as MacOSX.4.iso.";
+        return "";
+    }
+    out.erase(out.find_last_not_of("\r\n") + 1);
+    return out;
+}
+#endif
+
 }  // namespace
 
 SetupFlow::SetupFlow(std::string root, std::string runtimeDir)
@@ -122,7 +164,23 @@ std::string SetupFlow::discMd5() const { return tiger_ ? kTigerMd5 : kOs9Md5; }
 std::string SetupFlow::downloadedDisc() const {
     const char* forced = std::getenv("POMPPC_DOWNLOADS");
     const char* home = std::getenv("HOME");
-    return (forced ? std::string(forced) : std::string(home ? home : "") + "/Downloads") + "/" + discFile();
+    if (forced) return std::string(forced) + "/" + discFile();
+    const std::string homeDir = home ? home : "";
+    const std::string fallback = homeDir + "/Downloads";
+#ifdef __APPLE__
+    return fallback + "/" + discFile();
+#else
+    // Sur un bureau en français, ce dossier est ~/Téléchargements.
+    // Appelée à chaque seconde par la page d'attente : le dossier ne se demande qu'une fois.
+    static const std::string host = [] {
+        std::string out;
+        if (!runTool({"xdg-user-dir", "DOWNLOAD"}, &out)) return std::string();
+        out.erase(out.find_last_not_of("\r\n") + 1);
+        return out;
+    }();
+    // xdg-user-dir rend $HOME quand le dossier n'est pas configuré.
+    return (host.empty() || host == homeDir ? fallback : host) + "/" + discFile();
+#endif
 }
 
 std::vector<std::string> SetupFlow::sizeChoices() const {
@@ -272,17 +330,7 @@ bool SetupFlow::placeMedia(const std::string& file, const std::string& out, bool
         fs::remove_all(dir, ec);
         return ok;
     }
-    if (endsWith(file, ".dmg")) {
-        const std::string base = out.substr(0, out.find_last_of('.'));
-        fs::remove(base + ".cdr", ec);
-        if (!runTool({"hdiutil", "convert", file, "-quiet", "-format", "UDTO", "-o", base})) {
-            *err = "POMPPC couldn't convert this .dmg.";
-            return false;
-        }
-        fs::rename(base + ".cdr", out, ec);
-        if (ec) { *err = "POMPPC couldn't save the disc."; return false; }
-        return true;
-    }
+    if (endsWith(file, ".dmg")) return convertDmg(file, out, err);
     if (move) {
         fs::rename(file, out, ec);
         if (ec) {   // autre volume
@@ -296,6 +344,46 @@ bool SetupFlow::placeMedia(const std::string& file, const std::string& out, bool
     fs::create_symlink(file, out, ec);
     if (ec) { *err = "POMPPC couldn't use this file."; return false; }
     return true;
+}
+
+bool SetupFlow::convertDmg(const std::string& dmg, const std::string& out, std::string* err) {
+    std::error_code ec;
+#ifdef __APPLE__
+    const std::string base = out.substr(0, out.find_last_of('.'));
+    fs::remove(base + ".cdr", ec);
+    if (!runTool({"hdiutil", "convert", dmg, "-quiet", "-format", "UDTO", "-o", base})) {
+        *err = "POMPPC couldn't convert this .dmg.";
+        return false;
+    }
+    fs::rename(base + ".cdr", out, ec);
+#else
+    // [A] Mesuré sur le fichier d'Apple (en-tête koly et blocs mish relus par HTTP, 03/11/2026) :
+    //     le combo 10.4.11 n'a que des blocs zlib, bruts et à ignorer, plus une carte de partitions.
+    // [D] QEMU block/dmg.c:200-215 @ v11.1.2 : le pilote dmg lit ces types ; bzip2 si le binaire a
+    //     dmg-bz2 (profil paquet-linux).
+    // [F] Inconnu : image égale à celle de hdiutil -format UDTO, et l'installateur du combo la
+    //     monte-t-il dans Tiger ? Tranché par : l'étape Update de l'assistant, sur le PC.
+    const std::string tmp = out + ".tmp";
+    fs::remove(tmp, ec);
+    if (!runTool({"qemu-img", "convert", "-q", "-f", "dmg", "-O", "raw", dmg, tmp})) {
+        fs::remove(tmp, ec);
+        *err = "POMPPC couldn't convert this .dmg.";
+        return false;
+    }
+    fs::rename(tmp, out, ec);
+#endif
+    if (ec) { *err = "POMPPC couldn't save the disc."; return false; }
+    return true;
+}
+
+void SetupFlow::openExternal(const std::string& target) {
+#ifdef __APPLE__
+    runTool({"open", target});
+#else
+    // En arrière-plan : xdg-open peut vivre aussi longtemps que le navigateur, et ceci tourne sur
+    // le fil de l'interface. GIO_MODULE_DIR est pour notre libgio (packaging/linux/AppRun), pas pour lui.
+    runTool({"sh", "-c", "unset GIO_MODULE_DIR; xdg-open \"$1\" >/dev/null 2>&1 &", "sh", target});
+#endif
 }
 
 // ── Travaux longs ───────────────────────────────────────────────────────────
@@ -358,6 +446,7 @@ void SetupFlow::chooseFile(const std::string& prompt) {
         if (const char* forced = std::getenv("POMPPC_SETUP_CHOOSE")) {
             j.chosen = forced;
         } else {
+#ifdef __APPLE__
             std::string out;
             if (runTool({"osascript", "-e", "on run argv",
                          "-e", "return POSIX path of (choose file with prompt (item 1 of argv))",
@@ -365,6 +454,9 @@ void SetupFlow::chooseFile(const std::string& prompt) {
                 out.erase(out.find_last_not_of("\r\n") + 1);
                 j.chosen = out;
             }
+#else
+            j.chosen = pickFileOnHost(prompt, &j.error);
+#endif
         }
         j.hasChosen = true;
     });
@@ -380,10 +472,9 @@ void SetupFlow::placeDisc(const std::string& file, bool move) {
 void SetupFlow::checkAndPlaceDownload() {
     const std::string file = downloadedDisc(), sum = discMd5(), out = discPath();
     startJob("Checking the download…", "", 0, [this, file, sum, out](Job& j) {
-        std::string got;
-        runTool({"md5", "-q", file}, &got);
+        const std::string got = md5Of(file);
         if (j.cancelled.load()) return;
-        if (firstWord(got) != sum) { j.md5Bad = true; return; }
+        if (got != sum) { j.md5Bad = true; return; }
         if (placeMedia(file, out, true, &j.error)) j.next = Step::Installing;
     });
 }
@@ -419,9 +510,7 @@ void SetupFlow::downloadUpdate() {
                 j.error = "The download didn't finish. Check your connection and try again.";
                 return;
             }
-            std::string got;
-            runTool({"shasum", "-a", "1", tmp}, &got);
-            if (firstWord(got) != sha) {
+            if (sha1Of(tmp) != sha) {
                 fs::remove(tmp, ec);
                 j.error = "The downloaded file doesn't match Apple's checksum. Try again.";
                 return;

@@ -64,6 +64,9 @@
 #   RECONFIGURE=1 ./scripts/build_qemu_qfb.sh   # force un ../configure
 #   PYTHON=/chemin/python3 ./scripts/build_qemu_qfb.sh   # Python pour configure
 #   CONFIGURE_EXTRA="--disable-sdl" …                    # options de configure en plus
+#   QEMU_PROFIL=paquet-linux …       # le binaire de l'AppImage (docs/publier-linux.md) : ni GTK, ni
+#                                    # SDL, ni epoxy, pa seul, -display dbus exigé ; toute capacité
+#                                    # de la série devient exigée, hors le backend GL (sondé en CI)
 #                                    (la publication macOS, scripts/package_release_macos.sh)
 #   JOBS=N                           # parallélisme de ninja (défaut : nombre de cœurs)
 #   NO_TCG=1, NO_FASTFP2=1           # sur un arbre PROPRE : sans la série tcg, sans fastfp/0002
@@ -103,6 +106,10 @@
 set -euo pipefail
 case "${1:-}" in
   --fast) export QEMU_FAST=1; shift ;;
+esac
+case "${QEMU_PROFIL:-}" in
+  ""|paquet-linux) ;;
+  *) echo "⚠ QEMU_PROFIL : profil inconnu « $QEMU_PROFIL » (paquet-linux)" >&2; exit 1 ;;
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -1434,6 +1441,17 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
     Darwin) UI_OPTS=(--enable-cocoa --audio-drv-list=coreaudio) ;;
     *)      UI_OPTS=(--enable-gtk --enable-sdl "--audio-drv-list=pa,alsa") ;;
   esac
+  # Le paquet Linux n'affiche que par le frontal (-display dbus,p2p=on). qgpu lie EGL et GL de
+  # lui-même (patches/qgpu/qgpu-gl.c:52-54, 0003-wire-qgpu-pci-build.patch) : --disable-opengl ne
+  # retire qu'epoxy, et gbm avec lui (QEMU meson.build:1781-1784 @ v11.1.2, gbm n'y a pas d'option
+  # à lui : un --disable-gbm arrêterait le configure). png : screendump du menu du frontal ; libusb :
+  # la manette ; bzip2 : qemu-img lit les .dmg UDBZ de l'assistant. Sans zstd, une bibliothèque de
+  # moins à partager, sous le même SONAME, avec le pilote GL de l'hôte.
+  if [ "${QEMU_PROFIL:-}" = paquet-linux ]; then
+    UI_OPTS=(--disable-gtk --disable-sdl --disable-opengl "--audio-drv-list=pa" --enable-pa
+             --enable-dbus-display --enable-png --enable-libusb --enable-bzip2
+             --disable-zstd --disable-selinux --extra-ldflags=-static-libgcc)
+  fi
   PY_OPTS=()
   [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")
   ../configure --target-list=ppc-softmmu,ppc64-softmmu \
@@ -1472,6 +1490,10 @@ check() { # check <étiquette> <prédicat…>
 # dépend d'EGL/GL sur la machine QUI COMPILE, et le device retombe proprement
 # sur le backend logiciel (backend=auto) là où il manque.
 check_opt() { # check_opt <étiquette> <prédicat…>
+  # Un paquet publié est complet : sa série est posée sur un arbre neuf, un manque est un défaut.
+  # Le backend GL reste à part : il dépend de la machine qui sonde, pas du binaire (conteneur sans
+  # pilote) ; packaging/linux/check_appimage.sh vérifie à la place que QEMU lie EGL et GL.
+  if [ -n "${QEMU_PROFIL:-}" ] && [ "$1" != qgpu-backend-gl ]; then check "$@"; return; fi
   if "${@:2}" >/dev/null 2>&1; then
     echo "  ✔ $1"; echo "$1=oui" >> "$CAPS"
   else
@@ -1551,6 +1573,10 @@ check_opt x-tlb-base    qemu_cpu_has_prop  "$BIN"        "mac99,via=pmu" g4 x-tl
 check_opt x-tb-head     qemu_tcg_has_prop  "$BIN"        "mac99,via=pmu" x-tb-head=3
 # MTTCG sur la cible 32 bits (tcg/0050) : sondé sur qemu-system-ppc lui-même
 check_opt mttcg-ppc32   qemu_ppc32_mttcg_ok "$BIN"       "mac99,via=pmu" 2
+if [ "${QEMU_PROFIL:-}" = paquet-linux ]; then
+  check dbus-display qemu_has_display "$BIN" dbus
+  check qgpu-lie-egl bash -c 'readelf -d "$1" | grep -q "NEEDED.*libEGL\.so"' _ "$BIN"
+fi
 echo
 echo "→ $CAPS"
 

@@ -1,0 +1,47 @@
+# Cuit l'image de construction de l'AppImage (packaging/linux/Dockerfile.bullseye) et la pousse
+# sur GHCR, à la main (« Run workflow »). Lire le digest imprimé, puis l'épingler dans release.yml
+# (BUILDER_IMAGE). À relancer seulement quand le Dockerfile change : l'image est faite pour être
+# ennuyeuse, et bullseye peut quitter les miroirs Debian à tout moment (d'où le repli du Dockerfile).
+#
+# Long : gcc 11 s'y compile, d'où le budget. Rien ne s'y publie d'autre que l'image.
+name: Image de construction Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Connexion à GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Construire et pousser
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -eu
+          TARGET="ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/pomppc-bullseye-builder"
+          STAMP=$(date -u +%Y%m%d)
+          docker build -f packaging/linux/Dockerfile.bullseye \
+            -t "$TARGET:bullseye-$STAMP" -t "$TARGET:latest" packaging/linux
+          docker push "$TARGET:bullseye-$STAMP"
+          docker push "$TARGET:latest"
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$TARGET:bullseye-$STAMP" | sed 's/.*@//')
+          echo "À épingler dans release.yml : BUILDER_IMAGE: $TARGET@$DIGEST"
+          {
+            echo "## Image de construction poussée"
+            echo '```'
+            echo "BUILDER_IMAGE: $TARGET@$DIGEST"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

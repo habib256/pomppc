@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=POMPPC
+Comment=PowerPC Macs (Mac OS X 10.4 Tiger, Mac OS 9.2.2) on QEMU, with host-GPU 3D
+Exec=pomppc
+Icon=pomppc
+Categories=System;Emulator;
+Terminal=false

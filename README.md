@@ -41,8 +41,9 @@ These times have dropped since (TCG series and lighter guest plugin enabled by d
 hosts). Idle host, ms/frame, Apple Silicon M4 (02/11/2026) / Linux x86-64 PC (01/11/2026): DOOM 3
 windowed 28.9 / 78–80, UT2004 windowed 19.3 / 40, Marble Blast windowed 6.2 / 8.3, Zenerchi windowed
 2.6 / 4.6, Colin McRae full screen *during the race* 41.7 / 82. Last full matrix run on Apple Silicon: 17/17 green (28/10/2026);
-current table in `docs/matrice-jeux.md`. The Linux x86-64 build is not released until its speed is
-acceptable (target: DOOM 3 at 50 ms/frame).
+current table in `docs/matrice-jeux.md`. Linux x86-64 is released from 0.4.2 as an AppImage: it runs,
+and it is slower than the M4 by the factors above (target: DOOM 3 at 50 ms/frame). The PC figures come
+from a build tuned for that machine; the AppImage is a generic build, so expect somewhat less.
 
 **The limit is the CPU.** The G4 is emulated (there is no PowerPC virtualization on ARM or
 x86), so the whole project is about taking work *away* from the emulated CPU: geometry,
@@ -285,6 +286,24 @@ reverse-engineered (`docs/re/`), and **10.4.11**, which the daily VMs of both de
 have run since October 2026. Other 10.4.x updates are untested; the plugin reads GLEngine's
 internal structures, so a different GLEngine may not work.
 
+## Install on Linux x86-64
+
+You need a 64-bit PC with glibc 2.31 or newer (Debian 11, Ubuntu 20.04, Fedora 32, or later), an OpenGL driver
+for your graphics card, and about 20 GB of free disk space. POMPPC never bundles a graphics driver: it uses yours.
+It doesn't include Mac OS: its setup helps you get the installation disc.
+
+```bash
+chmod +x POMPPC-<version>-x86_64.AppImage     # from the Releases page
+./POMPPC-<version>-x86_64.AppImage
+```
+
+The same assistant as on the Mac takes you from an empty disk to a running system. Your disks and settings live
+in `~/POMPPC`. If it says that system libraries are missing, on Debian or Ubuntu that's
+`sudo apt install libegl1 libgl1 libxcb1`. If your system lacks FUSE 2, add `--appimage-extract-and-run`.
+The assistant also uses `curl`, `unzip` and either `zenity` or `kdialog`. Dropping files on the window and
+sharing a folder aren't available on Linux yet. The recipe, in French, is in
+[docs/publier-linux.md](docs/publier-linux.md).
+
 ## Building from source
 
 Works on macOS (Apple Silicon) and Linux x86-64. QEMU 11.1.2 is cloned from upstream and patched;
@@ -305,8 +324,9 @@ QEMU's `configure` needs Python ≥ 3.9 with `tomli` (built in as `tomllib` from
 (or installs the prebuilt binaries of `disks/prebuilt`, burnt on the same CD, when gcc 4.0 is
 missing). `scripts/package_release_macos.sh` produces the release archive and
 `scripts/package_app_macos.sh` the app and its `.dmg`
-(`scripts/package_release_linux.sh` for Linux x86-64, not published); the full recipe is in
-[docs/publier-macos.md](docs/publier-macos.md) (in French).
+(`scripts/package_release_linux.sh` for a Linux x86-64 archive, not published); the full recipe is in
+[docs/publier-macos.md](docs/publier-macos.md) (in French). The Linux AppImage is built by GitHub Actions
+([docs/publier-linux.md](docs/publier-linux.md), in French).
 
 On a Linux x86-64 PC, `QEMU_FAST=1 ./scripts/build_qemu_qfb.sh` also builds `~/src/qemu/build-fast/`
 (`-O3 -march=native`, LTO, PGO; about 10 % faster in DOOM 3 than the reference build at equal

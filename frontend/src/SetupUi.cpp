@@ -103,8 +103,12 @@ void discPage(SetupFlow& setup, Chooser& chooser) {
         ImGui::TextWrapped("Macintosh Garden has opened in your browser. In its list of files, find %s and "
                            "click one of its links.", setup.discFile().c_str());
         ImGui::Spacing();
+#ifdef __APPLE__
         ImGui::TextWrapped("POMPPC is waiting for the file in your Downloads folder and continues by itself. "
                            "If macOS asks, allow POMPPC to access Downloads.");
+#else
+        ImGui::TextWrapped("POMPPC is waiting for the file in your Downloads folder and continues by itself.");
+#endif
         ImGui::Spacing();
         if (ImGui::Button("Choose a File Instead")) {
             waiting = false;
@@ -112,7 +116,7 @@ void discPage(SetupFlow& setup, Chooser& chooser) {
             setup.chooseFile("Choose the file you downloaded.");
         }
         ImGui::SameLine();
-        if (ImGui::Button("Open the Page Again")) SetupFlow::runTool({"open", setup.discPage()});
+        if (ImGui::Button("Open the Page Again")) SetupFlow::openExternal(setup.discPage());
         ImGui::SameLine();
         if (ImGui::Button("Back")) waiting = false;
         static int tick = 0;
@@ -130,7 +134,7 @@ void discPage(SetupFlow& setup, Chooser& chooser) {
         if (SetupFlow::downloadReady(setup.downloadedDisc())) {
             setup.checkAndPlaceDownload();
         } else {
-            SetupFlow::runTool({"open", setup.discPage()});
+            SetupFlow::openExternal(setup.discPage());
             waiting = true;
         }
     }

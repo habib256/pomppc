@@ -602,12 +602,12 @@ int main(int argc, char** argv) {
     auto openFile = [](const std::string& path) {
 #ifdef __APPLE__
         const char* tool = "open";
-#else
-        const char* tool = "xdg-open";
-#endif
         const char* args[] = {tool, path.c_str(), nullptr};
         pid_t pid = -1;
         posix_spawnp(&pid, tool, nullptr, nullptr, const_cast<char* const*>(args), environ);
+#else
+        SetupFlow::openExternal(path);
+#endif
     };
 
     // Un message discret, quelques secondes, en haut de la fenêtre.
@@ -1465,7 +1465,11 @@ int main(int argc, char** argv) {
                     const std::string file = dir + "/POMPPC " + stamp + ".png";
                     if (bridge->saveScreenshot(file)) {
                         showToast("Screenshot saved in the Screenshots folder.");
+#ifdef __APPLE__
                         SetupFlow::runTool({"open", "-R", file});
+#else
+                        SetupFlow::openExternal(dir);
+#endif
                     } else {
                         showToast("POMPPC couldn't save the screenshot.");
                     }
@@ -1854,13 +1858,21 @@ int main(int argc, char** argv) {
                         }
                     }
                 }
-                if (sharedPath.empty()) {
+                // buildSharedDisk ne sait faire son image HFS+ que par hdiutil.
+#ifdef __APPLE__
+                const bool shareHost = true;
+#else
+                const bool shareHost = false;
+#endif
+                if (!shareHost) {
+                    ImGui::TextWrapped("Sharing a folder is only available on macOS for now.");
+                } else if (sharedPath.empty()) {
                     ImGui::TextWrapped("Choose a folder on your Mac: it appears as a disk in Mac OS.");
                 } else {
                     ImGui::TextWrapped("%s", sharedPath.c_str());
                     ImGui::SetItemTooltip("%s", sharedPath.c_str());
                 }
-                ImGui::BeginDisabled(shareInUse || shareChoose.busy());
+                ImGui::BeginDisabled(!shareHost || shareInUse || shareChoose.busy());
                 if (ImGui::Button(sharedPath.empty() ? "Choose Folder..." : "Change Folder...")) {
                     shareChoose.start([](std::string*) {
                         // POMPPC_SHARED_CHOOSE : le dossier d'une épreuve scriptée, sans fenêtre de macOS.

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="256" height="256">
+  <!-- Pendant de scripts/app-macos/icone.swift : même dégradé, même texte. -->
+  <defs>
+    <linearGradient id="fond" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#548fde"/>
+      <stop offset="1" stop-color="#173378"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#fond)"/>
+  <g fill="#ffffff" font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-weight="900" font-size="280" text-anchor="middle">
+    <text x="512" y="480">POM</text>
+    <text x="512" y="780">PPC</text>
+  </g>
+</svg>

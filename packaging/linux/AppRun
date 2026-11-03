@@ -1,0 +1,148 @@
+#!/bin/bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (c) 2026 VERHILLE Arnaud
+# AppRun — démarrage de l'AppImage : prépare ~/POMPPC, puis passe la main au frontal, qui déroule
+# l'assistant de premier lancement s'il le faut (frontend/src/SetupFlow.h). Pendant Linux de
+# scripts/app-macos/pomppc-app.sh, sans osascript, xattr, chflags ni perl.
+#
+# Le squashfs est en lecture seule et monté à un chemin neuf à chaque lancement : les données vivent
+# dans ~/POMPPC (POMPPC_DATA pour un autre dossier). Ce dossier a la forme du dépôt, parce que tous
+# les scripts déduisent leur racine de leur propre emplacement : disks/, images/ et .run/ y sont
+# réels, les quatre fichiers lanceurs y sont copiés (le frontal résout les liens et prendrait sinon le
+# squashfs pour racine), le reste y est un lien vers le paquet, refait à chaque lancement.
+#
+# Ce qui vient de l'hôte, sans remède ici : bash (le frontal lance les lanceurs par
+# posix_spawnp("bash", …)), les outils de base, flock, le pilote GL (libEGL, libGL), libxcb. Le
+# paquet ne pose JAMAIS LD_LIBRARY_PATH : les enfants (bash, python3, curl, xdg-open) et le Mesa de
+# l'hôte en hériteraient. Les binaires trouvent lib/ par RUNPATH (build_appimage.sh).
+#
+# EGL_PLATFORM n'est pas posé ici non plus : run_tiger.sh le pose pour QEMU (qgpu sur le vrai GPU,
+# sinon llvmpipe sous Ubuntu 26.04, 14/10/2026), et le frontal doit garder la plateforme de sa
+# session pour ouvrir sa fenêtre.
+set -u
+HERE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+SRC="$HERE/usr/share/pomppc"
+D="${POMPPC_DATA:-${HOME:-}/POMPPC}"
+
+erreur() {
+  printf 'POMPPC: %s\n' "$1" >&2
+  # Sans terminal, le message n'a pas d'autre lecteur. POMPPC_SANS_DIALOGUE : épreuves.
+  if [ ! -t 2 ] && [ -z "${POMPPC_SANS_DIALOGUE:-}" ]; then
+    if command -v zenity >/dev/null 2>&1; then zenity --error --title=POMPPC --text="$1" 2>/dev/null
+    elif command -v kdialog >/dev/null 2>&1; then kdialog --title POMPPC --error "$1" 2>/dev/null
+    elif command -v xmessage >/dev/null 2>&1; then xmessage -center "POMPPC: $1" 2>/dev/null
+    fi
+  fi
+  exit 1
+}
+
+# Sans le pilote GL de l'hôte, QEMU et le frontal meurent au chargeur, sur un message obscur et,
+# depuis un lanceur graphique, invisible. Une distribution sans ldconfig utile n'est pas contrôlée.
+verifier_hote() {
+  [ -z "${POMPPC_NO_HOST_CHECK:-}" ] || return 0
+  local ldc="" liste lib manque=""
+  ldc="$(command -v ldconfig 2>/dev/null)"
+  if [ -z "$ldc" ] && [ -x /sbin/ldconfig ]; then ldc=/sbin/ldconfig; fi
+  [ -n "$ldc" ] || return 0
+  liste="$("$ldc" -p 2>/dev/null)"
+  [ -n "$liste" ] || return 0
+  for lib in libEGL.so.1 libGL.so.1 libxcb.so.1; do
+    grep -qF "$lib " <<< "$liste" || manque="$manque $lib"
+  done
+  [ -z "$manque" ] || erreur "Missing system libraries:$manque. On Debian or Ubuntu: sudo apt install libegl1 libgl1 libxcb1"
+}
+
+preparer_donnees() {
+  mkdir -p "$D/disks" "$D/images" "$D/.run" "$D/bench" || erreur "Could not create the folder $D."
+  local e nom c
+  # Liens du lancement précédent : ils visent un montage disparu. Ceux de l'utilisateur restent.
+  for e in "$D"/* "$D"/.[!.]* "$D/disks"/* "$D/images"/* "$D/.run"/* "$D/bench"/*; do
+    [ -L "$e" ] && case "$(readlink "$e")" in */usr/share/pomppc/*) rm -f -- "$e" ;; esac
+  done
+  : > "$D/.hidden"                                # le gestionnaire de fichiers masque ces noms
+  for e in "$SRC"/* "$SRC"/.[!.]*; do
+    [ -e "$e" ] || continue
+    nom="$(basename "$e")"
+    case "$nom" in
+      run_tiger.sh|run_os9.sh|run_frontend.sh|config.env)
+        cp -f "$e" "${D:?}/${nom:?}" ;;
+      disks|images|.run|bench)
+        for c in "$e"/*; do
+          [ -e "$c" ] || continue
+          if [ -L "$D/$nom/$(basename "$c")" ] || [ ! -e "$D/$nom/$(basename "$c")" ]; then
+            ln -sfn "$c" "$D/$nom/$(basename "$c")"
+          fi
+        done ;;
+      *)
+        if [ -L "$D/$nom" ] || [ ! -e "$D/$nom" ]; then ln -sfn "$e" "$D/$nom"; fi ;;
+    esac
+    case "$nom" in disks|images) ;; *) printf '%s\n' "$nom" >> "$D/.hidden" ;; esac
+  done
+}
+
+# Le dernier système utilisé, s'il a son disque ; sinon Tiger, sauf s'il n'y a qu'OS 9.
+lanceur_a_ouvrir() {
+  local os
+  os="$(sed -n 's/^os = //p' "$D/.run/imguidock.conf" 2>/dev/null | head -1)"
+  if [ -f "$D/disks/os9.qcow2" ] && { [ "$os" = os9 ] || [ ! -f "$D/disks/tiger.qcow2" ]; }; then
+    echo run_os9.sh
+  else
+    echo run_tiger.sh
+  fi
+}
+
+version() { cat "$HERE/version" 2>/dev/null; }
+
+usage() {
+  cat <<EOF
+POMPPC $(version): PowerPC Macs (Mac OS X 10.4 Tiger, Mac OS 9.2.2) on QEMU.
+
+Usage: POMPPC-$(version)-x86_64.AppImage [--help | --version]
+
+Your disks and settings live in ~/POMPPC (POMPPC_DATA for another folder).
+Needs from your system: bash, an OpenGL driver (libEGL, libGL), and for the setup
+assistant curl, unzip, and zenity or kdialog. Python 3 is optional (web relay of Tiger).
+Project: https://github.com/habib256/pomppc
+EOF
+}
+
+principal() {
+  case "${1:-}" in
+    --version) version; exit 0 ;;
+    --help|-h) usage; exit 0 ;;
+  esac
+  verifier_hote
+  mkdir -p "$D/.run" || erreur "Could not create the folder $D."
+  # Avant de toucher aux liens, et tenu jusqu'à la fin du frontal (fd 8, à travers les exec) : une
+  # seconde instance referait les liens vers SON montage, et ils mourraient à sa sortie sous les
+  # pieds de la première. Ces verrous ne se suppriment jamais (flock : docs/etat-des-hotes.md §1).
+  local lanceur verrou
+  lanceur="$(lanceur_a_ouvrir)"
+  verrou=tiger.lock
+  if [ "$lanceur" = run_os9.sh ]; then verrou=os9.lock; fi
+  if command -v flock >/dev/null 2>&1; then
+    exec 8>>"$D/.run/app.lock"
+    flock -n 8 || erreur "POMPPC is already running."
+    # La fenêtre du frontal n'a plus de terminal pour dire ce refus du lanceur.
+    flock -n "$D/.run/$verrou" true || erreur "POMPPC is already running."
+  fi
+  preparer_donnees
+  if [ "${1:-}" = --prepare ]; then exit 0; fi       # épreuve : le dossier seul (smoke_appimage.sh)
+  # Le frontal sait qu'il est dans le paquet : assistant, rappel du pilote.
+  POMPPC_APP=1
+  POMPPC_VERSION="$(version)"
+  # Pour l'utilisateur, le démarrage de Mac OS X plutôt que le texte du noyau.
+  POMPPC_BOOT_ARGS=""
+  # qemu-img : l'assistant convertit le .dmg du combo (SetupFlow::convertDmg).
+  PATH="$SRC/bin:$PATH"
+  # Notre libgio n'a rien à faire des modules de l'hôte, compilés pour sa glib à lui : un dossier
+  # vide. SetupFlow::openExternal retire la variable avant le navigateur.
+  GIO_MODULE_DIR="$HERE/usr/lib/gio/modules"
+  export POMPPC_APP POMPPC_VERSION POMPPC_BOOT_ARGS PATH GIO_MODULE_DIR
+  cd "$D" || exit 1
+  # Depuis un lanceur graphique, personne ne lit stderr. Depuis un terminal, il reste là.
+  if [ ! -t 2 ]; then exec >>"$D/.run/app.log" 2>&1; fi
+  exec "$D/run_frontend.sh" "$D/$lanceur"
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then principal "$@"; fi

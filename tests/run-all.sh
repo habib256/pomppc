@@ -131,6 +131,19 @@ fi
 rm -rf tests/__pycache__ scripts/__pycache__ 2>/dev/null
 
 echo
+echo "=== 3 bis. version, épingles de la CI, paquet ==="
+# Les témoins d'abord : un garde qui ne sait plus échouer dirait « passé » sur n'importe quoi.
+if bash tools/check_version_strings.sh --self-test >/dev/null 2>&1; then ok "version : témoins"; else ko "version : témoins (bash tools/check_version_strings.sh --self-test)"; fi
+if bash tools/check_version_strings.sh >/dev/null; then ok "version : une seule source"; else ko "version ($(bash tools/check_version_strings.sh 2>&1 | head -1))"; fi
+if bash tools/check_workflow_pins.sh --self-test >/dev/null 2>&1; then ok "épingles : témoins"; else ko "épingles : témoins (bash tools/check_workflow_pins.sh --self-test)"; fi
+if bash tools/check_workflow_pins.sh >/dev/null; then ok "épingles : actions et images de .github/"; else ko "épingles ($(bash tools/check_workflow_pins.sh 2>&1 | grep -m1 -E 'NON ÉPINGLÉ|ÉCHEC'))"; fi
+if bash packaging/check_package_payload.sh --self-test >/dev/null 2>&1; then ok "contenu du paquet : témoins"; else ko "contenu du paquet : témoins"; fi
+if [ "$(uname -s)" = Linux ]; then
+  if bash tests/apprun_test.sh >/dev/null 2>&1; then ok "démarrage de l'AppImage"
+  else ko "démarrage de l'AppImage ($(bash tests/apprun_test.sh 2>&1 | grep -m1 ÉCHEC))"; fi
+else noop "démarrage de l'AppImage (Linux seulement)"; fi
+
+echo
 echo "=== 4. cohérence doc ↔ binaire ==="
 # La classe de bug la plus coûteuse du projet : le README décrivait un binaire
 # (avec Screamer, sans slirp) qui ne correspondait plus à celui qui tournait.

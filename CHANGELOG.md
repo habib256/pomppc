@@ -7,7 +7,17 @@ reconstruire QEMU et le plugin ; le kext ne change que si l'ABI de transport cha
 sont celles prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message
 de commit et dans `docs/`.
 
-## Non publié
+## 0.4.2 (non publiée)
+
+**AppImage Linux x86-64, construite en CI.** `POMPPC-0.4.2-x86_64.AppImage`, plancher glibc 2.31, dans une image
+Debian 11 épinglée par digest (`packaging/linux/`, `.github/workflows/release.yml`, `docs/publier-linux.md`). Données dans
+`~/POMPPC`, pilote GL de l'hôte, RUNPATH et pas de `LD_LIBRARY_PATH`. L'assistant de premier lancement est porté sous
+Linux (`md5sum`, `sha1sum`, `zenity` ou `kdialog`, `xdg-open`, `qemu-img` pour les `.dmg`) ; déposer des fichiers et
+partager un dossier restent propres à macOS. Binaire générique, plus lent que le binaire rapide du PC, et le PC reste
+derrière le M4 : les notes le chiffrent. **Écrit sans compilation : à éprouver sur le PC avant de publier.**
+
+**Une seule source pour la version** : `project(POMPPC VERSION …)` de `frontend/CMakeLists.txt`, resté à 0.3 jusqu'ici ;
+`tools/check_version_strings.sh` et `tools/check_workflow_pins.sh` tournent dans `tests/run-all.sh`.
 
 **Plantage du frontal écran éteint.** Lancé alors que l'écran du Mac est en veille, le frontal plantait dès la première image (0.4.1 touchée) ; la fenêtre suit maintenant l'invité sans borne tant qu'aucun écran n'est connu.
 

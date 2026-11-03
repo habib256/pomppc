@@ -102,6 +102,10 @@ public:
     static bool runTool(const std::vector<std::string>& args, std::string* output = nullptr,
                         int* pidOut = nullptr);
     bool placeMedia(const std::string& file, const std::string& out, bool move, std::string* err);
+    // Un .dmg en image brute : hdiutil sur macOS, qemu-img ailleurs (le paquet le met au PATH).
+    static bool convertDmg(const std::string& dmg, const std::string& out, std::string* err);
+    // Une page ou un dossier dans l'application de l'hôte, sans attendre qu'elle se ferme.
+    static void openExternal(const std::string& target);
 
     static constexpr const char* kUpdateUrl =
         "https://download.info.apple.com/Mac_OS_X/061-3461.20071114.8Uy45/MacOSXUpdCombo10.4.11PPC.dmg";

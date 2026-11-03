@@ -21,6 +21,7 @@
 #   qemu_machine_has    <bin> <machine> <nom>  # le device est-il INSTANCIÉ ?
 #   qemu_has_netdev     <bin> <nom>            # -netdev help    (user = slirp)
 #   qemu_has_audiodev   <bin> <nom>            # -audiodev help  (pa, alsa…)
+#   qemu_has_display    <bin> <nom>            # -display help   (dbus, gtk…)
 #   qemu_cpu_has_fastfp <bin> <machine> <cpu>  # propriété de CPU x-fast-fp ?
 #   qemu_cpu_has_prop   <bin> <machine> <cpu> <prop=val>  # -cpu <cpu>,<prop=val> accepté ?
 #   qemu_tcg_has_prop   <bin> <machine> <prop=val>        # -accel tcg,<prop=val> accepté ?
@@ -108,6 +109,13 @@ qemu_has_netdev() {
 qemu_has_audiodev() {
   _caps_load "$1" || return 2
   grep -qx "[[:space:]]*$2[[:space:]]*" <<< "$_CAPS_AUD"
+}
+
+# Sans mémoïsation : seuls le contrôle du paquet et son épreuve s'en servent.
+qemu_has_display() {
+  local out
+  out="$("$1" -display help 2>/dev/null || true)"
+  grep -qx "[[:space:]]*$2[[:space:]]*" <<< "$out"
 }
 
 # tcg/0067 : le point de trace est compilé avec le mode 3 à budget. Un ancien

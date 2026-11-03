@@ -58,6 +58,10 @@ guest/gldriver/qgpu_abi.h
 /lib/
 /share/
 /dist/
+/build-appimage/
+/build-appimage-iso/
+/squashfs-root/
+frontend/build-appimage/
 /Screenshots/
 /Exchange/
 tools/tcg/*.so

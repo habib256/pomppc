@@ -1,0 +1,214 @@
+# Paquets publiés de POMPPC, à la manière de POM2 (son release.yml) :
+#   version   le tag est la version du projet (frontend/CMakeLists.txt)
+#   quality   bash tests/run-all.sh, dans CE graphe de dépendances
+#   linux     image bullseye épinglée → POMPPC-<version>-x86_64.AppImage
+#   (windows  le lot suivant : un job de plus, et EXPECTED plus bas passe à 2)
+#   publish   Release + SHA256SUMS, sur un tag SEULEMENT
+#
+# Le macOS n'est pas ici : il se fait à la main sur le Mac et se dépose sur la même Release
+# (docs/publier-macos.md). `publish` réutilise donc une Release existante et ne touche qu'à SES
+# fichiers. Recette, plancher et ce que cette CI ne prouve pas : docs/publier-linux.md.
+#
+# Déclencheurs : un tag publie ; « Run workflow » et le planning hebdomadaire répètent, sans rien
+# publier. La répétition n'est pas un luxe : ce chemin ne tourne qu'à la publication, et une image
+# disparue ou une action retirée se découvrirait le jour du tag. PUBLIER RESTE UNE DÉCISION DE
+# L'UTILISATEUR : poser le tag est le seul geste qui publie.
+name: Paquets
+
+on:
+  push:
+    tags:
+      - '0.*'
+      - 'v*'
+  workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * 1'   # lundi 05:23 UTC, la répétition (pas :00, l'heure la plus chargée)
+
+# Un groupe par événement ET par ref : une répétition et un tag ne s'annulent jamais.
+concurrency:
+  group: paquets-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Lecture seule par défaut. Seul `publish` a besoin d'écrire.
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      pomppc_version: ${{ steps.v.outputs.pomppc_version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - id: v
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -eu
+          PROJET=$(sed -n 's/^project(POMPPC VERSION \([0-9][0-9.]*\).*/\1/p' frontend/CMakeLists.txt)
+          test -n "$PROJET" || { echo "::error::version illisible dans frontend/CMakeLists.txt"; exit 1; }
+          if [ "$REF_TYPE" = tag ]; then
+            TAG=${REF_NAME#v}
+            test "$TAG" = "$PROJET" || {
+              echo "::error::le tag $REF_NAME ne correspond pas à la version du projet $PROJET"
+              exit 1
+            }
+          fi
+          echo "pomppc_version=$PROJET" >> "$GITHUB_OUTPUT"
+
+  # La publication ne doit pas compter sur ci.yml, qui tourne à côté et peut échouer une fois les
+  # paquets déposés. run-all contient aussi les gardes de version et d'épingles.
+  quality:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Compilateur et Python
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3 pkg-config
+
+      - name: Non-régression
+        run: |
+          # Comme ci.yml : shellcheck est optionnel dans le harnais, et ses avertissements
+          # préexistants feraient échouer la publication.
+          if command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get remove -y shellcheck
+          fi
+          bash tests/run-all.sh
+
+  # `docker run` et pas `container:` : les actions node24 tournent sur le runner, seul le script
+  # de construction tourne dans l'image (POM2, release.yml:209-212).
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: read       # tirer l'image de GHCR
+    env:
+      # À REMPLIR AU PREMIER PASSAGE : lancer le workflow builder-image.yml, puis coller ici le digest
+      # qu'il imprime, sous la forme
+      #   BUILDER_IMAGE: ghcr.io/habib256/pomppc-bullseye-builder@sha256:<64 hex>
+      # Tant que c'est vide, ce job s'arrête à sa première étape (docs/publier-linux.md §2).
+      BUILDER_IMAGE: ''
+      POMPPC_VERSION: ${{ needs.version.outputs.pomppc_version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: L'image de construction est épinglée
+        run: |
+          case "$BUILDER_IMAGE" in
+            *@sha256:*) echo "image : $BUILDER_IMAGE" ;;
+            *)
+              echo "::error::BUILDER_IMAGE est vide dans release.yml. Lancer le workflow « Image de construction Linux », puis y coller le digest qu'il imprime (docs/publier-linux.md §2)."
+              exit 1 ;;
+          esac
+
+      - name: CD invité (packaging/guest-iso.lock)
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -eu
+          # Un tag exige le CD de sa version. Une répétition prend celui qui est déclaré.
+          EXIGE=()
+          if [ "$REF_TYPE" = tag ]; then EXIGE=(--exige-version "$POMPPC_VERSION"); fi
+          packaging/linux/fetch_guest_iso.sh build-appimage-iso/pomppc-guest.iso "${EXIGE[@]}"
+
+      - name: Connexion à GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Construire QEMU, le frontal et l'AppImage dans l'image
+        run: |
+          set -eu
+          docker pull "$BUILDER_IMAGE"
+          docker run --rm \
+            -v "$PWD":/work -w /work \
+            -e POMPPC_VERSION \
+            -e GUEST_ISO=/work/build-appimage-iso/pomppc-guest.iso \
+            -e JOBS=4 \
+            "$BUILDER_IMAGE" \
+            bash /work/packaging/linux/build_in_bullseye.sh
+
+      - name: Vérifier le paquet (ET_EXEC, magie, plancher, GL, RUNPATH, contenu)
+        run: packaging/linux/check_appimage.sh "dist/POMPPC-$POMPPC_VERSION-x86_64.AppImage" "$POMPPC_VERSION"
+
+      # Résolues au chargement, avant main : elles doivent exister même sans écran ni GPU. Le
+      # paquet ne les embarque pas, c'est le contrat : elles viennent de l'hôte.
+      - name: Bibliothèques de l'hôte pour l'épreuve
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1 libxcb1
+
+      - name: Épreuve du paquet (QEMU, Open Firmware, QMP, capacités, frontal, dossier de données)
+        run: packaging/linux/smoke_appimage.sh squashfs-root "$POMPPC_VERSION"
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: POMPPC-linux-AppImage
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  publish:
+    needs: [version, quality, linux]
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          path: artifacts
+
+      - name: Déposer les paquets et leurs sommes sur la Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          POMPPC_VERSION: ${{ needs.version.outputs.pomppc_version }}
+          # Le job n'extrait pas le dépôt : `gh release` ne peut pas le déduire d'un remote git.
+          GH_REPO: ${{ github.repository }}
+          # Exactement ce nombre : le dossier est plat, deux paquets de même nom n'en feraient qu'un.
+          # Le lot Windows le passera à 2.
+          EXPECTED: 1
+        run: |
+          set -eu
+          mkdir -p staging
+          find artifacts -type f \( -name '*.AppImage' -o -name '*.zip' \) -exec cp -v {} staging/ \;
+          shopt -s nullglob
+          FILES=(staging/*.AppImage staging/*.zip)
+          printf '%s\n' "${FILES[@]}"
+          if [ "${#FILES[@]}" -ne "$EXPECTED" ]; then
+            echo "::error::${#FILES[@]} paquet(s), $EXPECTED attendu(s)"
+            exit 1
+          fi
+          # Nom propre à la CI : les sommes des paquets macOS, déposés à la main, gardent les leurs
+          # (*.sha256) et ne sont pas écrasées, quel que soit l'ordre des dépôts.
+          ( cd staging && sha256sum -- "${FILES[@]#staging/}" > SHA256SUMS-ci.txt )
+          cat staging/SHA256SUMS-ci.txt
+          FILES+=(staging/SHA256SUMS-ci.txt)
+
+          # Corps de la Release : les notes À LA RÉVISION DU TAG, par l'API (pas de checkout). Sur un
+          # 404 `gh api` écrit son erreur sur stdout : c'est le code de sortie qui décide. Pas de
+          # repli sur une liste de commits : tools/check_version_strings.sh exige ces notes.
+          NOTES="docs/notes-version-$POMPPC_VERSION.md"
+          if ! gh api "repos/$GH_REPO/contents/$NOTES?ref=$TAG" \
+                 -H "Accept: application/vnd.github.raw" > notes.md || [ ! -s notes.md ]; then
+            echo "::error::$NOTES introuvable au tag $TAG"
+            exit 1
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Réutilisée : le Mac a pu y déposer ses paquets, ou l'utilisateur en corriger le texte.
+            # --clobber ne remplace que les noms listés ici ; le corps ne se remplit que s'il est vide.
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+            if [ -z "$(gh release view "$TAG" --json body -q .body | tr -d '[:space:]')" ]; then
+              gh release edit "$TAG" --notes-file notes.md
+            fi
+          else
+            gh release create "$TAG" "${FILES[@]}" --notes-file notes.md --title "POMPPC $TAG"
+          fi

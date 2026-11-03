@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (c) 2026 VERHILLE Arnaud
 cmake_minimum_required(VERSION 3.16)
-project(POMPPC VERSION 0.3 LANGUAGES C CXX)
+project(POMPPC VERSION 0.4.2 LANGUAGES C CXX)
 
 # POMPPC frontend — Dear ImGui + GLFW/OpenGL3 shell embedding QEMU's display
 # over D-Bus (-display dbus,p2p=on). Same habillage as pom68k / POM1 / POM2 /

@@ -1,0 +1,126 @@
+# Dockerfile.bullseye — la chaîne de construction figée de l'AppImage Linux x86-64 de POMPPC.
+#
+# POURQUOI BULLSEYE ET PAS BIONIC (les autres Pommes) : une AppImage n'embarque jamais la glibc,
+# son plancher est donc celui de l'image. Bionic (2.27) ne compile pas QEMU 11 :
+#   [D] QEMU meson.build:330 @ v11.1.2 — gcc >= 10.4 exigé
+#   [D] QEMU meson.build:1058 @ v11.1.2 — glib >= 2.66.0 exigée
+#   [D] QEMU configure:508 @ v11.1.2 — python >= 3.9 exigé
+# Debian 11 donne glibc 2.31, glib 2.66.8 et python 3.9.2 ; son gcc-10 (10.2) reste sous 10.4,
+# d'où gcc 11 compilé ici (long : c'est le seul poste lourd de l'image). Détail, plancher et
+# ce qui reste à la main : docs/publier-linux.md.
+#
+# Debian 11 est sortie du support LTS fin août 2026 : ses dépôts peuvent passer à tout moment sur
+# archive.debian.org. L'image se cuit donc UNE fois, se pousse sur GHCR et s'épingle par digest
+# (.github/workflows/builder-image.yml, puis BUILDER_IMAGE dans release.yml). Une publication
+# ne touche plus à apt.
+FROM debian:bullseye@sha256:6f519a81440354a85eb592c5f32109ab80605f6b892455983a6f618bf87fabe9
+
+SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Entrées épinglées : sommes relevées le 03/11/2026 sur les fichiers eux-mêmes, sha512 de gcc
+# reprise de gcc.gnu.org/pub/gcc/releases/gcc-11.5.0/sha512.sum.
+ARG GCC_VER=11.5.0
+ARG GCC_SHA512=88f17d5a5e69eeb53aaf0a9bc9daab1c4e501d145b388c5485ebeb2cc36178fbb2d3e49ebef4a8c007a05e88471a06b97cf9b08870478249f77fbfa3d4abd9a8
+ARG CMAKE_VER=3.31.8
+ARG CMAKE_SHA256=630615d8e98ac33eba7fbe472626dff5c899c85af3c024585ae109166a6909d0
+ARG GLFW_VER=3.4
+ARG GLFW_SHA256=b5ec004b2712fd08e8861dc271428f048775200a2df719ccf575143ba749a3e9
+ARG APPIMAGEKIT_REL=12
+ARG APPIMAGETOOL_SHA256=d918b4df547b388ef253f3c9e7f6529ca81a885395c31f619d9aaf7030499a13
+ARG RUNTIME_SHA256=24da8e0e149b7211cbfb00a545189a1101cb18d1f27d4cfc1895837d2c30bc30
+ARG TOMLI_SHA256=939de3e7a6161af0c887ef91b7d41a53e7c5a1ca976325f429cb46ea9bc30ecc
+ARG DISTLIB_SHA256=47f8c22fd27c27e25a65601af709b38e4f0a45ea4fc2e710f65755fa8caaaf87
+
+# --- dépendances, avec repli sur l'archive si bullseye a quitté les miroirs ------------------
+# Ce que QEMU et le frontal lient (scripts/build_qemu_qfb.sh, profil paquet-linux). GL et EGL ne
+# servent qu'à la compilation et au lien : aucune de ces bibliothèques ne part dans le paquet.
+# Pas de GTK, de SDL, d'epoxy, de libgbm : un -dev absent ne peut pas s'inviter au configure.
+RUN if ! apt-get update; then \
+        echo "[apt] miroir bullseye injoignable : repli sur archive.debian.org" >&2; \
+        printf '%s\n' \
+            'deb http://archive.debian.org/debian bullseye main' \
+            'deb http://archive.debian.org/debian-security bullseye-security main' \
+            > /etc/apt/sources.list; \
+        apt-get -o Acquire::Check-Valid-Until=false update; \
+    fi; \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl wget git xz-utils unzip file patch make gawk perl gcc g++ libc6-dev pkg-config \
+        binutils patchelf ninja-build bison flex python3 python3-venv \
+        libgmp-dev libmpfr-dev libmpc-dev \
+        libglib2.0-dev libglib2.0-dev-bin libpixman-1-dev libslirp-dev libpulse-dev \
+        zlib1g-dev libfdt-dev libpng-dev libusb-1.0-0-dev libbz2-dev \
+        libgl-dev libegl-dev libglx-dev \
+        libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev \
+        libwayland-dev libwayland-bin libxkbcommon-dev
+
+# --- gcc 11 (bullseye n'a que 10.2, QEMU refuse sous 10.4) ------------------------------------
+# Pas de bootstrap : le gcc 10 de l'image suffit, et la construction reste dans le budget du job.
+RUN curl -fsSL -o /tmp/gcc.tar.xz "https://ftpmirror.gnu.org/gcc/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz" \
+      || curl -fsSL -o /tmp/gcc.tar.xz "https://gcc.gnu.org/pub/gcc/releases/gcc-${GCC_VER}/gcc-${GCC_VER}.tar.xz"; \
+    echo "${GCC_SHA512}  /tmp/gcc.tar.xz" | sha512sum -c -; \
+    mkdir -p /tmp/gcc-src /tmp/gcc-build; \
+    tar -xJf /tmp/gcc.tar.xz --strip-components=1 -C /tmp/gcc-src; \
+    cd /tmp/gcc-build; \
+    /tmp/gcc-src/configure --prefix=/opt/gcc-11 --enable-languages=c,c++ \
+        --disable-multilib --disable-bootstrap --disable-nls --disable-libsanitizer; \
+    make -j"$(nproc)"; \
+    make install-strip; \
+    cd /; rm -rf /tmp/gcc.tar.xz /tmp/gcc-src /tmp/gcc-build; \
+    /opt/gcc-11/bin/gcc --version | head -1
+ENV PATH="/opt/gcc-11/bin:/opt/cmake/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ENV CC=gcc CXX=g++
+
+# --- CMake récent -----------------------------------------------------------------------------
+RUN curl -fsSL -o /tmp/cmake.tar.gz \
+        "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-x86_64.tar.gz"; \
+    echo "${CMAKE_SHA256}  /tmp/cmake.tar.gz" | sha256sum -c -; \
+    mkdir -p /opt/cmake; \
+    tar --strip-components=1 -xzf /tmp/cmake.tar.gz -C /opt/cmake; \
+    rm -f /tmp/cmake.tar.gz; \
+    cmake --version | head -1
+
+# --- GLFW 3.4 statique, X11 ET Wayland choisis au lancement ------------------------------------
+# 3.4 et pas 3.3 : 3.3 fige une seule plateforme à la compilation. 3.4 ouvre libX11 et
+# libwayland-client par dlopen : aucune de ces bibliothèques n'entre dans les NEEDED du frontal,
+# et elles viennent de l'hôte, comme le pilote GL.
+RUN curl -fsSL -o /tmp/glfw.zip "https://github.com/glfw/glfw/releases/download/${GLFW_VER}/glfw-${GLFW_VER}.zip"; \
+    echo "${GLFW_SHA256}  /tmp/glfw.zip" | sha256sum -c -; \
+    unzip -q /tmp/glfw.zip -d /tmp; \
+    cmake -S "/tmp/glfw-${GLFW_VER}" -B /tmp/glfw-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=OFF -DGLFW_BUILD_X11=ON -DGLFW_BUILD_WAYLAND=ON \
+        -DGLFW_BUILD_EXAMPLES=OFF -DGLFW_BUILD_TESTS=OFF -DGLFW_BUILD_DOCS=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local; \
+    cmake --build /tmp/glfw-build --target install; \
+    mkdir -p /opt/licenses; \
+    cp "/tmp/glfw-${GLFW_VER}/LICENSE.md" /opt/licenses/glfw-LICENSE.md; \
+    rm -rf /tmp/glfw.zip "/tmp/glfw-${GLFW_VER}" /tmp/glfw-build
+
+# --- Python de configure ----------------------------------------------------------------------
+# build_qemu_qfb.sh : le configure de QEMU 11.1 veut tomli (sous Python 3.11) et distlib.
+RUN python3 -m venv /opt/qemu-venv; \
+    printf 'tomli==2.0.1 --hash=sha256:%s\ndistlib==0.3.9 --hash=sha256:%s\n' \
+        "${TOMLI_SHA256}" "${DISTLIB_SHA256}" > /tmp/req.txt; \
+    /opt/qemu-venv/bin/pip install --no-deps --require-hashes -r /tmp/req.txt; \
+    rm -f /tmp/req.txt
+ENV PYTHON=/opt/qemu-venv/bin/python3
+
+# --- appimagetool et son runtime, extraits (pas de FUSE dans un conteneur) ---------------------
+# AppImageKit release 12, immuable, les deux moitiés de la même : son runtime x86-64 est ET_EXEC
+# [A] (readelf sur le fichier, 03/11/2026), que AppImageLauncher accepte, et lit le gzip que cet
+# appimagetool écrit. Un `continuous` qui bouge casse à la seule heure où il sert, la publication.
+RUN mkdir -p /opt/appimage-tools; \
+    cd /opt/appimage-tools; \
+    base="https://github.com/AppImage/AppImageKit/releases/download/${APPIMAGEKIT_REL}"; \
+    curl -fsSL -o appimagetool.AppImage "$base/appimagetool-x86_64.AppImage"; \
+    curl -fsSL -o runtime-x86_64 "$base/runtime-x86_64"; \
+    echo "${APPIMAGETOOL_SHA256}  appimagetool.AppImage" | sha256sum -c -; \
+    echo "${RUNTIME_SHA256}  runtime-x86_64" | sha256sum -c -; \
+    chmod +x appimagetool.AppImage runtime-x86_64; \
+    ./appimagetool.AppImage --appimage-extract >/dev/null; \
+    mv squashfs-root appimagetool.AppDir; \
+    rm -f appimagetool.AppImage; \
+    ./appimagetool.AppDir/AppRun --version
+ENV POMPPC_APPIMAGE_TOOLS_DIR=/opt/appimage-tools
+
+WORKDIR /work
