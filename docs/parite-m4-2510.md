@@ -19,8 +19,7 @@ générique, `docs/tcg-zone-froide-arm64.md` §7). `tcg/0057`-`0058` et `0065`, 
 et éteints ;
 `0060`-`0063` ne sont pas nommés dans `build_qemu_qfb.sh`. Le M4 tourne toujours sur le binaire
 de référence (pas de `build-fast`), reconstruit en dernier le 02/11 à 23 h 36. Ce qui reste à faire
-sur le M4 : `docs/etat-des-hotes.md` §3 et §4 (A/B du bundle du 01/11, profil croisé), non le
-plan des §1-§2.
+sur le M4 : `docs/etat-des-hotes.md` §3 et `TODO.md`, « Maintenant », non le plan des §1-§2.
 
 ## 1. Le retard, patch par patch
 

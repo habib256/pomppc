@@ -128,7 +128,7 @@ et l'en-tête de `scripts/build_qemu_qfb.sh`) :
 | `tcg/0051-ppc-lfs-known.patch` | `lfs` producteur de `x-fp-known`, `x-lfs-known` (`LFSKNOWN`, allumé sur Linux x86-64 depuis le 24/10 et sur macOS arm64 depuis le 26/10). `docs/tcg-g4.md` §40. |
 | `tcg/0052-tcg-tlb-base.patch` | TLB logiciel une fois par base des chargements en forme D, `x-tlb-base` (`TLBBASE`, `qemu-system-ppc` seul ; allumé sur Linux x86-64 depuis le 25/10 et sur macOS arm64 depuis le 26/10). §41. |
 | `tcg/0054-ppc-vfnc-slow.patch` | talon de `vcf*` forcé pour les preuves, `x-vfp-native-cmp-slow` (éteint). |
-| `tcg/0056-tcg-cold-slow-paths.patch` | chemins lents en zone froide de la région, `x-tcg-cold` (accélérateur ; allumé sur Linux x86-64 depuis le 31/10, sans effet sur arm64). `docs/vitesse-doom3-x86.md` §20, §23. |
+| `tcg/0056-tcg-cold-slow-paths.patch` | chemins lents en zone froide de la région, `x-tcg-cold` (accélérateur ; allumé sur Linux x86-64 depuis le 31/10 ; arm64 : `tcg/0066`, éteint). `docs/vitesse-doom3-x86.md` §20, §23. |
 | `tcg/0057-tcg-vcpu-qos.patch`, `0058-poll-ns-macos.patch` | QoS des fils vCPU (`x-vcpu-qos`) et attente de la boucle principale à la µs (`POMPPC_POLL_NS`), macOS seul, éteints. `docs/tcg-g4.md` §42. |
 | `tcg/fixes/0058-poll-ns-contract.patch` | Après 0058 : garder le compte de `select` et laisser `revents` intact au retour nul/erreur, comme `g_poll` de l'hôte macOS. `tools/tcg/pollnsproof.py` (42 cas, deux mutants). Aucun allumage. |
 | `tcg/0065-macos-poll-short.patch` | Après 0058 et son correctif : `POLLNS=2`, `select` seulement sous 1 ms (strictement). Mode 1 inchangé, défaut éteint. 56 cas et mutants de routage ; A/B des cinq jeux : zen −8,20 % mais UT +10,06 %, **écarté** (`archive/m4-pollns-court-0211`). `docs/tcg-g4.md` §42.2. |

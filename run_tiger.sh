@@ -235,10 +235,10 @@ case "$(uname -s):$(uname -m)" in
     # 0 divergence, DOOM 3 −2,2 % (rapide). Sur le M4 depuis le 26/10.
     export TLBBASE="${TLBBASE:-1}"
     # Depuis le 31/10/2026 (docs/vitesse-doom3-x86.md §23) : TCGCOLD (tcg/0056, chemins lents
-    # en zone froide, hôte x86-64 seul) — binaire rapide, A/B au repos : cmr-pe −2,2 % sur 6
+    # en zone froide) — binaire rapide, A/B au repos : cmr-pe −2,2 % sur 6
     # parties par bras sans gel (mesure d'avant 6054367 : transition d'avant la course, pas la
-    # course), d3 −1,8 %, mb −1,2 %, zen −2,2 %, ut neutre. Sur le M4 : sans
-    # effet (b.cond imm19), parité par un saut long à faire. _COLD_AUTO : allumé faute de
+    # course), d3 −1,8 %, mb −1,2 %, zen −2,2 %, ut neutre. Sur le M4 : porté par
+    # tcg/0066, TCGCOLD=1 disponible, éteint sans gain générique (docs/tcg-zone-froide-arm64.md §7). _COLD_AUTO : allumé faute de
     # réglage explicite, éteint sans un mot si le binaire n'a pas la propriété.
     [ -n "${TCGCOLD:-}" ] || { export TCGCOLD=1; _COLD_AUTO=1; }
     ;;

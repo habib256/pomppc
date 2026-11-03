@@ -202,7 +202,8 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
 
 **Dérive de documentation (3/11, matin, demande de l'utilisateur).** Relecture contre le code de ce qui a bougé
 depuis le 01/11 : README, TODO, frontal, recette de publication, `patches/README`, `tcg-g4`, parité M4 ; puis
-Quartz Extreme, `gpu-3d-tiger` §6, architecture §9, index `docs/re`, aide de `run_os9.sh`. Le chantier
+Quartz Extreme, `gpu-3d-tiger` §6, architecture §9, index `docs/re`, aide de `run_os9.sh` ; enfin la doc confrontée
+au code en sens inverse (libellés du README, symboles cités). Le chantier
 « TCG — M4 » du TODO a atteint sa fermeture et en sort (détail au CHANGELOG 0.4) ; « TCG — PC » passe en tête
 d'« Ensuite », car il attend le PC. Aucun fichier haché de `patches/` touché : l'empreinte de la série ne change pas.
 
