@@ -9,6 +9,8 @@ de commit et dans `docs/`.
 
 ## Non publié
 
+**Plantage du frontal écran éteint.** Lancé alors que l'écran du Mac est en veille, le frontal plantait dès la première image (0.4.1 touchée) ; la fenêtre suit maintenant l'invité sans borne tant qu'aucun écran n'est connu.
+
 **Preferences.** Son et manette USB s'y règlent aussi, sous le même bouton, et la fenêtre dit la définition
 courante et où la changer dans Mac OS. Une Library vide a un bouton **Show Folder**.
 

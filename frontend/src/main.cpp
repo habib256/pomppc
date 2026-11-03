@@ -1363,7 +1363,16 @@ int main(int argc, char** argv) {
                 fitDone = true;
                 if (!showLibrary && !showBilan && !showJournal && !fe.showDisks) {
                     int ax = 0, ay = 0, aw = 0, ah = 0, wx = 0, wy = 0, ft = 0;
-                    glfwGetMonitorWorkarea(monitorOf(window), &ax, &ay, &aw, &ah);
+                    // [A] M4, 03/11 : lancé écran du Mac en veille, GLFW ne recense aucun écran,
+                    // même au réveil : monitorOf() rend NULL et glfwGetMonitorWorkarea plantait
+                    // le frontal. Sans écran connu, la fenêtre suit l'invité sans borne.
+                    GLFWmonitor* fitMonitor = monitorOf(window);
+                    if (fitMonitor) {
+                        glfwGetMonitorWorkarea(fitMonitor, &ax, &ay, &aw, &ah);
+                    } else {
+                        ax = ay = -32768;
+                        aw = ah = 65535;
+                    }
                     glfwGetWindowFrameSize(window, nullptr, &ft, nullptr, nullptr);
                     const int menuH = (int)std::ceil(ImGui::GetFrameHeight());
                     const int tw = std::min(fitGuestW, aw);
@@ -2198,11 +2207,14 @@ int main(int argc, char** argv) {
         // ── Bascule plein écran ↔ fenêtre (hors frame) ───────────────────
         if (toggleFullscreen) {
             toggleFullscreen = false;
-            if (!fullscreen) {
+            GLFWmonitor* mon = fullscreen ? nullptr : monitorOf(window);
+            const GLFWvidmode* vm = mon ? glfwGetVideoMode(mon) : nullptr;
+            if (!fullscreen && !vm) {
+                // Aucun écran recensé : voir l'ajustement de la fenêtre.
+                journal("full screen ignored: no display available");
+            } else if (!fullscreen) {
                 glfwGetWindowPos(window, &winX, &winY);
                 glfwGetWindowSize(window, &winW, &winH);
-                GLFWmonitor* mon = monitorOf(window);
-                const GLFWvidmode* vm = glfwGetVideoMode(mon);
                 glfwSetWindowMonitor(window, mon, 0, 0, vm->width, vm->height,
                                      vm->refreshRate);
                 fullscreen = true;
