@@ -211,3 +211,19 @@ explicite `TCGCOLD=1`. Le gain x86-64 ne suffit pas à l'allumer sur arm64.
 Le finaliseur générique de pools change aussi sur x86-64 : reconstruire
 `build/` et `build-fast/`, puis valider sur le PC à son retour. Aucun test
 Linux de cette séance n'est revendiqué.
+
+## Le finaliseur de pools sur x86-64 (PC, 04/11/2026)
+
+[A — hôte] `tcg/0066` modifie le finaliseur générique de pools, commun aux deux hôtes : les preuves natives du M4 ne
+valaient pas pour le PC. `tools/tcg/froid-x86-proof.sh` joue les suites invitées sans et avec `x-tcg-cold`, binaire rapide
+de la série `f9490f65c5ffe1c7`, en SMP=1 puis en SMP=2 sur tampon de 64 Mio, `x-vfp-native-verify`, `x-vmx-verify` et
+`x-tb-verify` allumés (`bench/tcg/froid-x86-0411/`) :
+
+- **Sorties identiques entre témoin et froid dans les deux configurations**, hors temps imprimés par `jctest` et `tbtest` :
+  vfp, vmx, lmw, tb, smc, jc, tlbb, fp simple, double, comparaisons et programmes aléatoires, exceptions FP.
+- tlbb : 519 984 essais, 309 224 fautes, 0 erreur, même empreinte `028069d6e50d8d0b` dans les quatre bras.
+- **Exceptions FP : 640 cas par bras, 2 560 au total, 0 erreur** au PC exact.
+- 0 divergence aux vérificateurs. `x-ret-verify` et `TLBPVERIFY` n'étaient pas allumés.
+
+**Limites.** Les renouvellements de tampon n'ont pas été comptés, à la différence du M4 : `tb-size=64` ne prouve pas qu'il y
+en a eu sur ce parcours. Aucune vitesse n'est à tirer de ces essais instrumentés.

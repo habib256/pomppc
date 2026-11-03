@@ -94,7 +94,10 @@ bras froid-smp2  2 "$NEAR,tb-size=64,x-tcg-cold=on"
     echo "--- temoin-$s / froid-$s"
     for f in "$OUT/temoin-$s"/*.txt; do
       n="$(basename "$f")"; case "$n" in *-build.txt) continue ;; esac
-      if diff <(grep -v '^banc' "$f") <(grep -v '^banc' "$OUT/froid-$s/$n") >/dev/null 2>&1; then
+      case "$n" in log.txt) continue ;; esac   # durées
+      # jctest et tbtest impriment des temps : seuls les résultats se comparent.
+      net() { grep -v '^banc' "$1" | sed -E 's/ns=[0-9.]+//; s/[0-9.]+ ns//g; s/plus grand saut [0-9]+//; s/fréquence [0-9.]+ MHz//'; }
+      if diff <(net "$f") <(net "$OUT/froid-$s/$n") >/dev/null 2>&1; then
         echo "identique  $n"
       else
         echo "DIFFÈRE    $n"; rc=1
