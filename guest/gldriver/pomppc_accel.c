@@ -174,7 +174,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261104-stpatch"
+#define POMPPC_PLUGIN_REV "20261104-stpatch-b1"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -8035,21 +8035,21 @@ static int stpatch_try(PCtx *p, const TexInfo *ti, int raw, unsigned long fl,
         }
         return 0;                       /* toujours la voie de référence */
     }
-    if (patch.n) {
-        /* Une seule réservation. Elle peut attendre/vider et relâcher G.mu :
-           un changement de référence interdit d'envoyer le delta calculé sur
-           l'ancienne. CTX_BIND éventuellement posé par reserve peut rester. */
-        c = reserve(p, patch.n * QGPU_LEN_SET_STATE);
-        if (!p->st_valid || !p->stp_valid || p->stp_gen != gen) {
-            G.ncmd -= patch.n * QGPU_LEN_SET_STATE;
-            G.n_stp_race++;
-            return 0;
-        }
-        for (i = 0; i < patch.n; i++) {
-            c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
-            c[1] = patch.key[i]; c[2] = patch.val[i];
-            c += QGPU_LEN_SET_STATE;
-        }
+    /* Même sans clé, conserver la frontière du bloc complet : reserve
+       ferme RUN/RAW différés et lie p avant le prochain dessin. L'équivalence
+       du vecteur froid ne suffit pas à supprimer ces effets de flux.
+       Une seule réservation ; elle peut attendre/vider et relâcher G.mu : un
+       changement de référence impose le bloc complet. CTX_BIND peut rester. */
+    c = reserve(p, patch.n * QGPU_LEN_SET_STATE);
+    if (!p->st_valid || !p->stp_valid || p->stp_gen != gen) {
+        G.ncmd -= patch.n * QGPU_LEN_SET_STATE;
+        G.n_stp_race++;
+        return 0;
+    }
+    for (i = 0; i < patch.n; i++) {
+        c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+        c[1] = patch.key[i]; c[2] = patch.val[i];
+        c += QGPU_LEN_SET_STATE;
     }
     pomppc_stpatch_save(p->stp_snap, next);
     p->stp_gen++;

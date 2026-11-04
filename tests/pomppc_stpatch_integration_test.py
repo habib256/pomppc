@@ -11,6 +11,9 @@ source = (ROOT / 'guest/gldriver/pomppc_accel.c').read_text()
 start = source.index('static int stpatch_try(')
 end = source.index('\n}\n', start) + 3
 actual = source[start:end]
+start = source.index('static unsigned long *reserve(PCtx *p, unsigned long words)\n{')
+end = source.index('\n}\n', start) + 3
+actual_reserve = source[start:end]
 
 pre = r'''
 #include <assert.h>
@@ -22,6 +25,7 @@ pre = r'''
 typedef int TexInfo;
 typedef struct PCtx {
     int st_valid, stp_valid;
+    unsigned long qctx;
     unsigned long stp_gen;
     uint32_t stp_snap[POMPPC_STPATCH_WORDS];
     unsigned long st[QGPU_SK_COUNT];
@@ -31,12 +35,17 @@ static struct {
     unsigned long n_stp_race, n_stp_take, n_stp_keys;
     unsigned long n_stp_cache, n_stp_header, n_stp_other, n_stp_enum;
     int stblk_check;
+    int dead;
+    PCtx *bound;
+    unsigned long cmd[128];
 } G;
 static unsigned char st_is_hot[QGPU_SK_COUNT];
-static unsigned long cmd[128];
+static unsigned long *cmd = G.cmd;
+#define CMD_WORDS 128
 static uint32_t fixture[POMPPC_STPATCH_WORDS];
 static PCtx *owner;
-static int reserve_action, reserve_calls, reserve_prefix;
+static int reserve_action, reserve_calls, pending_run, pending_raw;
+static int closed_run, closed_raw;
 static void stpatch_snapshot(uint32_t *out, unsigned long fl, PCtx *p,
                              unsigned long sbits, const unsigned char *g)
 { (void)fl; (void)p; (void)sbits; (void)g; memcpy(out,fixture,sizeof(fixture)); }
@@ -51,30 +60,34 @@ static void compute_state(PCtx *p,const TexInfo *ti,unsigned long *out,int raw)
     qgpu_state_block_compute(fixture,&cur,ref);
     for(i=0;i<QGPU_SK_COUNT;i++)out[i]=ref[i];
 }
-static unsigned long *reserve(PCtx *p,unsigned long words)
+/* Le vrai reserve ferme les dessins différés AVANT de lier le contexte.
+   Les fermetures restent des doubles ; le corps extrait impose leur ordre. */
+static void stream_ready(void)
 {
-    unsigned long *out;
     reserve_calls++;
-    if(reserve_prefix) {cmd[G.ncmd++]=0xf001;cmd[G.ncmd++]=0xf002;}
-    out=cmd+G.ncmd;G.ncmd+=words;
-    if(reserve_action==1) {p->stp_valid=0;p->stp_gen++;}
-    if(reserve_action==2) p->stp_gen++;
-    if(reserve_action==3) p->st_valid=0;
-    return out;
+    if(reserve_action==1) {owner->stp_valid=0;owner->stp_gen++;}
+    if(reserve_action==2) owner->stp_gen++;
+    if(reserve_action==3) owner->st_valid=0;
 }
+static void close_run(void)
+{ if(pending_run) {cmd[G.ncmd++]=0xd001;pending_run=0;closed_run++;} }
+static void close_raw(void)
+{ if(pending_raw) {cmd[G.ncmd++]=0xd002;pending_raw=0;closed_raw++;} }
+static void flush(void) { assert(!"vidage inattendu du petit flux"); }
 '''
 post = r'''
 static void init(PCtx *p)
 {
     QgpuState cur;uint32_t ref[QGPU_SK_COUNT];unsigned i;
-    memset(p,0,sizeof(*p));memset(&G,0,sizeof(G));memset(cmd,0,sizeof(cmd));
-    p->st_valid=p->stp_valid=1;p->stp_gen=19;
+    memset(p,0,sizeof(*p));memset(&G,0,sizeof(G));
+    p->st_valid=p->stp_valid=1;p->stp_gen=19;p->qctx=7;G.bound=p;
     p->stp_snap[0]=QGPU_SB_F_VALID|QGPU_SB_F_V7|QGPU_SB_F_STENCIL;
     p->stp_snap[1]=640;p->stp_snap[2]=480;p->stp_snap[3]=8;
     memcpy(fixture,p->stp_snap,sizeof(fixture));
     qgpu_state_init(&cur);qgpu_state_block_compute(fixture,&cur,ref);
     for(i=0;i<QGPU_SK_COUNT;i++)p->st[i]=ref[i];
-    reserve_calls=reserve_action=reserve_prefix=0;owner=p;
+    reserve_calls=reserve_action=pending_run=pending_raw=0;
+    closed_run=closed_raw=0;owner=p;
 }
 static void delta(void)
 {
@@ -93,10 +106,10 @@ int main(void)
     assert(!memcmp(p.stp_snap,fixture,sizeof(fixture))&&p.stp_gen==20);
     /* Les vrais mots réservés sont rendus ; le CTX_BIND du reserve reste. */
     for(action=1;action<=3;action++) {
-        init(&p);delta();reserve_action=action;reserve_prefix=1;gen=p.stp_gen;
+        init(&p);delta();reserve_action=action;G.bound=NULL;gen=p.stp_gen;
         assert(!stpatch_try(&p,NULL,1,fixture[0],8,NULL));
         assert(G.ncmd==2&&G.n_stp_race==1&&G.n_stp_take==0);
-        assert(cmd[0]==0xf001&&cmd[1]==0xf002&&cmd[2]==0);
+        assert(cmd[0]==QGPU_CMD_HDR(QGPU_OP_CTX_BIND,QGPU_LEN_CTX)&&cmd[1]==7&&cmd[2]==0);
         assert(memcmp(p.stp_snap,fixture,sizeof(fixture)));
         assert(p.stp_gen==gen+(action!=3));
     }
@@ -106,9 +119,23 @@ int main(void)
     assert(!stpatch_try(&p,NULL,1,fixture[0],8,NULL)&&!reserve_calls);
     init(&p);p.st_valid=0;
     assert(!stpatch_try(&p,NULL,1,fixture[0],8,NULL)&&!reserve_calls);
-    /* Candidat zéro clé : aucun reserve ni écriture ; contrôle = voie pleine. */
+    /* Zéro clé conserve la frontière du bloc complet : ferme les dessins
+       différés puis lie p, même si un autre contexte était courant. */
+    init(&p);pending_run=pending_raw=1;G.bound=NULL;
+    assert(stpatch_try(&p,NULL,1,fixture[0],8,NULL));
+    assert(reserve_calls==1&&closed_run==1&&closed_raw==1&&G.bound==&p);
+    assert(G.ncmd==4&&cmd[0]==0xd001&&cmd[1]==0xd002);
+    assert(cmd[2]==QGPU_CMD_HDR(QGPU_OP_CTX_BIND,QGPU_LEN_CTX)&&cmd[3]==7);
+    assert(G.n_stp_take==1&&G.n_stp_keys==0);
+    for(action=1;action<=3;action++) {
+        init(&p);reserve_action=action;pending_raw=1;G.bound=NULL;
+        assert(!stpatch_try(&p,NULL,1,fixture[0],8,NULL));
+        assert(reserve_calls==1&&closed_raw==1&&G.ncmd==3);
+        assert(G.n_stp_race==1&&!G.n_stp_take&&G.bound==&p);
+    }
+    /* Sans dessin en attente ni changement de contexte, aucun mot émis. */
     init(&p);
-    assert(stpatch_try(&p,NULL,1,fixture[0],8,NULL)&&!reserve_calls);
+    assert(stpatch_try(&p,NULL,1,fixture[0],8,NULL)&&reserve_calls==1&&!G.ncmd);
     assert(G.n_stp_take==1&&G.n_stp_keys==0);
     init(&p);G.stblk_check=1;
     assert(!stpatch_try(&p,NULL,1,fixture[0],8,NULL));
@@ -116,7 +143,7 @@ int main(void)
     init(&p);delta();G.stblk_check=1;
     assert(!stpatch_try(&p,NULL,1,fixture[0],8,NULL));
     assert(!reserve_calls&&G.n_stp_chk==1&&!G.n_stp_diff);
-    puts("STPATCH integration : delta, reserve unique, 3 pertes de reference, overrides, zero-cle et controle OK");
+    puts("STPATCH integration : delta, reserve reel, pertes de reference, overrides, frontiere RUN/RAW/CTX zero-cle et controle OK");
     return 0;
 }
 '''
@@ -166,7 +193,7 @@ with tempfile.TemporaryDirectory(prefix='pomppc-stpatch-integration-') as temp:
     unit = (ROOT / 'tests/pomppc_stpatch_test.c').read_text().replace(
         '#include "../guest/gldriver/pomppc_stpatch.h"', '#include "pomppc_stpatch.h"')
     run('oracle', unit)
-    run('integration', pre + actual + post)
+    run('integration', pre + actual_reserve + actual + post)
     mutations = [
         ('ref-off', 'v[2] = on ? stp_word(a, 0x319c) & 0xff : 0;',
          'v[2] = on ? stp_word(a, 0x319c) & 0xff : 1;'),
@@ -180,7 +207,12 @@ with tempfile.TemporaryDirectory(prefix='pomppc-stpatch-integration-') as temp:
         run(name, unit, killed=True)
     header.write_text(original)
     assert 'p->stp_gen != gen' in actual
-    run('reserve-generation', pre + actual.replace('p->stp_gen != gen', '0', 1) + post, killed=True)
+    run('reserve-generation', pre + actual_reserve + actual.replace('p->stp_gen != gen', '0', 1) + post, killed=True)
     assert 'G.ncmd -= patch.n * QGPU_LEN_SET_STATE;' in actual
-    run('reserve-rollback', pre + actual.replace('G.ncmd -= patch.n * QGPU_LEN_SET_STATE;', ';', 1) + post,
+    run('reserve-rollback', pre + actual_reserve + actual.replace('G.ncmd -= patch.n * QGPU_LEN_SET_STATE;', ';', 1) + post,
+        killed=True)
+    before = 'c = reserve(p, patch.n * QGPU_LEN_SET_STATE);'
+    assert before in actual
+    run('zero-reserve', pre + actual_reserve + actual.replace(before,
+        'c = patch.n ? reserve(p, patch.n * QGPU_LEN_SET_STATE) : G.cmd + G.ncmd;', 1) + post,
         killed=True)
