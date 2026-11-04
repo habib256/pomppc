@@ -16,3 +16,9 @@ Questions de mesure encore ouvertes ; l'hôte figure entre crochets ou dans l'in
 
 - [ ] **[TCG] Les « sans traduction » de `x-ret-verify` en fin de session** (`tcg-g4.md` §44) :
   peut-être parents de la rafale « sans PTE » de `tcg/0061` (§45, non reproduite).
+
+## Hypothèse du 04/11 : mémoire asymétrique du PC [F]
+
+8 + 32 Gio (`dmidecode`) : le double canal ne devrait couvrir que les 16 premiers Gio, 24 Gio restant en simple canal. La RAM de la VM y tombe-t-elle ?
+L'émulation dépend sans doute plus de la latence que du débit, donc rien n'est mesuré. Trancherait : une mesure de débit selon l'adresse physique, ou un A/B après changement de barrettes.
+

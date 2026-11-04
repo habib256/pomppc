@@ -5,12 +5,9 @@
 Actif sur le PC ; attend le retour sur cet hôte.
 
 - [ ] **[TCG — PC] Les leviers génériques restants du JIT x86** (attendent le retour sur le PC) (`docs/tcg-g4.md` §44-§47) :
-  1. **PGO entraîné avec cmr** : `pgo-train.sh --plein-ecran cmr` (01/11), réentraînement
-     fait, A/B neuf contre ancien (`bench/tcg/ab/pgo-0111-*`) : neutre en fenêtre, cmr non
-     prouvé (+6 % sur 2 parties, l'une polluée par une charge de l'hôte, `neuf-1` quittée
-     `exit 138`). **Ancien binaire remis**, nouveau gardé dans `~/src/qemu/build-fast-pgo0111cmr/` :
-     recontrôle cmr 3 parties au repos strict, et entraînement de cmr sur un binaire qui
-     atteint la course (l'instrumenté n'y arrive pas en 901 s).
+  1. **PGO entraîné avec cmr** : réentraîné sans la course le 04/11, neutre (`vitesse-doom3-x86.md` §26), profil du 31/10 gardé.
+     **Reste bloqué** : le binaire instrumenté plante sur cmr, dans `tlb_hit_page_mask_anyprot` (`fiabilite.md`), avant la course.
+     À ne reprendre que si ce plantage est compris, et seulement pour voir la course : le gain espéré est faible.
   2. **`tcg/0063` `x-dbat-lite`** : témoin cmr sous `TLBPVERIFY=16 RETVERIFY=1` **sans** 0063,
      pour savoir si la panique de délai de verrou du 01/11 vient des vérificateurs ; puis
      rejouer l'A/B en fenêtre à 3 parties (2 parties : d3 −3 %, mb −2,2 %, ut +3,7 %).

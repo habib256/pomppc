@@ -65,7 +65,7 @@ ou un bras témoin). Pour les défauts : reproduction avant correction et contr�
 travaux clos sont dans [CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
 L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
-## 2. PC x86-64 : état au 04/11/2026, 8 h 20 (VM quotidienne allumée, binaire rapide, frontal ImGuiDock)
+## 2. PC x86-64 : état au 04/11/2026, 15 h 05 (VM quotidienne allumée, binaire rapide au profil du 31/10, frontal ImGuiDock ; suite sur le M4)
 
 **Nuit du 03 au 04/11 : lot 0.4.2 préparé, non publié** (demande de l'utilisateur : AppImage pour vieille glib et
 Windows, CI à la POM2, pas de Raspberry Pi). Ni tag ni Release.
@@ -75,8 +75,11 @@ Windows, CI à la POM2, pas de Raspberry Pi). Ni tag ni Release.
   Tests : 343 OK, 0 échec, 7 ignorés ; `--slow` : un seul échec, `bridge_probe`, disque tenu par la VM quotidienne.
 - **Endurance du nouveau bundle faite** (`docs/endurance.md` §18) : 78 démarrages et 16 cycles de jeu, 0 incident, borne
   haute 4,7 % sur les démarrages. Binaire rapide seulement, Colin McRae non piloté. Base `disks/tiger-endurance-pc-0411.qcow2`.
-- **Pas fait** : `tcg/0063` témoin, PGO réentraîné (`exec_one` et `unit_texture_bound` tournent sans profil : « control
-  flow mismatch »), x8 + 0063, base de temps. Hors condition de la 0.4.2 ; suite du chantier `leviers-jit-x86.md`.
+- **PGO réentraîné, neutre** (`docs/vitesse-doom3-x86.md` §26) : aucun écart prouvé, cmr −3,9 %, ut −2,4 %, d3 +1,6 %, mb +4,2 %. **Profil du 31/10 remis**
+  (sha256 `aa043403de5f28e5`), neuf dans `build-fast-pgo0411diag/`. Sans la course de cmr : l'instrumenté plante dessus.
+- **À lire au retour sur le PC : plantages de l'instrumenté et 5 machine checks non décodés** le 04/11, cause inconnue [F] (`docs/chantiers/fiabilite.md`).
+  `rasdaemon` tourne désormais ; commencer par `ras-mc-ctl --errors`. Production sans trace : 2 tours plantés sur 1 079 journaux, sur l'instrumenté.
+- **Pas fait** : `tcg/0063` témoin, x8 + 0063, base de temps. Suite du chantier `leviers-jit-x86.md`, hors condition de la 0.4.2.
 - **AppImage** : `linux` vert en CI, plancher glibc 2.31, image `ghcr.io/habib256/pomppc-bullseye-builder` épinglée par
   digest. Essayée depuis le paquet sur ce PC : Tiger, `backend gl`, QE, `gltest` OK. Hôte ancien, sans NVIDIA, X11, son et
   assistant complet **non prouvés** (`docs/publier-linux.md` §5). XWayland forcé (`8e41119`) pas revu à l'œil.
@@ -85,7 +88,7 @@ Windows, CI à la POM2, pas de Raspberry Pi). Ni tag ni Release.
 - **Windows** : sur le runner, Open Firmware en SMP, D-Bus, `Win32.Map`, image et verrou passent. Rien n'a tourné sur un vrai PC Windows : Tiger, rendu GL, vitesse, son non prouvés (`docs/publier-windows.md` §5).
 - **Tranché par l'utilisateur le 04/11** : pour ce lot, « au même niveau que le M4 » veut dire mêmes fonctions et mêmes
   preuves, pas la même vitesse ; la vitesse réelle s'annonce dans les notes. La cible de 50 ms reste l'objectif du PC.
-- **Décisions à l'utilisateur** : (1) déposer l'ISO
+- **Décisions à l'utilisateur, aucune prise le 04/11** : (1) déposer l'ISO
   `bench/iso-042/pomppc-0.4.2-guest.iso` (sha256 `a1910765…3e1da`, gravée le 04/11) en pré-publication, refaire
   `packaging/guest-iso.lock` : sans ça un tag 0.4.2 échoue, c'est voulu ; (2) le tag.
 - **Pièges** : le QEMU du paquet n'a pas GTK, `matab.sh` exige `MATAB_FRONTEND=imgui` pour le mesurer (sinon « pas de ssh »).

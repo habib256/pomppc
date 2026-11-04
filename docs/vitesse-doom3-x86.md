@@ -1102,3 +1102,28 @@ le nouveau est gardé dans `~/src/qemu/build-fast-pgo0111cmr/` pour un recontrô
 (3 parties par bras, rien d'autre sur l'hôte) avant de le juger. Le `.gcda` de cmr n'a pas
 produit de mesure (`scène non atteinte en 901 s` : le binaire instrumenté est trop lent pour la
 course), mais le profil contient bien ses chemins (menus, chargement, début de transition).
+
+## 26. PGO réentraîné sur la série du 04/11 : neutre, profil du 31/10 gardé (04/11)
+
+**Entraînement.** `pgo-train.sh` sur la série `86a3c4b90be804f8` a produit un profil sans jeu : le binaire instrumenté a planté à
+8 h 27 et 8 h 36 (voir `docs/chantiers/fiabilite.md`), et les 1 255 `.gcda` venaient des démarrages et des sondes. Le script
+refuse maintenant ce cas (bilan sans mesure, plantage). Profil retenu pour l'A/B : celui des essais sous gdb sur
+`build-fast-gen` (mb, zen, ut, d3 en fenêtre, deux parties, démarrages ; **pas la course de cmr**), importé par
+`pgo-train.sh --importer`. Second piège : depuis un build déjà « use », ninja ne voit pas les `.gcda` et ne refaisait que
+l'édition de liens (17 étapes, 2 min, empreinte changée, ancien profil dedans). `pgo-train.sh` nettoie désormais avant `use`
+(3 060 étapes, 7 min).
+
+**A/B** (`bench/tcg/ab/pgo-0411b-ab`, `-ab-cmr`, 3 parties par bras, au repos, médianes en ms/image) :
+
+| Jeu | Profil du 31/10 | Neuf | Écart | Dispersion (31/10, neuf) |
+|---|---:|---:|---:|---:|
+| cmr-pe, en course | 82,9 | 79,7 | −3,9 % | 7,3 %, 1,4 % |
+| ut-fen | 39,3 | 38,4 | −2,4 % | 6,7 %, 4,4 % |
+| zen-fen | 4,57 | 4,55 | −0,4 % | 2,7 %, 0,9 % |
+| d3-fen | 78,1 | 79,3 | +1,6 % | 1,1 %, 2,4 % |
+| mb-fen | 8,29 | 8,65 | +4,2 % | 10,7 %, 8,3 % |
+
+Chaque écart reste dans la dispersion ; sur cmr, la meilleure partie du 31/10 (79,3) vaut les trois du neuf. **Rien n'est prouvé :
+profil du 31/10 remis en production.** Neuf gardé dans `~/src/qemu/build-fast-pgo0411diag/` et `pgo-fast-pgo0411diag/`. La cible des
+50 ms ne viendra pas du profil seul : le réentraînement n'a pas déplacé DOOM 3.
+

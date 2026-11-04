@@ -245,6 +245,10 @@ le 01/11 (`pomppc-build.txt`, `pomppc-profil.txt`) :
 | `~/src/qemu/build-fast-pgo0111cmr/` | profil du 01/11 08 h 09 (`--plein-ecran cmr` en plus) | gardé pour un A/B cmr au repos (`docs/vitesse-doom3-x86.md` §25) |
 | `~/src/qemu/pgo-fast-pgo0111cmr/` | le profil du 01/11 avec cmr | `PGO_DIR=~/src/qemu/pgo-fast-pgo0111cmr` pour le reconstruire |
 
+**Depuis le 04/11** : `build-fast/` a le même profil du 31/10, reconstruit sur la série `86a3c4b90be804f8` (sha256 `aa043403de5f28e5`).
+Le profil sans cmr du 04/11, neutre, est dans `build-fast-pgo0411diag/` et `pgo-fast-pgo0411diag/` (`vitesse-doom3-x86.md` §26).
+`build-fast-pgo0111cmr/` est périmé : son binaire précède la série courante.
+
 **Piège évité le 01/11** : `pgo-train.sh` archive le profil précédent en `pgo-fast.<date>` et
 laisse le nouveau dans `pgo-fast/` ; après le réentraînement avec cmr, non retenu, une
 reconstruction (`QEMU_FAST=1 ./scripts/build_qemu_qfb.sh`, `pgo-train.sh --etapes use`) aurait

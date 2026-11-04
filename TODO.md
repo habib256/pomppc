@@ -3,7 +3,7 @@
 > **Deux hôtes (PC x86-64 et Mac M4) en alternance** : l'état de chacun et ce qui y reste à faire
 > sont dans [docs/etat-des-hotes.md](docs/etat-des-hotes.md), à lire en premier.
 
-État au 04/11/2026 (PC : lot 0.4.2 préparé, non publié, `docs/etat-des-hotes.md` §2). Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 04/11/2026 (PC : lot 0.4.2 préparé, non publié, machine checks à décoder, `docs/etat-des-hotes.md` §2). Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
@@ -42,7 +42,8 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
   sur cmr et d3, aucun jeu en perte, matrice verte. [Fiche](docs/chantiers/alleger-plugin.md)
 
 **Sur le PC.**
-- [ ] **[TCG] Leviers génériques du JIT x86** : PGO avec cmr, `tcg/0063`, recherche de blocs, base de temps.
+- [ ] **[Matériel] Machine checks du 04/11 et plantages de l'instrumenté** : cause inconnue. **Fermeture :** une MCE décodée ou la faute expliquée. [Fiche](docs/chantiers/fiabilite.md)
+- [ ] **[TCG] Leviers génériques du JIT x86** : `tcg/0063`, recherche de blocs, base de temps ; PGO neutre le 04/11, course de cmr bloquée par le plantage de l'instrumenté.
   **Fermeture :** par levier, preuve et A/B des cinq jeux, allumé ou archivé. [Fiche](docs/chantiers/leviers-jit-x86.md)
 
 **Sur le M4**

@@ -27,6 +27,8 @@ et le son restent à prouver.**
 
 **Endurance du PC avec le bundle du 02/11.** 78 démarrages et 16 cycles de jeu, 0 incident, binaire rapide (`endurance.md` §18).
 
+**PC, PGO réentraîné : neutre, profil du 31/10 gardé.** `pgo-train.sh` refuse un entraînement sans jeu mesuré et recompile avant `use` (`vitesse-doom3-x86.md` §26).
+
 **Quartz Extreme aux résolutions, preuve close sur les deux hôtes.** Sur le PC (EGL/NVIDIA, 03-04/11) : 66 changements de mode sans écart, matrice 8 cellules sur 8, Colin McRae depuis quatre bureaux, A/B du plugin `20261102-modes` sans perte prouvée (`docs/chantiers/qe-resolutions.md`). `POMPPC_GL_PRESENTQ` écarté sur chiffres (`docs/chantiers/presentq.md`).
 
 **Une seule source pour la version** : `project(POMPPC VERSION …)` de `frontend/CMakeLists.txt`, resté à 0.3 jusqu'ici ;

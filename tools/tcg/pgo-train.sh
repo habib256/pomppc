@@ -306,6 +306,10 @@ fi
 # --- use : binaire rapide avec le profil ---
 if has use; then
   [ "$(ngcda)" -gt 0 ] || [ -n "$DRY" ] || die "pas de profil dans $PGO_DIR"
+  # 04/11 : ninja ignore les .gcda ; le profil est lu à la compilation. Depuis un build déjà « use »
+  # (profil importé, --etapes use), les objets gardaient l'ancien profil : seule l'édition de liens
+  # repartait, le binaire changeait d'empreinte sans changer de profil.
+  [ ! -f "$SRC/$FASTB/build.ninja" ] || run ninja -C "$SRC/$FASTB" -t clean >/dev/null
   build use
 fi
 
