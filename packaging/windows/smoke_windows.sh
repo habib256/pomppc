@@ -51,12 +51,27 @@ verifie "la ligne de QEMU (launchplan_test)" "$PAQ/launchplan_test.exe"
 
 echo "== Open Firmware, QMP"
 ofw() { # la machine tourne quelques secondes, puis QMP répond
-  { sleep 6
-    printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"query-status"}' '{"execute":"quit"}'
-  } | timeout 120 "$PAQ/qemu-system-ppc.exe" -L "$(cygpath -m "$PAQ/share/qemu")" -display none -qmp stdio "$@" 2>&1 | tr -d '\r'
+  # Par TCP : [A] CI du 04/11/2026, `-qmp stdio` sur un tube ne répond rien sous Windows. Bash parle
+  # le socket lui-même : pas de Python dans ce PATH, et c'est le paquet qu'on éprouve, pas un outil.
+  local log="$T/ofw.log"
+  timeout 120 "$PAQ/qemu-system-ppc.exe" -L "$(cygpath -m "$PAQ/share/qemu")" -display none \
+    -qmp tcp:127.0.0.1:44555,server=on,wait=off "$@" > "$log" 2>&1 &
+  local q=$!
+  sleep 6
+  if { exec 3<>/dev/tcp/127.0.0.1/44555; } 2>/dev/null; then
+    printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"query-status"}' '{"execute":"quit"}' >&3
+    local l
+    while IFS= read -r -t 20 l <&3; do printf '%s\n' "$l" | tr -d '\r'; done
+    exec 3<&-
+  else
+    echo "QMP injoignable"
+  fi
+  wait "$q" || true
+  tr -d '\r' < "$log"
 }
 SORTIE="$(ofw -M mac99,via=pmu -cpu g4 -m 512)"
 verifie "mac99 tourne, firmware de share/qemu" contient "$SORTIE" '"status": "running"'
+contient "$SORTIE" '"status": "running"' || printf '%s\n' "$SORTIE"
 SORTIE="$(ofw -M mac99,via=pmu -cpu g4 -m 512 -smp 2 -accel tcg,thread=multi \
               -bios "$(cygpath -m "$PAQ/patches/smp-mac99/openbios-smp-screamer.elf")")"
 verifie "mac99 SMP, MTTCG, OpenBIOS unifié" contient "$SORTIE" '"status": "running"'
