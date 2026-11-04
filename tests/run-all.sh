@@ -76,6 +76,7 @@ if python3 tests/machonm_stubs_test.py; then ok "Mach-O ppc : symboles indirects
 if python3 tests/tiger_launcher_test.py; then ok "lanceur Tiger ImGuiDock"; else ko "lanceur Tiger ImGuiDock"; fi
 if python3 tests/os9_cpu_test.py; then ok "profils CPU OS 9"; else ko "profils CPU OS 9"; fi
 if python3 tests/chime_extract_test.py; then ok "extraction carillon G4"; else ko "extraction carillon G4"; fi
+if python3 tests/cmr_track_projection_test.py; then ok "CMR : copie Track TXP exacte et refus archives"; else ko "CMR : copie Track TXP"; fi
 POLLNS_SRC="${QEMU_SRC:-${HOME:-}/src/qemu}"
 if [ "$(uname -s)" = Darwin ] && command -v cc >/dev/null 2>&1 &&
    command -v pkg-config >/dev/null 2>&1 && pkg-config --exists glib-2.0 &&
