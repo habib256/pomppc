@@ -240,7 +240,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 04/11/2026, 21 h 24 (écart DOOM 3 expliqué ; VM quotidienne sous ImGuiDock ; push bloqué par l'authentification)
+## 3. Mac M4 : état au 04/11/2026, 23 h 49 (textures CMR corrigées sur copie ; preuves en cours ; push bloqué par l'authentification)
 
 **Reprise du 04/11 au soir, priorité DOOM 3 du TODO.**
 
@@ -261,7 +261,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   shell parent pour le profil hôte et l'attente du bureau. Profils hôte de `m4-d3-terminal-0411` = bash,
   écartés ; pour l'A/B isolé, attente fixe et sélection exacte du QEMU via `POMPPC_PERF_CMD`, PID vérifié.
   Procédure et fermeture dans `docs/chantiers/metrologie.md`.
-- **État final** : campagnes arrêtées proprement, essais sur copies isolées ; VM quotidienne relancée
+- **État à 21 h 18** : campagnes arrêtées proprement, essais sur copies isolées ; VM quotidienne relancée
   depuis le Terminal par `matab.sh --restore`, ImGuiDock et QEMU vivants après la fin du lanceur,
   bureau regardé et SSH contrôlé à 21 h 18. Kext GPU et Fsqrt chargés, `r_shadows=1` conservé.
   Aucun verrou supprimé. Contrôles de cette séance : capacités QEMU, quatre tours de vitesse,
@@ -295,6 +295,30 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   ne se reproduit pas depuis Terminal ; ne pas lancer les bancs depuis le service.
 - Push toujours à terminer après réauthentification. Preuves locales sous
   `bench/plugin/ombres-0411` et `bench/tcg/ab/m4-stpatch-*`.
+
+### Suite du 04/11, 23 h 49 : CMR, deux défauts distincts
+
+- **Grandes textures vierges corrigées dans le plugin `20261104-texblank`**, MD5
+  `b3dd60c9465b73bc45fba929b7b6071e`, source `1598dd05`, uniquement sur copie de disque.
+  Le tampon source 1920×1080 RGBA demandait 8,3 Mo pour une arène d’environ 6 Mo.
+  `QGPU_TEX_NO_DATA` existant conserve les zéros sans ce transfert (formats prouvés seulement).
+  Témoin `gltest rect 1920 1080` : trois couleurs blanches avant, onze témoins verts après.
+- Titres CMR 800×600 et 1920×1080 regardés après correction : **rejeu 0,00 / 0,00 %, sans erreur**.
+  69 scènes plugmd5 0/1/2 égales, même assertion préexistante tex14. Contrôle général :
+  **527 OK / 0 échec / 5 ignorés** avant la correction suivante de l’outil de shader.
+- **Route humide** : shader `Track.xpu` fourni dans `shaders.big`, TEX sans division ; la
+  projection TXP de t2 supprime les bandes au rejeu. Outil hôte pour modifier une copie connue.
+  **Premier essai rejeté**, erreur de substitution produisant TEP, assertion GL puis exit1.
+  Corrigé dans `9b68252` : opcode TXP entier, deux octets, huit tests dont mutant TEP ;
+  validation VM corrigée encore à faire. Original DMG conservé ; aucun patch jeu quotidien.
+- Matrice du bundle neuf en cours : `m4-texblank-preuve-0411-fen`, mb et zen verts au relevé.
+  La suite parente est arrêtée après cette campagne pour donner priorité au shader ;
+  `cmr-suite-route-v2-0411` attend sa fin, démarre le clone et éprouve une nouvelle ombre.
+  **À reprendre ensuite** : contrôle D3 mode2 et cmr en course, puis A/B STPATCH des cinq jeux.
+  Aucun gain de vitesse du prototype revendiqué, levier toujours éteint par défaut.
+- **État VM** : quotidienne arrêtée ; seul le clone de `m4-d3-disque-0411/disques/actuel` sert.
+  QEMU/kext inchangés, verrou jamais supprimé. Remettre la quotidienne en fin de séance.
+  Push toujours bloqué par les identifiants ; les preuves `bench/` restent locales.
 
 ### État précédent, 03/11/2026, 16 h 55
 

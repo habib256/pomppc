@@ -98,3 +98,12 @@ Les épreuves ci-dessous précèdent b1 et ne valent pas validation de b1.
 Les temps des épreuves ne sont pas des A/B au repos. Contrôle général avant b1 :
 522 OK, 0 échec, 5 ignorés depuis Terminal (`.run/tests-stpatch-terminal-0411.log`).
 Après b1, l’épreuve native ciblée passe à nouveau avec ses six mutants.
+
+## Bundle `20261104-texblank` après b1
+
+Compilation Tiger sur la même copie de disque, MD5 `b3dd60c9465b73bc45fba929b7b6071e`.
+69 comparaisons plugmd5 0/1/2 identiques, contrôle sans divergence ; même témoin préexistant
+`tex14` (68 scènes entièrement vertes). Le correctif distinct des grandes textures du titre
+CMR est décrit dans [`cmr-rendu-vers-texture.md` §8](re/cmr-rendu-vers-texture.md#8-niveaux-vierges-plus-grands-que-larène-04112026).
+Les titres 800×600 et 1920×1080 se rejouent sans erreur et à 0,00 / 0,00 % de leur capture.
+La matrice complète de ce bundle reste à terminer avant A/B. STPATCH reste éteint par défaut.

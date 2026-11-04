@@ -186,8 +186,8 @@ remplie : à revérifier alors avec `POMPPC_GL_UNITPROBE=1`. Le M4 mesurait déj
 
 Un défaut visuel du titre 3D (Suède enneigée : coupure horizontale et fond blanchi) a été
 signalé sous STPATCH=1, puis retrouvé sous **STPATCH=0**, même plugin `20261104-stpatch`.
-La présente correction du refus de copie est prouvée nativement ; **son attribution au défaut
-visuel et la correction de cette image ne sont pas encore prouvées en VM**.
+Le défaut de copie est maintenant reproduit par un témoin GL à 1920×1080, puis corrigé dans
+Tiger ; les contrôles du titre aux deux résolutions sont décrits ci-dessous.
 
 Le journal du lancement `bench/plugin/ombres-0411/cmr-titre-ref0/cmr-pe/note.txt`, images
 17715 et suivantes, porte `fallback tex-size 780/438` (dimensions en hexadécimal) puis
@@ -234,6 +234,33 @@ pas, et le journal ne porte aucun `COPY_TEX refuse` ni `fallback tex-size`. La s
 de la neige du passage 1080 ; cela corrobore le problème de taille sans remplacer la preuve
 du correctif à 1080. Des bandes dans les reflets de la route humide sont signalées séparément.
 
-Restent la compilation Tiger et l'épreuve visuelle du **même titre**, aux deux résolutions,
-puis la matrice de jeux et ses scènes de copie. Ne pas prendre la disparition du refus natif
-pour une preuve d'image.
+### Validation Tiger du correctif de texture
+
+Plugin compilé dans Tiger, MD5 `b3dd60c9465b73bc45fba929b7b6071e`, source `1598dd05`,
+uniquement sur copie de disque. `bench/plugin/ombres-0411/texblank/` conserve source, bundle,
+compilation et provenance ; les artefacts du premier prototype sont conservés séparément.
+
+- **Avant/après contrôlé** avec le même `gltest rect 1920 1080`, contexte POMPPC accéléré :
+  le plugin précédent échoue aux trois couleurs de copie (toutes blanches), le nouveau passe
+  les onze témoins. Logs et images : `texblank/rect-1920`. Les deux passent les huit témoins
+  de texture initiale ; le défaut est donc isolé à la copie du grand rectangle.
+- **Titre 3D avant** : `cmr-resolution/f041-1080`, aplats et rectangle blanc 960×540 vus.
+  Les replis font aussi présenter la cible intermédiaire ; le rejeu du marqueur ne couvre
+  que cette région blanche, pas une preuve de l'image entière.
+- **Titre 3D après** : `cmr-resolution/texblank-{1080,800}`, captures regardées, plus d'aplats.
+  Les deux rejouent **0,00 / 0,00 %**, sans erreur ; à 1080, la présentation prouvée est bien
+  1920×1080. Notes : niveaux vierges 1920×1080 RGBA/8035 admis sans arène, aucun refus de copie.
+  Les prises diffèrent de scène/voiture : pas de comparaison pixel avant/après entre scènes.
+- **69 scènes plugmd5** aux modes STPATCH 0/1/2 : mêmes images à l'octet, zéro divergence du
+  contrôle. 68 scènes passent leurs assertions ; l'assertion λ2 de `tex14` échoue identiquement
+  sur les trois bras et avait été reproduite sur le plugin original avant STPATCH.
+  Le code strict 3 est conservé et expliqué dans `texblank/plugmd5-tailles/validation.json`.
+- Contrôle général depuis Terminal, après ajout de l'outil de shader : **527 OK, 0 échec,
+  5 ignorés** (`.run/tests-texblank-terminal-0411.log`). Un défaut ultérieur du patch de shader
+  nécessite de corriger ses tests ; ce total ne vaut pas validation du shader installé.
+
+La matrice des cinq jeux du bundle neuf reste en cours (`m4-texblank-preuve-0411-*`).
+Aucun A/B de vitesse de STPATCH n'est encore lancé. Les durées des diagnostics de titre ne
+sont pas des temps de course.
+
+Les bandes de la route humide sont distinctes : [programme de projection du jeu](cmr-route-projection.md).
