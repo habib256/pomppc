@@ -174,7 +174,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261104-stpatch-b1"
+#define POMPPC_PLUGIN_REV "20261104-texblank"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -5916,6 +5916,19 @@ static int upload_texture(PCtx *p, PTex *t)
     return r;
 }
 
+/* Contrat logiciel qgpu-core.c, tex_src/unpack_texel : ces formats source
+   tous nuls donnent exactement le mot ARGB 0 de QGPU_TEX_NO_DATA. RGB et
+   luminance ajoutent un alpha opaque ; S3TC et profondeur gardent leur voie.
+   Liste explicite pour qu'une extension de types ne soit pas admise sans
+   preuve contre le décodeur réel. */
+static int texture_zero_argb(unsigned int fmt, unsigned int type)
+{
+    if (fmt != 0x1908 && fmt != 0x80E1) /* RGBA, BGRA */
+        return 0;
+    return type == 0x1401 || type == 0x8035 || type == 0x8367 ||
+           type == 0x8033 || type == 0x8034 || type == 0x8365 || type == 0x8366;
+}
+
 static int upload_texture_levels(PCtx *p, PTex *t)
 {
     unsigned char *dt = t->drvtex;
@@ -6065,6 +6078,7 @@ static int upload_texture_levels(PCtx *p, PTex *t)
                 unsigned long bpp = host_texel_bytes(fmt, type);
                 unsigned long row = (unsigned long)S16(lv, LV_ROWPIX) * bpp;
                 unsigned long dep = 1, imgh = h, img, size;
+                int zero_level;
                 const unsigned char *d = (const unsigned char *)GLD_U32(lv, LV_DATA);
                 if (upload_blank && (unsigned long)S16(lv, LV_ROWPIX) < w)
                     row = w * bpp;          /* niveau sans données : notre pas */
@@ -6087,11 +6101,25 @@ static int upload_texture_levels(PCtx *p, PTex *t)
                 if ((fmt == 0x1900 || fmt == 0x80E5 || fmt == 0x8049) && type == 0x1401) {
                     fmt = 0x1909;
                 }
-                if (!arena_alloc(size, &off))
+                /* Un niveau vierge RGBA/BGRA est défini à zéro par le
+                   cœur, sans tampon de taille w*h dans l'arène. En deux
+                   moitiés, 1920*1080*4 > l'arène de ~6 Mio ; COPY_TEX
+                   était alors refusé avant même de demander le niveau hôte.
+                   Ne touche ni cube (branche précédente), ni 3D, ni les
+                   formats dont les octets nuls donnent un autre ARGB. */
+                zero_level = upload_blank && !t3 && texture_zero_argb(fmt, type);
+                if (!zero_level && !arena_alloc(size, &off))
                     return no(NO_TEX_SIZE, w, h);
                 if (!upload_blank)
                     crash_hook_fresh();     /* garde sig_jmp ci-dessous */
-                if (upload_blank) {
+                if (zero_level) {
+                    static unsigned long told;
+                    if (told++ < 8)
+                        gl_note("TEXTURE vierge sans arene : qtex %ld niveau %d %lux%lu "
+                                "base %lx format/type %x/%x (%lu octets source)\n",
+                                t->qtex, l, w, h, host_base(base), fmt, type, size);
+                    off = QGPU_TEX_NO_DATA;
+                } else if (upload_blank) {
                     memset(G.q.win + off, 0, size);     /* COPY_TEX écrasera */
                 } else if (sigsetjmp(sig_jmp, 0) == 0) {
                     sig_thr = self_thr();       /* P3 (relecture du 24/09) ; lot 1 */
@@ -6124,7 +6152,8 @@ static int upload_texture_levels(PCtx *p, PTex *t)
                 c[1] = t->qtex; c[2] = t3 ? QGPU_TT_3D : rect ? QGPU_TT_RECTANGLE : QGPU_TT_2D;
                 c[3] = l;
                 c[4] = w; c[5] = h; c[6] = dep; c[7] = host_base(base); c[8] = fmt; c[9] = type;
-                c[10] = G.q.base + off; c[11] = row; c[12] = t3 ? img : 0;
+                c[10] = zero_level ? QGPU_TEX_NO_DATA : G.q.base + off;
+                c[11] = row; c[12] = t3 ? img : 0;
                 G.n_texuploads++;
                 /* 28/10 (Quartz Extreme) : format des textures du compositeur */
                 if (pomppc_tracing() && pomppc_ws_process() && G.n_texuploads < 64)

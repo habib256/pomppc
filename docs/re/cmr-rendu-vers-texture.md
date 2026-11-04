@@ -181,3 +181,59 @@ référence rangée dans `bench/matrice/ref/cmr-pe.faux-reflet-2709/`, nouvelle 
 Si un jour le jeu tourne en machine rapide (clé à 0), la carte de reflet 105 serait peut-être
 remplie : à revérifier alors avec `POMPPC_GL_UNITPROBE=1`. Le M4 mesurait déjà la course avant
 `6054367` (tour `20261028-1854` : fenêtre 38695..39295, ~6 400 sommets bruts par échange).
+
+## 8. Niveaux vierges plus grands que l'arène (04/11/2026)
+
+Un défaut visuel du titre 3D (Suède enneigée : coupure horizontale et fond blanchi) a été
+signalé sous STPATCH=1, puis retrouvé sous **STPATCH=0**, même plugin `20261104-stpatch`.
+La présente correction du refus de copie est prouvée nativement ; **son attribution au défaut
+visuel et la correction de cette image ne sont pas encore prouvées en VM**.
+
+Le journal du lancement `bench/plugin/ombres-0411/cmr-titre-ref0/cmr-pe/note.txt`, images
+17715 et suivantes, porte `fallback tex-size 780/438` (dimensions en hexadécimal) puis
+`COPY_TEX refuse (texture non televersable)` pour 1920×1080. Les passes suivantes rendent
+960×540 puis 480×270 : les cibles s'adaptent ici à la résolution, ce ne sont pas les tailles
+fixes du relevé initial de 2026-09. **Le vidage de ce lancement a capturé le film suivant,
+pas la géométrie du titre : il ne prouve rien sur les dessins responsables du défaut.**
+
+Le refus est local et certain dans le code. `try_copy_tex` demande d'abord des niveaux noirs
+(`upload_blank`) à `upload_texture_levels`, qui réservait et remplissait de zéros le tampon
+source entier avant `TEX_IMAGE3`. Avec une tranche de 16 Mio, deux moitiés, 4 Kio réservés
+à QE et un flux de 256 Kio, la moitié exploitable est `0x7ff000` et l'arène commence à
+`0x200000` : **6 287 360 octets** au maximum. Un niveau serré de 1920×1080 en quatre octets
+par texel demande **8 294 400 octets** ; `arena_alloc` refuse même une arène vide. La borne
+dépend des octets par ligne, de la hauteur et de la disposition des zones, pas d'un nom de jeu
+ni d'une largeur magique : ici 1 571 840 texels serrés à quatre octets ; 1600×900 tient,
+1680×945 ne tient plus. Une image 800×600 demande 1 920 000 octets.
+
+Il ne s'agit donc pas d'un `NO_MEM` de l'hôte : aucune commande fautive n'a été envoyée.
+Le refus local est compté comme repli `CopyTexSubImage`, puis peut provoquer `ReadPixels`,
+dessin et échange logiciels des cibles suivantes. La matrice ne soustrait les compteurs que
+depuis le début de la fenêtre **en course** (`matrice.py`, `mesures`) : une preuve verte de
+course n'exerce pas le titre et ne certifie pas l'absence de ses replis précédents.
+
+Le plugin `20261104-texblank` utilise le contrat existant `QGPU_TEX_NO_DATA` pour ces niveaux
+vierges 2D/rectangle, **seulement pour les sources RGBA/BGRA aux sept types déjà reconnus** :
+leurs octets nuls donnent exactement le mot ARGB 0 du décodeur. La commande conserve tous
+ses mots sauf l'offset source, remplacé par la sentinelle ; aucune image ni arène à lire.
+Les sources ordinaires, cube, 3D, profondeur, S3TC et formats non prouvés gardent leur voie.
+En particulier, un RGB nul donne un alpha ff : le remplacer aveuglément par ARGB 0 serait faux.
+Ni protocole, ni kext, ni hôte ne changent.
+
+`python3 tests/pomppc_texblank_test.py` extrait la **vraie branche** du plugin et compare
+56 conversions de niveaux avec et sans tampon au **vrai cœur qgpu** (RGBA/BGRA, sept types,
+2D niveau 2 / rectangle niveau 0, formats de base RGB/RGBA, pas de ligne avec marge). Les
+texels sont identiques à l'octet. Le cas 1920×1080 ne demande aucune arène ; les autres voies
+et leurs refus sont conservés. Trois mutants sont détectés : allocation comme avant,
+admission de tous les formats, suppression des données d'une texture ordinaire.
+
+Le passage `cmr-resolution/f041-800-route`, **même plugin avant correction**, STPATCH=0 et
+800×600, a conservé le titre sur une route humide et synchronisé sa preuve à l'image 56961.
+L'utilisateur juge cette image bien meilleure : les grands aplats blancs ne s'y retrouvent
+pas, et le journal ne porte aucun `COPY_TEX refuse` ni `fallback tex-size`. La scène diffère
+de la neige du passage 1080 ; cela corrobore le problème de taille sans remplacer la preuve
+du correctif à 1080. Des bandes dans les reflets de la route humide sont signalées séparément.
+
+Restent la compilation Tiger et l'épreuve visuelle du **même titre**, aux deux résolutions,
+puis la matrice de jeux et ses scènes de copie. Ne pas prendre la disparition du refus natif
+pour une preuve d'image.

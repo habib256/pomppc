@@ -496,6 +496,13 @@ if command -v cc >/dev/null 2>&1; then
     ko "STPATCH ($(tail -1 "$STP_LOG"))"
   fi
   rm -f "$STP_LOG"
+  TB_LOG="${TMPDIR:-/tmp}/pomppc_texblank_test.$$.log"
+  if python3 tests/pomppc_texblank_test.py > "$TB_LOG" 2>&1; then
+    ok "TEXBLANK (vraie branche plugin, oracle texels et 3 mutants)"
+  else
+    ko "TEXBLANK ($(tail -1 "$TB_LOG"))"
+  fi
+  rm -f "$TB_LOG"
   # v21 : conditions du préprocesseur GLSL faites par le plugin (Tiger se
   # trompe sur les #if imbriqués) — guest/gldriver/pomppc_glslpp.h.
   PP_BIN="${TMPDIR:-/tmp}/glsl_pp_test.$$"
