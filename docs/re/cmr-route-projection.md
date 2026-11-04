@@ -2,9 +2,9 @@
 
 Le correctif porte sur **une copie de l'archive de shaders du jeu**, pas sur le plugin ou
 l'émulateur. Il remplace `TEX` par `TXP` pour le seul échantillonnage **t2** de `Track.xpu`.
-Le diagnostic au rejeu sur le M4 supprime les bandes de la route humide. **La validation en
-VM de l'archive corrigée reste à faire ; aucun vrai PowerMac G4 n'a été testé.** Il n'est
-pas établi comment le pilote d'origine traitait ce programme sur ce matériel.
+Le diagnostic au rejeu sur le M4 supprime les bandes de la route humide. **L'archive corrigée
+est installée et son programme vérifié dans une VM de diagnostic** (preuve du 05/11 ci-dessous).
+Aucun vrai PowerMac G4 n'a été testé ; le comportement de son pilote d'origine reste inconnu.
 
 ## Contrat et diagnostic
 
@@ -115,7 +115,8 @@ instruction absente/multiple, mauvaise empreinte après, sortie existante et lie
 Le test facultatif sur l'original local a aussi passé : empreinte finale exacte, exactement deux octets,
 original inchangé, double application refusée et restauration identique.
 
-[F] Reste à éprouver l'archive corrigée en VM et à observer plusieurs routes/conditions.
+[F] Plusieurs routes/conditions et le rendu d'origine sur matériel réel restent à observer.
+
 Un essai sur vrai PowerMac G4 avec l'original puis cette copie permettrait de trancher le
 comportement du pilote d'origine. Aucun résultat de ce matériel n'est revendiqué.
 
@@ -134,5 +135,30 @@ tous les autres octets. Un mutant reproduit l'ancien remplacement X → P et les
 correspondantes : il est rejeté **par la vérification TXP**, pas seulement par une empreinte
 différente. Le test de l'archive réelle vérifie explicitement `TEX` avant, `TXP` après,
 aucun `TEP`, différences exactement `[163261, 163262]`, longueur et autres programmes inchangés.
-La nouvelle archive valide reste à éprouver en VM ; aucun succès de son installation n'est
-encore revendiqué.
+La validation de cette archive valide dans une nouvelle ombre est décrite ci-dessous.
+
+
+## Validation dans Tiger, 05/11/2026
+
+L'essai valide est séparé du premier :
+`bench/plugin/ombres-0411/cmr-resolution/track-projection-v2-800/`.
+L'archive originale du DMG est conservée ; la nouvelle ombre
+`/Users/tiger/cmr-track-projection-v2-0411.shadow` contient seulement la copie corrigée.
+`installation-ombre-v2-clone.json` conserve empreintes et différences des deux octets.
+Aucun patch n'est encore installé sur le disque quotidien à ce stade.
+
+- Relecture du fichier dans Tiger : SHA-256 **f9fe55f4310998c1bb548d9abf633a171073e9950315621b627758b4e813e4f6**.
+- Le GPU accepte `PROG 3 cible 8804 : 2379 octets, env 2 local 35 compilé` ; aucun refus
+  du programme ni assertion GL. Le titre continue, une capture synchronisée est conservée.
+- Capture du titre image **49132**, rejeu **0,01 / 0,00 %**, sans erreur. Ce passage est un
+  autre circuit, sec ; il ne sert pas de capture directe de la route humide précédente.
+- Le programme Track extrait de ce nouveau flux est **identique** à celui du rejeu humide,
+  sauf les deux octets TEX → TXP ; SHA-256 du programme final
+  `1d883496b68e7988abb607f53409cd95caef342637194ee5cb36d62800992b86`.
+  `preuve-shader-charge.json` consigne cette égalité. Ainsi le shader effectivement chargé
+  dans le jeu est bien celui qui supprime les bandes sur le flux humide conservé.
+- Huit tests ciblés avec l'archive réelle passent. Contrôle général final depuis Terminal :
+  **527 OK, 0 échec, 5 ignorés** (`.run/tests-texblank-v2-terminal-0411.log`).
+
+L'outil et le jeu original restent séparés du pilote : aucune instruction ARB TEX n'est
+réinterprétée par POMPPC et aucun nom de shader n'entre dans l'émulateur.
