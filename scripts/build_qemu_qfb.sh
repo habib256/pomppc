@@ -1489,6 +1489,26 @@ fail=0
 # Le sondage passe par scripts/caps.sh (QOM, pas `-device help` : le Screamer
 # est un enfant interne du macio et n'apparaît jamais dans `-device help`).
 source "$ROOT/scripts/caps.sh"
+# [A] CI du 04/11/2026, runner windows-latest : sous MSYS2, les sondes `printf … | qemu -qmp stdio`
+# répondent « non » pour screamer, qfb-pci et qgpu-pci sur un binaire qui les a, et celle de
+# qgpu-scanout ne rend jamais la main (2 h 41 d'attente, job annulé à sa limite). Sous ce profil,
+# seuls dbus-display et qgpu-lie-opengl32 sont vérifiés ici : smoke_windows.sh lance le paquet pour
+# de bon, avec des délais. [F] Cause non établie (chardev stdio de Windows ?) ; tranché par : la
+# même sonde sous un Windows interactif.
+if [ "${QEMU_PROFIL:-}" = paquet-windows ]; then
+  check() {
+    case "$1" in
+      dbus-display|qgpu-lie-opengl32) ;;
+      *) echo "  · $1 : non sondé ici (smoke_windows.sh)"; return 0 ;;
+    esac
+    if "${@:2}" >/dev/null 2>&1; then
+      echo "  ✔ $1"; echo "$1=oui" >> "$CAPS"
+    else
+      echo "  ✘ $1"; echo "$1=non" >> "$CAPS"; fail=1
+    fi
+  }
+  check_opt() { echo "  · $1 : non sondé ici (smoke_windows.sh)"; }
+else
 check() { # check <étiquette> <prédicat…>
   if "${@:2}" >/dev/null 2>&1; then
     echo "  ✔ $1"; echo "$1=oui" >> "$CAPS"
@@ -1513,6 +1533,7 @@ check_opt() { # check_opt <étiquette> <prédicat…>
     echo "  ~ $1 (optionnel, absent)"; echo "$1=non" >> "$CAPS"
   fi
 }
+fi
 echo
 echo "=== capacités du binaire produit ==="
 # screamer : sondage MACHINE (le type peut être enregistré sans être câblé).
@@ -1592,7 +1613,7 @@ if [ "${QEMU_PROFIL:-}" = paquet-linux ]; then
   check qgpu-lie-egl bash -c 'readelf -d "$1" | grep -q "NEEDED.*libEGL\.so"' _ "$BIN"
 fi
 if [ "${QEMU_PROFIL:-}" = paquet-windows ]; then
-  check dbus-display qemu_has_display "$BIN" dbus
+  check dbus-display bash -c 'timeout 60 "$1" -display help </dev/null | tr -d "\r" | grep -qx dbus' _ "$BIN"
   check qgpu-lie-opengl32 bash -c 'objdump -p "$1.exe" | grep -qi "DLL Name: OPENGL32\.dll"' _ "$BIN"
 fi
 echo

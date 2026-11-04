@@ -226,6 +226,8 @@ jobs:
           packaging/linux/fetch_guest_iso.sh build-windows-iso/pomppc-guest.iso "${EXIGE[@]}"
 
       - name: Construire QEMU, le frontal et le zip
+        # Un processus bloqué ne doit pas coûter les 180 min du job : la construction en prend 20.
+        timeout-minutes: 90
         env:
           GUEST_ISO: build-windows-iso/pomppc-guest.iso
           JOBS: 4
@@ -238,6 +240,7 @@ jobs:
         run: packaging/windows/check_windows_package.sh "build-windows/POMPPC-$POMPPC_VERSION-windows-x64"
 
       - name: Épreuve du paquet (QEMU, Open Firmware, QMP, bus D-Bus, Win32.Map, image, verrou)
+        timeout-minutes: 20
         run: packaging/windows/smoke_windows.sh "build-windows/POMPPC-$POMPPC_VERSION-windows-x64" "$POMPPC_VERSION" frontend/build-windows
 
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
