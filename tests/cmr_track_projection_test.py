@@ -33,27 +33,53 @@ def fixture(line=LINE):
         data[begin:begin + len(payload)] = payload
     data = bytes(data)
     entry = module.parse_bigf(data)[30]
-    pos = entry.offset + payload.index(b'TEX') + 2
-    patched = data[:pos] + b'P' + data[pos + 1:]
+    pos = entry.offset + payload.index(b'TEX')
+    patched = data[:pos] + b'TXP' + data[pos + 3:]
     profile = module.Profile(len(data), module.sha256(data), module.sha256(patched),
                              module.sha256(payload), module.sha256(patched[entry.offset:entry.offset + entry.size]), pos)
     return data, patched, profile
 
 
 class ProjectionTests(unittest.TestCase):
-    def test_one_byte_only_and_other_programs(self):
+    def test_exact_TXP_opcode_two_bytes_and_other_programs(self):
         data, expected, profile = fixture()
         patched, report = module.transform(data, profile=profile)
         self.assertEqual(patched, expected)
-        self.assertEqual([i for i, (a,b) in enumerate(zip(data, patched)) if a != b], [profile.changed_offset])
-        self.assertEqual(patched[profile.changed_offset], ord('P'))
-        self.assertEqual(report['changed_bytes'], 1)
+        self.assertEqual([i for i, (a,b) in enumerate(zip(data, patched)) if a != b], [profile.opcode_offset+1, profile.opcode_offset+2])
+        self.assertEqual(patched[profile.opcode_offset:profile.opcode_offset+3], b'TXP')
+        self.assertEqual(report['opcode_after'], 'TXP')
+        entry = next(e for e in module.parse_bigf(patched) if e.name == 'Track.xpu')
+        shader = patched[entry.offset:entry.offset+entry.size]
+        self.assertIn(b'TXP t2, fragment.texcoord[2], texture[2], %zt2;\n', shader)
+        self.assertNotIn(b'TEP', shader)
+        self.assertEqual(report['changed_bytes'], 2)
         self.assertEqual(module.parse_bigf(data), module.parse_bigf(patched))
         for entry in module.parse_bigf(data):
             if entry.name != 'Track.xpu':
                 self.assertEqual(data[entry.offset:entry.offset+entry.size], patched[entry.offset:entry.offset+entry.size])
         self.assertEqual(patched.count(T3), 53)  # T3 et tous les autres programmes restent exacts.
         self.assertEqual(patched.count(LINE), 52)
+
+    def test_old_one_byte_TEP_mutant_rejected_before_hash(self):
+        data, _, profile = fixture()
+        offset = profile.opcode_offset
+        tep = data[:offset+2] + b'P' + data[offset+3:]
+        self.assertEqual(tep[offset:offset+3], b'TEP')
+        entry = next(e for e in module.parse_bigf(data) if e.name == 'Track.xpu')
+        # Meme des empreintes reproduisant l'ancienne erreur ne doivent
+        # pas masquer un opcode qui n'est PAS TXP.
+        bad_profile = replace(profile, patched=module.sha256(tep),
+                              track_patched=module.sha256(tep[entry.offset:entry.offset+entry.size]))
+        source = TOOL.read_text()
+        before = "patched = data[:opcode] + b'TXP' + data[opcode + 3:]"
+        self.assertIn(before, source)
+        mutant = source.replace(before, "patched = data[:opcode+2] + b'P' + data[opcode+3:]", 1)
+        namespace = dict(module.__dict__)
+        exec(compile(mutant, str(TOOL), 'exec'), namespace)
+        with self.assertRaisesRegex(namespace['ArchiveError'], 'projection TXP'):
+            namespace['transform'](data, profile=bad_profile)
+        with self.assertRaises(module.ArchiveError):
+            module.transform(tep, profile=profile)
 
     def test_tabs_and_restore(self):
         data, expected, profile = fixture(LINE.replace(b'TEX t2,', b'\tTEX\tt2 , '))
@@ -107,7 +133,7 @@ class ProjectionTests(unittest.TestCase):
         with self.assertRaisesRegex(module.ArchiveError, 'apres'):
             module.transform(data,profile=replace(profile,patched='0'*64))
         with self.assertRaisesRegex(module.ArchiveError, 'position'):
-            module.transform(data,profile=replace(profile,changed_offset=profile.changed_offset+1))
+            module.transform(data,profile=replace(profile,opcode_offset=profile.opcode_offset+1))
 
     def test_exclusive_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,7 +155,11 @@ class ProjectionTests(unittest.TestCase):
             r=run(out);self.assertEqual(r.returncode,0,r.stderr)
             patched=out.read_bytes()
             self.assertEqual(module.sha256(patched),module.KNOWN.patched)
-            self.assertEqual([i for i,(a,b) in enumerate(zip(data,patched)) if a!=b],[163262])
+            self.assertEqual([i for i,(a,b) in enumerate(zip(data,patched)) if a!=b],[163261,163262])
+            self.assertEqual(data[163260:163263],b'TEX')
+            self.assertEqual(patched[163260:163263],b'TXP')
+            self.assertIn(b'TXP t2, fragment.texcoord[2], texture[2], %zt2;',patched[161792:164177])
+            self.assertNotIn(b'TEP',patched[161792:164177])
             self.assertEqual(original.read_bytes(),data)
             self.assertNotEqual(run(out).returncode,0)
             self.assertNotEqual(run(original).returncode,0)

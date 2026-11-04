@@ -36,16 +36,16 @@ class Profile:
     patched: str
     track_original: str
     track_patched: str
-    changed_offset: int
+    opcode_offset: int
 
 
 KNOWN = Profile(
     215040,
     '9825b610f58ab69b26dfe9c57d1423b373f20f0b0c6d89632a07d4750a9e5256',
-    'dd5a9ace7e0665a3c6f8eedd2e375042496cb9fdb48e987c07f2d0453fe88adc',
+    'f9fe55f4310998c1bb548d9abf633a171073e9950315621b627758b4e813e4f6',
     '993f14fb517fcc7806cf2bf23c4574f2d83aa35d815bfdcbf8cfa486488cea8d',
-    'd4a7f1aee4e5082ee0e19722e592a7ba622f82f707d251b7fd146eebd6429690',
-    163262,
+    '56af056d75ef1255e2f205affa9644b92ab4efe720f5513d16ad8d87d9e1404e',
+    163260,
 )
 # Une seule instruction, ancree sur la ligne ; les templates %zt2 sont
 # remplaces par IndirectX a l'execution, jamais par cet outil.
@@ -54,6 +54,7 @@ TRACK_T2 = re.compile(
     rb'fragment\.texcoord\[2\][ \t]*,[ \t]*texture\[2\][ \t]*,[ \t]*'
     rb'%zt2[ \t]*;[ \t]*\r?$'
 )
+TRACK_T2_PROJECTED = re.compile(TRACK_T2.pattern.replace(b'TEX', b'TXP'))
 
 
 def sha256(data):
@@ -114,16 +115,23 @@ def transform(data, restore=False, profile=KNOWN):
     matches = list(TRACK_T2.finditer(source))
     if len(matches) != 1:
         raise ArchiveError('instruction TEX t2 unique absente de Track.xpu')
-    changed = track.offset + matches[0].start('opcode') + 2
-    if changed != profile.changed_offset or data[changed:changed + 1] != b'X':
+    opcode = track.offset + matches[0].start('opcode')
+    if opcode != profile.opcode_offset or data[opcode:opcode + 3] != b'TEX':
         raise ArchiveError('position de correction inattendue')
-    patched = data[:changed] + b'P' + data[changed + 1:]
+    patched = data[:opcode] + b'TXP' + data[opcode + 3:]
+    projected = list(TRACK_T2_PROJECTED.finditer(patched[track.offset:track.offset + track.size]))
+    if (len(projected) != 1 or projected[0].start('opcode') != matches[0].start('opcode') or
+            patched[opcode:opcode + 3] != b'TXP'):
+        raise ArchiveError('projection TXP absente ou opcode invalide apres correction')
+    changed = [index for index, (before, after) in enumerate(zip(data, patched)) if before != after]
+    if changed != [opcode + 1, opcode + 2]:
+        raise ArchiveError('deux changements E->X et X->P exactement requis')
     if len(patched) != len(data) or sha256(patched) != profile.patched:
         raise ArchiveError('empreinte apres correction inattendue')
     if sha256(patched[track.offset:track.offset + track.size]) != profile.track_patched:
         raise ArchiveError('empreinte Track.xpu corrige inattendue')
-    # Par construction un octet seulement ; controler aussi les autres entrees.
-    if patched[:changed] != data[:changed] or patched[changed + 1:] != data[changed + 1:]:
+    # Deux octets, meme longueur ; controler aussi les autres entrees.
+    if patched[:opcode] != data[:opcode] or patched[opcode + 3:] != data[opcode + 3:]:
         raise ArchiveError('difference hors opcode')
     for entry in entries:
         if entry != track and patched[entry.offset:entry.offset + entry.size] != data[entry.offset:entry.offset + entry.size]:
@@ -135,8 +143,10 @@ def transform(data, restore=False, profile=KNOWN):
         'output_sha256': sha256(output),
         'bytes': len(output), 'entries': len(entries), 'entry': track.name,
         'entry_offset': track.offset, 'entry_bytes': track.size,
-        'changed_offset': None if restore else changed,
-        'changed_bytes': 0 if restore else 1,
+        'opcode_before': 'TEX', 'opcode_after': 'TEX' if restore else 'TXP',
+        'opcode_offset': opcode,
+        'changed_offsets': [] if restore else changed,
+        'changed_bytes': 0 if restore else 2,
     }
 
 

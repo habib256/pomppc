@@ -24,7 +24,8 @@ specular » dans le programme, filtrée LINEAR et répétée. Les valeurs relev�
 texture sur la route. Cette observation et l'expérience suivante motivent le correctif ; elles
 ne prouvent pas l'intention des auteurs sur tous les circuits et toutes les conditions.
 
-Dans une **copie du vidage**, changer seulement le X de `TEX t2` en P supprime les bandes.
+Dans une **copie du vidage**, remplacer l’opcode complet `TEX t2` par `TXP t2` supprime les bandes.
+Cela change deux octets : E → X puis X → P.
 127 346 pixels diffèrent. Changer aussi t3 donne une image proche mais différente : aucun
 besoin de ce second changement n'est établi, **t3 reste exact**. Le backend envoie les programmes
 ARB au GPU hôte ; il n'ajoute pas de division générale ni de conversion propre à Colin McRae.
@@ -36,6 +37,9 @@ ARB au GPU hôte ; il n'ajoute pas de division générale ni de conversion propr
 Le [rapport local](../../bench/plugin/ombres-0411/cmr-shaders/diagnostic-800/report.json) contient
 les empreintes du manifeste du vidage et des sources qgpu/rejeu utilisées. Il rapporte un rejeu
 initial sans erreur. Les images et l'archive propriétaire restent hors Git.
+La [comparaison binaire indépendante](../../bench/plugin/ombres-0411/cmr-shaders/diagnostic-800/binary-change-proof.json)
+confirme les deux changements dans la variante diagnostique : positions 1555/1556 du fichier
+`000028.bin`, 1467/1468 dans le programme ; `TXP t2` présent, `TEP` absent et t3 toujours `TEX`.
 
 ## Archive et modification exacte
 
@@ -54,13 +58,15 @@ par les cibles telles que 2D/RECT. L'outil ne remplace aucun template.
 | Élément | Valeur |
 |---|---|
 | Entrée | `Track.xpu`, offset absolu 161 792, taille 2 385 |
-| Seul octet changé | offset absolu **163 262** (`0x27dbe`), X → P |
+| Deux octets changés | offsets absolus **163 261** (`0x27dbd`), E → X, et **163 262** (`0x27dbe`), X → P |
 | Instruction | `TEX t2, fragment.texcoord[2], texture[2], %zt2;` → même instruction `TXP` |
-| Archive après | `dd5a9ace7e0665a3c6f8eedd2e375042496cb9fdb48e987c07f2d0453fe88adc` |
+| Archive après | `f9fe55f4310998c1bb548d9abf633a171073e9950315621b627758b4e813e4f6` |
 | Track.xpu avant | `993f14fb517fcc7806cf2bf23c4574f2d83aa35d815bfdcbf8cfa486488cea8d` |
-| Track.xpu après | `d4a7f1aee4e5082ee0e19722e592a7ba622f82f707d251b7fd146eebd6429690` |
+| Track.xpu après | `56af056d75ef1255e2f205affa9644b92ab4efe720f5513d16ad8d87d9e1404e` |
 
-Le répertoire, les tailles, t0/t1/t3, les autres programmes et tous les octets de remplissage
+La sortie est relue comme une instruction `TXP t2` exacte avec les mêmes opérandes.
+Un résultat `TEP` est rejeté avant les contrôles d’empreinte, même si une empreinte attendue
+reproduisait cette erreur. Le répertoire, les tailles, t0/t1/t3, les autres programmes et tous les octets de remplissage
 restent identiques. Observation distincte : `Water_DP3.xpu` emploie déjà `TXP` pour t2 et t3 ;
 ce n'est pas une preuve de l'intention de `Track.xpu`.
 
@@ -103,12 +109,30 @@ POMPPC_CMR_ORIGINAL=/chemin/shaders.big.original \
 ```
 
 Les tests ordinaires fabriquent une archive minimale synthétique, sans programme du jeu. Ils
-vérifient l'octet unique, tous les autres programmes et t3, les espaces/templates, les refus
+vérifient les deux octets exacts et l'opcode final `TXP`, tous les autres programmes et t3, les espaces/templates, les refus
 d'archives inconnues/tronquées, les noms dupliqués, chevauchements, offsets hors limites,
 instruction absente/multiple, mauvaise empreinte après, sortie existante et lien symbolique.
-Le test facultatif sur l'original local a aussi passé : empreinte finale exacte, un seul octet,
+Le test facultatif sur l'original local a aussi passé : empreinte finale exacte, exactement deux octets,
 original inchangé, double application refusée et restauration identique.
 
 [F] Reste à éprouver l'archive corrigée en VM et à observer plusieurs routes/conditions.
 Un essai sur vrai PowerMac G4 avec l'original puis cette copie permettrait de trancher le
 comportement du pilote d'origine. Aucun résultat de ce matériel n'est revendiqué.
+
+## Correction de l'outil initial (05/11/2026)
+
+Le premier outil et ses tests ont reproduit une erreur de construction : changer seulement
+X → P dans `TEX` produit **`TEP`**, une instruction invalide. Cette archive (SHA-256
+`dd5a9ace7e0665a3c6f8eedd2e375042496cb9fdb48e987c07f2d0453fe88adc`) a été refusée par
+le compilateur ARB en VM, puis le jeu a quitté. Elle est conservée comme preuve négative et
+ne doit pas être installée. L'original reste intact. Le champ `byte_changes: 1` du rapport
+diagnostique initial était également erroné ; la transformation valide TEX → TXP en exige deux.
+Le rapport a depuis été rectifié et complété par la comparaison binaire ci-dessus.
+
+Les tests corrigés vérifient l'opcode complet, ses opérandes, les deux positions modifiées et
+tous les autres octets. Un mutant reproduit l'ancien remplacement X → P et les empreintes
+correspondantes : il est rejeté **par la vérification TXP**, pas seulement par une empreinte
+différente. Le test de l'archive réelle vérifie explicitement `TEX` avant, `TXP` après,
+aucun `TEP`, différences exactement `[163261, 163262]`, longueur et autres programmes inchangés.
+La nouvelle archive valide reste à éprouver en VM ; aucun succès de son installation n'est
+encore revendiqué.
