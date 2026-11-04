@@ -79,7 +79,8 @@ Windows, CI à la POM2, pas de Raspberry Pi). Ni tag ni Release.
   digest. Essayée depuis le paquet sur ce PC : Tiger, `backend gl`, QE, `gltest` OK. Hôte ancien, sans NVIDIA, X11, son et
   assistant complet **non prouvés** (`docs/publier-linux.md` §5). XWayland forcé (`8e41119`) pas revu à l'œil.
 - **Vitesse du paquet** ([A], `bench/tcg/ab/generique-imgui-0411-*`) : générique +7 à +12 % en ms/image contre le rapide.
-- **Windows** : voir `docs/publier-windows.md` §5. Rien n'a tourné sur un vrai PC Windows.
+- **CI** : répétition 10 de `release.yml` **entièrement verte** à 6 h 34 (run `41759736190`, commit `9d0a9ec`) : AppImage 27,6 Mio, zip Windows 17,2 Mio (artefacts).
+- **Windows** : sur le runner, Open Firmware en SMP, D-Bus, `Win32.Map`, image et verrou passent. Rien n'a tourné sur un vrai PC Windows : Tiger, rendu GL, vitesse, son non prouvés (`docs/publier-windows.md` §5).
 - **Décisions à l'utilisateur** : (1) la règle ci-dessus « le PC n'est pas publié tant que sa vitesse n'est pas acceptable »
   contredit ce lot : DOOM 3 reste à 79-85 ms pour une cible de 50 ; (2) déposer l'ISO
   `bench/iso-042/pomppc-0.4.2-guest.iso` (sha256 `a1910765…3e1da`, gravée le 04/11) en pré-publication, refaire

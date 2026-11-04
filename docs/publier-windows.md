@@ -97,7 +97,7 @@ Le runner n'a ni GPU, ni son, ni disque Tiger, ni personne devant l'écran. La C
 - un `PATH` de machine neuve : les `.exe` chargent sans MSYS2 ;
 - `-display dbus`, `dsound`, `qemu-img`, Open Firmware en SMP, QMP ;
 - la ligne de `LaunchPlan` lancée pour de bon, le bus D-Bus, le listener, `Win32.Map`, une image non vide hachée ;
-- le verrou, et le repli logiciel de qgpu sur `opengl32` en GL 1.1 (dans `.run/qemu.log`).
+- le verrou. Le repli logiciel de qgpu sur `opengl32` n'est **pas** prouvé : au 04/11/2026, `.run/qemu.log` du runner ne dit rien du backend pris, et Open Firmware ne rend rien par qgpu.
 
 Il reste à faire, **sur une vraie machine Windows, avant de dire que ce paquet marche** :
 
