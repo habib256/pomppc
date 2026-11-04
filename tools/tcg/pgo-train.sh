@@ -243,7 +243,9 @@ if has jouer; then
     if [ -n "$JEUX_PE" ]; then
       # les .gcda se cumulent d'une sortie de QEMU à l'autre
       say "partie d'entraînement en plein écran : $JEUX_PE → $R/bench/tcg/ab/$C-pe"
-      run env -u QEMU_BIN ${WRAP[@]+"${WRAP[@]}"} "$WT/tools/tcg/matab.sh" "$C-pe" "$PARTIES" "${BRAS[@]}" "$JEUX_PE" pe
+      # 04/11 : l'instrumenté n'atteint pas la course de cmr en 900 s (vitesse-doom3-x86 §25) ; le
+      # profil des chemins de la course exige d'y arriver : PGO_DELAI_SCENE, 2700 s par défaut
+      run env -u QEMU_BIN MATRICE_DELAI_SCENE="${PGO_DELAI_SCENE:-2700}" ${WRAP[@]+"${WRAP[@]}"} "$WT/tools/tcg/matab.sh" "$C-pe" "$PARTIES" "${BRAS[@]}" "$JEUX_PE" pe
     fi
     QUOI="$R/bench/tcg/ab/$C"
   else

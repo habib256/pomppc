@@ -522,7 +522,8 @@ class Cellule:
                 if w:
                     a, b = w
                     break
-                if t > j.delai_scene:
+                # MATRICE_DELAI_SCENE : plus de temps pour un binaire lent exprès (PGO instrumenté)
+                if t > float(os.environ.get("MATRICE_DELAI_SCENE") or j.delai_scene):
                     raise Echec("scène non atteinte en %d s (image %s)" % (t, max(rows) if rows else "aucune"))
             journal("fenêtre de mesure %d..%d atteinte (%.0f s)" % (a, b, time.time() - lance))
             if differe:
