@@ -280,6 +280,14 @@ if has jouer; then
     # 03/10 : 1 356 .gcda pour 25 min de DOOM 3 ; quelques dizaines = QEMU n'a pas
     # quitté proprement ou n'a presque pas tourné.
     [ "$n" -ge 500 ] || die "seulement $n .gcda dans $PGO_DIR : partie ratée ? ($QUOI)"
+    # 04/11 : 1 255 .gcda pour une partie qui n'avait joué aucun jeu (QEMU planté, les démarrages et
+    # les sondes suffisent à les créer) : le compte ne prouve rien, le bilan et les plantages si.
+    if [ "$BANC" = matrice ]; then
+      grep -aqE 'Erreur de segmentation|Instruction non permise|Erreur du bus|core dumped' "$QUOI"*/*/run_tiger.log 2>/dev/null &&
+        die "QEMU a planté pendant l'entraînement : profil à ne pas utiliser ($QUOI)"
+      grep -q 'ms/image' "$QUOI/bilan.txt" 2>/dev/null ||
+        die "aucun jeu mesuré dans $QUOI/bilan.txt : profil à ne pas utiliser"
+    fi
     { echo "# profil entraîné par tools/tcg/pgo-train.sh"
       echo "date=$(date "+%Y-%m-%dT%H:%M:%S%z")"
       echo "campagne=$QUOI"
