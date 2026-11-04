@@ -1461,7 +1461,8 @@ if [ ! -f build.ninja ] || [ -n "${RECONFIGURE:-}" ]; then
   if [ "${QEMU_PROFIL:-}" = paquet-windows ]; then
     UI_OPTS=(--disable-gtk --disable-sdl --disable-opengl "--audio-drv-list=dsound" --enable-dbus-display
              --enable-png --enable-bzip2 --disable-libusb --disable-zstd --disable-guest-agent --disable-spice
-             --disable-gnutls --disable-nettle --disable-gcrypt)
+             --disable-gnutls --disable-nettle --disable-gcrypt
+             --disable-curl --disable-curses --disable-libssh)
   fi
   PY_OPTS=()
   [ -n "${PYTHON:-}" ] && PY_OPTS=(--python="$PYTHON")
