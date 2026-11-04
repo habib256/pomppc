@@ -25,6 +25,8 @@ sous Windows. Sans flottant natif, rel32 ni TSC. Le comportement Linux et macOS 
 Firmware, bus D-Bus, `Win32.Map`, image, verrou). **Rien n'a tourné sur un vrai PC : le rendu GL, Tiger, MTTCG sous Windows, la vitesse
 et le son restent à prouver.**
 
+**Endurance du PC avec le bundle du 02/11.** 78 démarrages et 16 cycles de jeu, 0 incident, binaire rapide (`endurance.md` §18).
+
 **Quartz Extreme aux résolutions, preuve close sur les deux hôtes.** Sur le PC (EGL/NVIDIA, 03-04/11) : 66 changements de mode sans écart, matrice 8 cellules sur 8, Colin McRae depuis quatre bureaux, A/B du plugin `20261102-modes` sans perte prouvée (`docs/chantiers/qe-resolutions.md`). `POMPPC_GL_PRESENTQ` écarté sur chiffres (`docs/chantiers/presentq.md`).
 
 **Une seule source pour la version** : `project(POMPPC VERSION …)` de `frontend/CMakeLists.txt`, resté à 0.3 jusqu'ici ;

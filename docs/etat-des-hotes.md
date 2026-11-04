@@ -53,8 +53,8 @@ plan ; DOOM 3 se mesure en parties réelles (`timedemo` refusé par la démo).
 - **Après un `killall` de DOOM 3, redémarrer l'invité.** Ne jamais supprimer `.run/tiger.lock`.
   Jamais `pgrep -f`/`pkill -f` avec un motif présent dans sa propre ligne de commande.
 - **Parité, précision** : si une accélération ne peut pas recevoir son pendant, la raison est écrite dans la doc du patch.
-- **Publication** : le PC n'est **pas publié** (paquets, annonces) tant que sa vitesse n'est pas acceptable.
-  Cible : DOOM 3 à 50 ms/image en fenêtre.
+- **Publication** : la vitesse du PC n'est plus une condition de la 0.4.2 (décision de l'utilisateur, 04/11) : elle s'annonce
+  telle quelle. Cible de vitesse maintenue : DOOM 3 à 50 ms/image en fenêtre.
 - **Commits** : ils vont sur `main` puis sont poussés. Un essai non retenu est rangé sous une
   étiquette `archive/*`.
 - **Preuve d'une entrée du TODO** : une entrée décrit le travail restant et la preuve qui la fermera. Pour les optimisations :
@@ -65,7 +65,7 @@ ou un bras témoin). Pour les défauts : reproduction avant correction et contr�
 travaux clos sont dans [CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
 L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
-## 2. PC x86-64 : état au 04/11/2026, 6 h 20 (VM quotidienne allumée, binaire rapide, frontal ImGuiDock)
+## 2. PC x86-64 : état au 04/11/2026, 8 h 20 (VM quotidienne allumée, binaire rapide, frontal ImGuiDock)
 
 **Nuit du 03 au 04/11 : lot 0.4.2 préparé, non publié** (demande de l'utilisateur : AppImage pour vieille glib et
 Windows, CI à la POM2, pas de Raspberry Pi). Ni tag ni Release.
@@ -73,18 +73,21 @@ Windows, CI à la POM2, pas de Raspberry Pi). Ni tag ni Release.
   PRESENTQ écarté sur chiffres (`docs/chantiers/presentq.md`) ; `tcg/0066` validé sur x86-64 (`bench/tcg/froid-x86-0411`,
   `docs/tcg-zone-froide-arm64.md`) ; bundle du 02/11 installé, A/B sans perte prouvée (`bench/tcg/ab/plugin-0311-*`).
   Tests : 343 OK, 0 échec, 7 ignorés ; `--slow` : un seul échec, `bridge_probe`, disque tenu par la VM quotidienne.
-- **Pas fait, promis pour la nuit** : endurance avec le nouveau bundle, `tcg/0063` témoin, PGO réentraîné (`exec_one` et
-  `unit_texture_bound` tournent sans profil : « control flow mismatch »), x8 + 0063, base de temps. La CI a pris la nuit.
+- **Endurance du nouveau bundle faite** (`docs/endurance.md` §18) : 78 démarrages et 16 cycles de jeu, 0 incident, borne
+  haute 4,7 % sur les démarrages. Binaire rapide seulement, Colin McRae non piloté. Base `disks/tiger-endurance-pc-0411.qcow2`.
+- **Pas fait** : `tcg/0063` témoin, PGO réentraîné (`exec_one` et `unit_texture_bound` tournent sans profil : « control
+  flow mismatch »), x8 + 0063, base de temps. Hors condition de la 0.4.2 ; suite du chantier `leviers-jit-x86.md`.
 - **AppImage** : `linux` vert en CI, plancher glibc 2.31, image `ghcr.io/habib256/pomppc-bullseye-builder` épinglée par
   digest. Essayée depuis le paquet sur ce PC : Tiger, `backend gl`, QE, `gltest` OK. Hôte ancien, sans NVIDIA, X11, son et
   assistant complet **non prouvés** (`docs/publier-linux.md` §5). XWayland forcé (`8e41119`) pas revu à l'œil.
 - **Vitesse du paquet** ([A], `bench/tcg/ab/generique-imgui-0411-*`) : générique +7 à +12 % en ms/image contre le rapide.
 - **CI** : répétition 10 de `release.yml` **entièrement verte** à 6 h 34 (run `41759736190`, commit `9d0a9ec`) : AppImage 27,6 Mio, zip Windows 17,2 Mio (artefacts).
 - **Windows** : sur le runner, Open Firmware en SMP, D-Bus, `Win32.Map`, image et verrou passent. Rien n'a tourné sur un vrai PC Windows : Tiger, rendu GL, vitesse, son non prouvés (`docs/publier-windows.md` §5).
-- **Décisions à l'utilisateur** : (1) la règle ci-dessus « le PC n'est pas publié tant que sa vitesse n'est pas acceptable »
-  contredit ce lot : DOOM 3 reste à 79-85 ms pour une cible de 50 ; (2) déposer l'ISO
+- **Tranché par l'utilisateur le 04/11** : pour ce lot, « au même niveau que le M4 » veut dire mêmes fonctions et mêmes
+  preuves, pas la même vitesse ; la vitesse réelle s'annonce dans les notes. La cible de 50 ms reste l'objectif du PC.
+- **Décisions à l'utilisateur** : (1) déposer l'ISO
   `bench/iso-042/pomppc-0.4.2-guest.iso` (sha256 `a1910765…3e1da`, gravée le 04/11) en pré-publication, refaire
-  `packaging/guest-iso.lock` : sans ça un tag 0.4.2 échoue, c'est voulu ; (3) le tag.
+  `packaging/guest-iso.lock` : sans ça un tag 0.4.2 échoue, c'est voulu ; (2) le tag.
 - **Pièges** : le QEMU du paquet n'a pas GTK, `matab.sh` exige `MATAB_FRONTEND=imgui` pour le mesurer (sinon « pas de ssh »).
   Toute construction Windows passe sans sonde QMP par stdin (`scripts/build_qemu_qfb.sh`).
 - **Le M4 devra reconstruire QEMU** : la série a changé (`tcg/0015`, `qgpu-gl.c`), sans effet hors `_WIN32`.

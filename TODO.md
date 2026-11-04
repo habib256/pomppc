@@ -8,9 +8,9 @@ sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
 M4 342 démarrages et 40 cycles de jeu sans incident le 29/10, puis 70 démarrages et 8 jeux
-avec le nouveau bundle dans la nuit du 01 au 02/11 ; Quartz Extreme allumé sur les
-deux hôtes). **L'orientation est de nouveau la vitesse, sur les deux hôtes**, car la version x86
-reste trop lente pour être publiée (règle du 20/10). Vitesse, ms/image, hôte au repos
+avec le nouveau bundle dans la nuit du 01 au 02/11 ; PC 78 démarrages et 16 cycles sans incident avec le bundle du 02/11, le 04/11 ; Quartz Extreme allumé sur les
+deux hôtes). **L'orientation est de nouveau la vitesse, sur les deux hôtes** : la cible du PC reste 50 ms, mais depuis le 04/11 elle
+ne conditionne plus la publication de la 0.4.2 (décision de l'utilisateur, `docs/etat-des-hotes.md` §2). Vitesse, ms/image, hôte au repos
 (PC du 01/11, M4 du 02/11 ; **sur le M4, DOOM 3 est à 37 ms depuis le 03/11**, voir « Ensuite ») :
 
 | jeu | PC x86-64 (binaire rapide, plugin `packbits`) | M4 (02/11, QE) | rapport |

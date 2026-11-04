@@ -947,3 +947,32 @@ relevés de 6 h 04 à 6 h 40 ne voient aucun échec SSH ni disparition de proces
 (`bench/endurance/restauration-finale-0211.jsonl`). Un seul QEMU à la clôture,
 celui de la VM quotidienne sous ImGuiDock ; elle reste ouverte. Ce suivi n'ajoute
 aucun démarrage aux totaux d'endurance ci-dessus.
+
+## 18. PC Linux, 04/11 au matin : bundle `20261102-modes` (base pc-0411)
+
+Tranche de contrôle du lot 0.4.2, décidée par l'utilisateur le 04/11 (`docs/etat-des-hotes.md` §2). Base
+`disks/tiger-endurance-pc-0411.qcow2`, copiée du disque quotidien arrêté, en lecture seule, `qemu-img check` propre
+avant et après. `QEMU_FAST=1` : binaire rapide du 04/11 à 1 h 34 (sha256 `aa043403de5f28e5`), défauts du lanceur,
+SMP 2, deux instances, 10.4.11. Pilotage : `bench/endurance/pc-0411.sh` (non versionné).
+
+| Campagne | Démarrages | Incidents | Borne haute (Wilson 95 %) | SSH médian (min–max) | Charge hôte max |
+|---|---:|---:|---:|---|---:|
+| `pc-0411-froid` | 30 froids | 0 | 11,4 % | 15 s (15–30) | 2,4 |
+| `pc-0411-reboots` | 30 (2 froids, 28 reboots) | 0 | 11,4 % | 20 s (15–35) | 2,6 |
+| `pc-0411-jeux` (`mb,zen,ut,d3`, en fenêtre) | 18 (2 froids, 16 reboots) | 0 | 17,6 % | 20 s (15–45) | 4,4 |
+| **Total** | **78** | **0** | **4,7 %** | | |
+
+| Jeu | Cycles sains | Images par cycle (médiane) |
+|---|---:|---:|
+| DOOM 3 | 4/4 | 9 398 |
+| Marble Blast | 4/4 | 17 658 |
+| UT2004 | 4/4 | 4 536 |
+| Zenerchi | 4/4 | 22 871 |
+
+Les 16 cycles de jeu donnent une borne haute de 19,4 % à eux seuls, 49 % par jeu : ils ne prouvent pas un taux, ils
+écartent un défaut fréquent.
+
+**Ce que cette tranche ne couvre pas.** Elle tourne sur le binaire rapide, pas sur le QEMU générique du paquet, et elle
+ne pilote pas Colin McRae, resté dans ses menus (§15). Le QEMU du paquet a joué les cinq jeux dans l'A/B du 04/11
+(`bench/tcg/ab/generique-imgui-0411-*`), sans campagne d'endurance.
+
