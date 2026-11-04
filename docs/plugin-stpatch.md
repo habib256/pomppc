@@ -45,6 +45,10 @@ delta sont réservées **en une fois**. Après `reserve`, validité et générat
 revérifiées : une perte ou une réentrée rend les seuls mots réservés, puis impose le bloc entier.
 Un `CTX_BIND` posé par la réservation peut rester. Le snapshot d'un bloc complet vient des octets
 effectivement écrits après la réservation ; après un delta, seuls les 15 mots permis sont copiés.
+Sous région WindowServer, la copie du bloc et le snapshot candidat portent le même ciseau
+ajusté, issu du calcul scalaire ; le GS n'est pas modifié. Un changement de région invalide
+le snapshot et l'état froid, y compris au retour hors région, sans perdre `st_valid`
+([preuve native](re/qe-region-state.md), image encore à valider).
 La réservation reste obligatoire pour zéro clé : elle ferme les séries géométriques RUN/RAW,
 attend le flux disponible et lie le contexte, comme le faisait le bloc complet. L'équivalence
 des clés ne prouve pas que supprimer cette frontière de flux serait exact.

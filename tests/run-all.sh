@@ -497,6 +497,13 @@ if command -v cc >/dev/null 2>&1; then
     ko "STPATCH ($(tail -1 "$STP_LOG"))"
   fi
   rm -f "$STP_LOG"
+  WS_SCISSOR_LOG="${TMPDIR:-/tmp}/pomppc_ws_scissor_test.$$.log"
+  if python3 tests/pomppc_ws_scissor_test.py > "$WS_SCISSOR_LOG" 2>&1; then
+    ok "WS SCISSOR (region, bloc/snapshot, oracle reel et 5 mutants)"
+  else
+    ko "WS SCISSOR ($(tail -1 "$WS_SCISSOR_LOG"))"
+  fi
+  rm -f "$WS_SCISSOR_LOG"
   TB_LOG="${TMPDIR:-/tmp}/pomppc_texblank_test.$$.log"
   if python3 tests/pomppc_texblank_test.py > "$TB_LOG" 2>&1; then
     ok "TEXBLANK (vraie branche plugin, oracle texels et 3 mutants)"

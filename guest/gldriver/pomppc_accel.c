@@ -174,7 +174,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261104-texblank"
+#define POMPPC_PLUGIN_REV "20261105-ws-scissor"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -7404,7 +7404,9 @@ static void state_progs(PCtx *p, unsigned long *v)
     v[QGPU_SK_FRAGMENT_PROGRAM] = (arb && G.prog && p->fp_on && p->fp_rec && !p->fp_rec->refused) ? 1 : 0;
 }
 
-static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
+/* Contrat logiciel : meme ciseau pour le vecteur scalaire et le bloc.
+   Les regions WS ne font pas partie du GS de GLEngine. */
+static void compute_scissor(PCtx *p, unsigned long *v)
 {
     unsigned char *g = gls(p);
     long sx = I32(g, GS_SCISSOR_RECT), sy = I32(g, GS_SCISSOR_RECT + 4);
@@ -7412,27 +7414,9 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
     long top;
     int scissor = GLD_U8(g, GS_SCISSOR) != 0;
 
-    memset(v, 0, QGPU_SK_COUNT * sizeof(*v));
-    v[QGPU_SK_DEPTH_TEST] = GLD_U8(g, GS_DEPTH_TEST) != 0;
-    v[QGPU_SK_DEPTH_FUNC] = v[QGPU_SK_DEPTH_TEST] ? U16(g, GS_DEPTH_FUNC) : 0x0201;
-    v[QGPU_SK_DEPTH_WRITE] = GLD_U8(g, GS_DEPTH_MASK) != 0;
-    v[QGPU_SK_COLOR_MASK] = (GLD_U8(g, GS_COLOR_MASK) ? 1 : 0) | (GLD_U8(g, GS_COLOR_MASK + 1) ? 2 : 0) |
-                            (GLD_U8(g, GS_COLOR_MASK + 2) ? 4 : 0) | (GLD_U8(g, GS_COLOR_MASK + 3) ? 8 : 0);
-    v[QGPU_SK_BLEND] = GLD_U8(g, GS_BLEND) != 0;
-    if (v[QGPU_SK_BLEND]) {
-        v[QGPU_SK_BLEND_SRC_RGB] = U16(g, GS_BLEND_SRC_RGB);
-        v[QGPU_SK_BLEND_DST_RGB] = U16(g, GS_BLEND_DST_RGB);
-        v[QGPU_SK_BLEND_SRC_A] = U16(g, GS_BLEND_SRC_A);
-        v[QGPU_SK_BLEND_DST_A] = U16(g, GS_BLEND_DST_A);
-        v[QGPU_SK_BLEND_EQ_RGB] = U16(g, GS_BLEND_EQ_RGB);
-        v[QGPU_SK_BLEND_EQ_A] = U16(g, GS_BLEND_EQ_A);
-    } else {                            /* valeurs neutres : moins d'envois */
-        v[QGPU_SK_BLEND_SRC_RGB] = v[QGPU_SK_BLEND_SRC_A] = 1;
-        v[QGPU_SK_BLEND_EQ_RGB] = v[QGPU_SK_BLEND_EQ_A] = 0x8006;
-    }
-    v[QGPU_SK_ALPHA_TEST] = GLD_U8(g, GS_ALPHA_TEST) != 0;
-    v[QGPU_SK_ALPHA_FUNC] = v[QGPU_SK_ALPHA_TEST] ? U16(g, GS_ALPHA_FUNC) : 0x0207;
-    v[QGPU_SK_ALPHA_REF] = v[QGPU_SK_ALPHA_TEST] ? GLD_U32(g, GS_ALPHA_REF) : 0;
+    int k;
+    for (k = QGPU_SK_SCISSOR; k <= QGPU_SK_SCISSOR_H; k++)
+        v[k] = 0;
     if (p->ws_rgn) {
         /* Quartz Extreme : le drawable est la zone de la surface d'écran — les
            ciseaux du compositeur y sont relatifs, et rien ne déborde (un
@@ -7467,6 +7451,55 @@ static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
         v[QGPU_SK_SCISSOR_W] = sw;
         v[QGPU_SK_SCISSOR_H] = sh;
     }
+}
+
+/* STATE_BLOCK transporte une copie, jamais GS lui-meme. Canonicaliser le
+   ciseau WS dans cette copie : le decodeur hote retrouve les cinq cles
+   exactes, sans changer les cles froides conservees ni st_valid. */
+static void stateblk_ws_scissor(PCtx *p, uint32_t *args)
+{
+    unsigned long v[QGPU_SK_SCISSOR_H + 1];
+    uint32_t *w;
+    if (!p->ws_rgn)
+        return;
+    compute_scissor(p, v);
+    w = args + QGPU_SB_HDR + QGPU_SB_W0_N + QGPU_SB_W1_N + QGPU_SB_W2_N;
+    w[(GS_SCISSOR_RECT - QGPU_SB_W3_OFF) / 4] = (uint32_t)v[QGPU_SK_SCISSOR_X];
+    w[(GS_SCISSOR_RECT + 4 - QGPU_SB_W3_OFF) / 4] =
+        (uint32_t)(p->sh - v[QGPU_SK_SCISSOR_Y] - v[QGPU_SK_SCISSOR_H]);
+    w[(GS_SCISSOR_RECT + 8 - QGPU_SB_W3_OFF) / 4] = (uint32_t)v[QGPU_SK_SCISSOR_W];
+    w[(GS_SCISSOR_RECT + 12 - QGPU_SB_W3_OFF) / 4] = (uint32_t)v[QGPU_SK_SCISSOR_H];
+    /* GS_SCISSOR est le premier octet du mot big-endian ; conserver le reste. */
+    w[(GS_SCISSOR - QGPU_SB_W3_OFF) / 4] =
+        (w[(GS_SCISSOR - QGPU_SB_W3_OFF) / 4] & 0x00ffffffu) | 0x01000000u;
+}
+
+static void compute_state(PCtx *p, const TexInfo *ti, unsigned long *v, int raw)
+{
+    unsigned char *g = gls(p);
+
+    memset(v, 0, QGPU_SK_COUNT * sizeof(*v));
+    v[QGPU_SK_DEPTH_TEST] = GLD_U8(g, GS_DEPTH_TEST) != 0;
+    v[QGPU_SK_DEPTH_FUNC] = v[QGPU_SK_DEPTH_TEST] ? U16(g, GS_DEPTH_FUNC) : 0x0201;
+    v[QGPU_SK_DEPTH_WRITE] = GLD_U8(g, GS_DEPTH_MASK) != 0;
+    v[QGPU_SK_COLOR_MASK] = (GLD_U8(g, GS_COLOR_MASK) ? 1 : 0) | (GLD_U8(g, GS_COLOR_MASK + 1) ? 2 : 0) |
+                            (GLD_U8(g, GS_COLOR_MASK + 2) ? 4 : 0) | (GLD_U8(g, GS_COLOR_MASK + 3) ? 8 : 0);
+    v[QGPU_SK_BLEND] = GLD_U8(g, GS_BLEND) != 0;
+    if (v[QGPU_SK_BLEND]) {
+        v[QGPU_SK_BLEND_SRC_RGB] = U16(g, GS_BLEND_SRC_RGB);
+        v[QGPU_SK_BLEND_DST_RGB] = U16(g, GS_BLEND_DST_RGB);
+        v[QGPU_SK_BLEND_SRC_A] = U16(g, GS_BLEND_SRC_A);
+        v[QGPU_SK_BLEND_DST_A] = U16(g, GS_BLEND_DST_A);
+        v[QGPU_SK_BLEND_EQ_RGB] = U16(g, GS_BLEND_EQ_RGB);
+        v[QGPU_SK_BLEND_EQ_A] = U16(g, GS_BLEND_EQ_A);
+    } else {                            /* valeurs neutres : moins d'envois */
+        v[QGPU_SK_BLEND_SRC_RGB] = v[QGPU_SK_BLEND_SRC_A] = 1;
+        v[QGPU_SK_BLEND_EQ_RGB] = v[QGPU_SK_BLEND_EQ_A] = 0x8006;
+    }
+    v[QGPU_SK_ALPHA_TEST] = GLD_U8(g, GS_ALPHA_TEST) != 0;
+    v[QGPU_SK_ALPHA_FUNC] = v[QGPU_SK_ALPHA_TEST] ? U16(g, GS_ALPHA_FUNC) : 0x0207;
+    v[QGPU_SK_ALPHA_REF] = v[QGPU_SK_ALPHA_TEST] ? GLD_U32(g, GS_ALPHA_REF) : 0;
+    compute_scissor(p, v);
     /* textures : liaison et environnement conservés quand l'unité est coupée */
     state_units(p, ti, v);
     /* stencil (v6) : le device borne tout à 8 bits ; test coupé = valeurs neutres,
@@ -8022,6 +8055,8 @@ static void stpatch_snapshot(uint32_t *a, unsigned long fl, PCtx *p,
     memcpy(w, g + QGPU_SB_W3_OFF, QGPU_SB_W3_N * 4); w += QGPU_SB_W3_N;
     for (i = 0; i < QGPU_SB_LOD_N; i++)
         *w++ = GLD_U32(g, QGPU_SB_LOD_OFF + i * QGPU_SB_LOD_STRIDE);
+    if (p->ws_rgn)
+        stateblk_ws_scissor(p, a);
 }
 
 static int stpatch_try(PCtx *p, const TexInfo *ti, int raw, unsigned long fl,
@@ -8227,6 +8262,8 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
         c += QGPU_SB_W3_N;
         for (i = 0; i < QGPU_SB_LOD_N; i++)
             *c++ = GLD_U32(g, QGPU_SB_LOD_OFF + i * QGPU_SB_LOD_STRIDE);
+        if (p->ws_rgn)
+            stateblk_ws_scissor(p, (uint32_t *)sbargs);
         if (G.stpatch) {
             /* Référence = octets VRAIMENT écrits, après reserve (qui peut
                avoir rendu G.mu), et jamais une photographie antérieure. */
@@ -18287,11 +18324,17 @@ void pomppc_ws_region(void *ctx, const unsigned long *desc)
             bx = by = 0; bw = sw; bh = sh;
         }
         if (ok != p->ws_rgn || (unsigned long)bx != p->ws_bx || (unsigned long)by != p->ws_by ||
-            (unsigned long)bw != p->ws_bw || (unsigned long)bh != p->ws_bh) {
+            (unsigned long)bw != p->ws_bw || (unsigned long)bh != p->ws_bh ||
+            p->ws_ox != bx || p->ws_oy != sh - (by + bh)) {
             p->ws_rgn = ok;
             p->ws_bx = bx; p->ws_by = by; p->ws_bw = bw; p->ws_bh = bh;
             p->ws_ox = bx;
             p->ws_oy = sh - (by + bh);
+            /* GS peut etre identique : la region change les cles froides.
+               Garder st_valid pour les valeurs canoniques conservees. */
+            p->st_dirty = 1;
+            p->stp_valid = 0;
+            p->stp_gen++;
             p->md_bits |= MD_VIEWPORT;          /* viewport à renvoyer, décalé */
             memset(p->c_vp, 0xFF, sizeof(p->c_vp));
         }
