@@ -55,8 +55,13 @@ set(DBUS_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/dbus-gen)
 # QEMU ui/dbus-display1.xml @ v11.1.2 passé par scripts/xml-preprocess.py avec HOST_OS=windows.
 if(WIN32)
     set(DBUS_XML ${CMAKE_CURRENT_SOURCE_DIR}/dbus/dbus-display1-win32.xml)
-    # gdbus-codegen y est un script Python sans .exe : CreateProcess ne sait pas le lancer seul.
-    set(DBUS_CODEGEN_CMD ${Python3_EXECUTABLE} ${GDBUS_CODEGEN})
+    # [A] CI du 04/11/2026 : le gdbus-codegen de MSYS2 UCRT64 est un vrai .exe, qu'un Python ne sait
+    # pas lire. S'il n'en est pas un, c'est un script que CreateProcess ne sait pas lancer seul.
+    if(GDBUS_CODEGEN MATCHES "\\.[eE][xX][eE]$")
+        set(DBUS_CODEGEN_CMD ${GDBUS_CODEGEN})
+    else()
+        set(DBUS_CODEGEN_CMD ${Python3_EXECUTABLE} ${GDBUS_CODEGEN})
+    endif()
 else()
     set(DBUS_XML ${CMAKE_CURRENT_SOURCE_DIR}/dbus/dbus-display1.xml)
     set(DBUS_CODEGEN_CMD ${GDBUS_CODEGEN})
