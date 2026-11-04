@@ -85,6 +85,11 @@ disque de démarrage OS 9 sans virtio-9p. Binaire générique : ni `-march=nativ
 
 ## 5. Ce qui n'est PAS prouvé
 
+Deux pièges du runner, [A] CI du 04/11/2026 : `-qmp stdio` sur un tube ne répond rien sous Windows, et une sonde de ce
+type peut ne jamais rendre la main, d'où QMP par TCP dans `smoke_windows.sh` et aucune sonde QMP dans
+`build_qemu_qfb.sh` sous ce profil ([F] cause non établie) ; `timeout`, `find` et `sort` de `System32` passent avant ceux
+de MSYS2 si `/usr/bin` n'est pas en tête du `PATH`.
+
 Le runner n'a ni GPU, ni son, ni disque Tiger, ni personne devant l'écran. La CI prouve :
 
 - la construction par MSYS2 UCRT64, la série de patchs sur le QEMU sous Windows ;

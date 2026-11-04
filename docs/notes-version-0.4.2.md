@@ -10,15 +10,15 @@ Details are in [CHANGELOG.md](https://github.com/habib256/pomppc/blob/0.4.2/CHAN
 
 ## How fast on Linux
 
-Milliseconds per frame, lower is better, idle host. These were measured on a Core i7-10700F with an RTX 4060 Ti, **with a build tuned for that one machine** (`-O3 -march=native`, LTO, PGO). The AppImage is a generic build, so **expect it to be slower than this column** (about 10 % in DOOM 3). The Mac column is an Apple M4.
+Milliseconds per frame, lower is better, idle host, measured on a Core i7-10700F with an RTX 4060 Ti. **The AppImage column is what you download**, a generic build. The tuned column is a build made for that one machine (`-O3 -march=native`, LTO, PGO), which the package can't be. The Mac column is an Apple M4.
 
-| Game | Linux PC (tuned build) | Apple M4 |
-|---|---:|---:|
-| DOOM 3, windowed | 78–80 | 28.9 |
-| UT2004, windowed | 40 | 19.3 |
-| Marble Blast, windowed | 8.3 | 6.2 |
-| Zenerchi, windowed | 4.6 | 2.6 |
-| Colin McRae, full screen, in the race | 82 | 41.7 |
+| Game | AppImage | Linux PC (tuned build) | Apple M4 |
+|---|---:|---:|---:|
+| DOOM 3, windowed | 85.4 | 79.0 | 28.9 |
+| UT2004, windowed | 39.7 | 35.8 | 19.3 |
+| Marble Blast, windowed | 8.7 | 7.9 | 6.2 |
+| Zenerchi, windowed | 4.8 | 4.3 | 2.6 |
+| Colin McRae, full screen, in the race | 85.2 | 79.3 | 41.7 |
 
 So a demanding game runs about two to three times slower than on an M4. The goal for the PC is DOOM 3 at 50 ms per frame, and it isn't reached yet.
 

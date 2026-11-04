@@ -14,14 +14,16 @@ Debian 11 épinglée par digest (`packaging/linux/`, `.github/workflows/release.
 `~/POMPPC`, pilote GL de l'hôte, RUNPATH et pas de `LD_LIBRARY_PATH`. L'assistant de premier lancement est porté sous
 Linux (`md5sum`, `sha1sum`, `zenity` ou `kdialog`, `xdg-open`, `qemu-img` pour les `.dmg`) ; déposer des fichiers et
 partager un dossier restent propres à macOS. Binaire générique, plus lent que le binaire rapide du PC, et le PC reste
-derrière le M4 : les notes le chiffrent. **Écrit sans compilation : à éprouver sur le PC avant de publier.**
+derrière le M4 : les notes le chiffrent (générique +7 à +12 % en ms/image, A/B du 04/11). Construite et contrôlée en CI ;
+essayée sur le PC depuis le paquet (Tiger, `backend gl`, QE, `gltest`). Hôte ancien, sans NVIDIA, assistant et son à prouver.
 
 **Paquet Windows x64, expérimental, écrit sans machine Windows.** `POMPPC-0.4.2-windows-x64.zip`, MSYS2 UCRT64 en CI
 (`packaging/windows/`, job `windows`, `docs/publier-windows.md`). QEMU natif, profil `paquet-windows` ; backend WGL de qgpu (fenêtre
 cachée, compatibilité 3.2, repli logiciel) ; frontal sans bash : `LaunchPlan` écrit la ligne de QEMU, paire AF_UNIX et
 `get-win32-socket`, `Listener.Win32.Map`, Job Object, et **verrou `.run/tiger.lock` tenu par le frontal**, QEMU ne verrouillant rien
-sous Windows. Sans flottant natif, rel32 ni TSC. Le comportement Linux et macOS ne change pas. **Rien n'a tourné sur un vrai PC, ni
-même compilé à l'écriture : le rendu GL, Tiger, MTTCG sous Windows, la vitesse et le son restent à prouver.**
+sous Windows. Sans flottant natif, rel32 ni TSC. Le comportement Linux et macOS ne change pas. Compilé et éprouvé sur le runner de CI (Open
+Firmware, bus D-Bus, `Win32.Map`, image, verrou). **Rien n'a tourné sur un vrai PC : le rendu GL, Tiger, MTTCG sous Windows, la vitesse
+et le son restent à prouver.**
 
 **Quartz Extreme aux résolutions, preuve close sur les deux hôtes.** Sur le PC (EGL/NVIDIA, 03-04/11) : 66 changements de mode sans écart, matrice 8 cellules sur 8, Colin McRae depuis quatre bureaux, A/B du plugin `20261102-modes` sans perte prouvée (`docs/chantiers/qe-resolutions.md`). `POMPPC_GL_PRESENTQ` écarté sur chiffres (`docs/chantiers/presentq.md`).
 

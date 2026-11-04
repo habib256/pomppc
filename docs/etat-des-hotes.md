@@ -65,7 +65,30 @@ ou un bras témoin). Pour les défauts : reproduction avant correction et contr�
 travaux clos sont dans [CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
 L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
-## 2. PC x86-64 : état au 01/11/2026, 14 h 30 (aucune VM ne tourne : A/B PRESENTQ raté et arrêté à 14 h 20 ; `build/` et `build-fast/` à reconstruire, voir « À faire »)
+## 2. PC x86-64 : état au 04/11/2026, 6 h 20 (VM quotidienne allumée, binaire rapide, frontal ImGuiDock)
+
+**Nuit du 03 au 04/11 : lot 0.4.2 préparé, non publié** (demande de l'utilisateur : AppImage pour vieille glib et
+Windows, CI à la POM2, pas de Raspberry Pi). Ni tag ni Release.
+- **Fermé sur le PC** : QE résolutions (66 changements sans écart, matrice 8/8, `docs/chantiers/qe-resolutions.md`) ;
+  PRESENTQ écarté sur chiffres (`docs/chantiers/presentq.md`) ; `tcg/0066` validé sur x86-64 (`bench/tcg/froid-x86-0411`,
+  `docs/tcg-zone-froide-arm64.md`) ; bundle du 02/11 installé, A/B sans perte prouvée (`bench/tcg/ab/plugin-0311-*`).
+  Tests : 343 OK, 0 échec, 7 ignorés ; `--slow` : un seul échec, `bridge_probe`, disque tenu par la VM quotidienne.
+- **Pas fait, promis pour la nuit** : endurance avec le nouveau bundle, `tcg/0063` témoin, PGO réentraîné (`exec_one` et
+  `unit_texture_bound` tournent sans profil : « control flow mismatch »), x8 + 0063, base de temps. La CI a pris la nuit.
+- **AppImage** : `linux` vert en CI, plancher glibc 2.31, image `ghcr.io/habib256/pomppc-bullseye-builder` épinglée par
+  digest. Essayée depuis le paquet sur ce PC : Tiger, `backend gl`, QE, `gltest` OK. Hôte ancien, sans NVIDIA, X11, son et
+  assistant complet **non prouvés** (`docs/publier-linux.md` §5). XWayland forcé (`8e41119`) pas revu à l'œil.
+- **Vitesse du paquet** ([A], `bench/tcg/ab/generique-imgui-0411-*`) : générique +7 à +12 % en ms/image contre le rapide.
+- **Windows** : voir `docs/publier-windows.md` §5. Rien n'a tourné sur un vrai PC Windows.
+- **Décisions à l'utilisateur** : (1) la règle ci-dessus « le PC n'est pas publié tant que sa vitesse n'est pas acceptable »
+  contredit ce lot : DOOM 3 reste à 79-85 ms pour une cible de 50 ; (2) déposer l'ISO
+  `bench/iso-042/pomppc-0.4.2-guest.iso` (sha256 `a1910765…3e1da`, gravée le 04/11) en pré-publication, refaire
+  `packaging/guest-iso.lock` : sans ça un tag 0.4.2 échoue, c'est voulu ; (3) le tag.
+- **Pièges** : le QEMU du paquet n'a pas GTK, `matab.sh` exige `MATAB_FRONTEND=imgui` pour le mesurer (sinon « pas de ssh »).
+  Toute construction Windows passe sans sonde QMP par stdin (`scripts/build_qemu_qfb.sh`).
+- **Le M4 devra reconstruire QEMU** : la série a changé (`tcg/0015`, `qgpu-gl.c`), sans effet hors `_WIN32`.
+
+### État précédent, 01/11/2026, 14 h 30 (A/B PRESENTQ raté, repris depuis)
 
 **Fait le 01/11** (matinée close vers 12 h ; l'après-midi : `pgo-train.sh` et PRESENTQ, fin de
 cette liste ; la séance suivante se fait sur le M4)

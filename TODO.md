@@ -3,7 +3,7 @@
 > **Deux hôtes (PC x86-64 et Mac M4) en alternance** : l'état de chacun et ce qui y reste à faire
 > sont dans [docs/etat-des-hotes.md](docs/etat-des-hotes.md), à lire en premier.
 
-État au 03/11/2026. Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 04/11/2026 (PC : lot 0.4.2 préparé, non publié, `docs/etat-des-hotes.md` §2). Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,

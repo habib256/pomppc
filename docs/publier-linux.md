@@ -67,6 +67,12 @@ La CI prouve la **forme** (`check_appimage.sh`) et que **ça se charge et démar
 en SMP, QMP, capacités). Ses machines n'ont ni disque Tiger ni GPU. Restent, sur le PC, depuis l'AppImage et non le
 dépôt, en déplaçant `~/POMPPC` ou avec `POMPPC_DATA=` :
 
+- **Fait le 04/11/2026 sur le PC, depuis le paquet** (Ubuntu 26.04, glibc 2.43, RTX 4060 Ti, disque quotidien copié) :
+  Tiger démarre, `qgpu: backend gl`, Quartz Extreme Supported, `gltest` sans échec. Deux pièges : AppImageLauncher
+  intercepte le lancement (`APPIMAGELAUNCHER_DISABLE=1` pour un essai) ; le greffon libdecor GTK de l'hôte ne se charge
+  pas avec la glib du paquet (`g_once_init_leave_pointer`), fenêtre sans barre sous GNOME Wayland, d'où XWayland forcé
+  en mode app (`8e41119`, compilé en CI, pas encore revu à l'œil). L'assistant, le son, le pilote installé depuis le
+  CD et l'hôte ancien restent à faire, ci-dessous.
 - Tiger démarre, le pilote s'installe depuis le CD `POMPPC_GUEST`, un jeu tourne, avec **`qgpu` sur le vrai GPU** :
   `qgpu-pci: backend gl`, et ce n'est pas llvmpipe (`docs/etat-des-hotes.md`, `EGL_PLATFORM`).
 - L'**assistant complet** sous Linux : `md5sum`, `zenity`, `xdg-open`, et l'étape du combo, dont la conversion par
@@ -74,8 +80,10 @@ dépôt, en déplaçant `~/POMPPC` ou avec `POMPPC_DATA=` :
 - Le son par PulseAudio ou PipeWire, la fenêtre sous X11 **et** sous Wayland (GLFW 3.4 choisit au lancement).
 - **Un hôte ancien et un hôte sans NVIDIA** : le plancher n'est prouvé que par les symboles. Essayer sur un vrai
   Debian 11 ou Ubuntu 20.04, et si possible AMD ou Intel.
-- La vitesse : ce binaire est générique, sans `-march=native` ni PGO, et la colonne PC des notes vient du binaire
-  rapide. Mesurer pour pouvoir dire combien. Les notes annoncent « environ 10 % » d'après `README.md`.
+- ~~La vitesse~~ : mesurée le 04/11/2026 ([A], `bench/tcg/ab/generique-imgui-0411-*`, 3 parties par bras, A/B
+  entrelacé au repos, les deux bras par le frontal ImGui car le QEMU du paquet n'a pas GTK). En ms/image, générique
+  contre rapide : mb 8,70/7,87, zen 4,81/4,29, ut 39,69/35,84, d3 85,44/78,97, cmr plein écran 85,16/79,26.
+  Le générique coûte donc 7 à 12 %. Binaire pris dans l'AppImage de la répétition du 03/11, avant `f1607df`.
 
 ## 6. Ce qu'il y a dedans
 
