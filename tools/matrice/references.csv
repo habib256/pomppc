@@ -3,7 +3,7 @@
 # ici l'empreinte et la validation à l'œil (validee=oui).
 cellule,image,sha256,fichiers,octets,date,validee,note
 cmr-pe,31593,d205de3b93b2a77c3e3cc8af4840575cc1b58d5cab67456f9baa5a3fd6ea132d,101,84136260,2026-11-01,oui,créée par le tour preuve-nuit-0111-pe
-d3-fen,7240,a7b6788278187961f2ad6bb294148c4082b4094d0f25ecfe0fbdf668921fe42e,24,18011661,2026-11-01,oui,créée par le tour preuve-nuit-0111-fen
+d3-fen,8689,76e9dbe7625951486db1a536b57e8931a5501055b9b771f28d1733d84f7fa439,29,24053741,2026-11-04,oui,m4-ombres-base-0411-fen/ref-1 avec r_shadows=1
 d3-pe,6839,eeaa8860f87f4a1a7f4c6c657cc2f880bf94fcbb82eccf7337dd709f4c5e5d7d,29,35354946,2026-11-03,oui,créée par le tour qe-res-0311-pe
 mb-fen,2973,a4ab18874cae395b39dd490a3bf2c1f970430177af82709bfa6158dc31310f04,6,8082781,2026-11-01,oui,créée par le tour preuve-nuit-0111-mb
 mb-pe,2854,cbf1b0de281685f747c6d1ca22664952d05b2eea14a457d89ffff81c7b1cffb6,7,8082874,2026-11-01,oui,créée par le tour preuve-nuit-0111-pe

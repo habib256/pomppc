@@ -44,6 +44,15 @@ Les compteurs du même niveau donnent aussi 2,7 fois plus de mots de commandes e
 par image au lieu d'un, tampon plein ; attente des barrières +0,73 ms/image sur le bloc observé.
 À distinguer du travail de préparation des lots : aucun gain d'un tampon plus grand n'est encore mesuré.
 
+## STPATCH expérimental (04/11, éteint)
+
+Le prototype remplace les blocs froids ne changeant que cull/stencil par les clés canoniques
+existantes ; ni protocole ni QEMU modifiés. Preuve native différentielle et mutants,
+contrôles VM partiels du premier prototype dans [`plugin-stpatch.md`](../plugin-stpatch.md).
+La révision b1 rétablit la réservation même sans clé ; à reconstruire et valider dans Tiger.
+**Aucun gain de vitesse prouvé, aucun allumage.** CMR titre 3D présente des aplats blancs aussi
+avec STPATCH désactivé ; diagnostic de résolution en cours avant toute reprise des A/B.
+
 ## Piste proposée le 01/11 (à arbitrer par l'utilisateur)
 
 2. **Régime de compilation du plugin de l'invité.** Le plugin fait 11-28 % du vCPU selon le jeu :

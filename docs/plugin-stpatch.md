@@ -68,3 +68,33 @@ des clés ne prouve pas que supprimer cette frontière de flux serait exact.
 Ces tests ne remplacent pas la compilation Tiger, `plugmd5` à l'octet (0/1/2), les scènes de
 points/bitmap/mixte, les contrôles en jeu et l'A/B entrelacé de **mb, zen, ut, d3 et cmr**.
 Ne l'allumer qu'après preuves d'image et absence de perte sur toute la matrice, puis endurance.
+
+## Contrôles VM du premier prototype (04/11, M4)
+
+Révision `20261104-stpatch` (`f0416c02`), uniquement dans une copie du disque Tiger ;
+le disque quotidien et `disks/prebuilt` gardent le plugin `20261102-modes`.
+Les épreuves ci-dessous précèdent b1 et ne valent pas validation de b1.
+
+- `bench/plugin/ombres-0411/plugmd5-tailles` : **69 images identiques à l’octet** aux modes
+  0/1/2, contexte local accéléré POMPPC, tailles natives de chaque scène. 68 scènes passent
+  toutes leurs assertions ; le témoin λ2 de `tex14` échoue identiquement aux trois modes et
+  avec le plugin d’avant STPATCH (même MD5 d’image `906383cc967bb3c18ba0755b0bca7ec4`).
+  Le journal strict conserve ses trois erreurs d’assertion ; aucune différence d’image.
+  Les essais précédents sans image (pbuffer distant) ou forcés en 256² sont écartés.
+- `bench/tcg/ab/m4-stpatch-preuve-0411-fen/opt-1` : mb, zen, ut et d3 en fenêtre verts,
+  zéro repli et zéro écart rejeu/VM. D3 conserve `r_shadows=1`.
+- `bench/tcg/ab/m4-stpatch-controle-0411-d3/verif-1` : D3 vert en mode 2,
+  **1 225 512 candidats contrôlés, zéro divergence**.
+- La référence D3 du M4 avec ombres est celle du témoin
+  `m4-ombres-base-0411-fen/ref-1`, regardée et validée. L’ancienne sans ombres est conservée
+  sous `bench/matrice/ref/d3-fen-sans-ombres-0111` ; ne pas comparer les deux qualités.
+- **CMR reste ouvert** : l’utilisateur a signalé des aplats blancs au titre 3D en 1920×1080.
+  Reproduits aussi en mode 0, captures `bench/plugin/ombres-0411/cmr-ref0-pilotage` ;
+  le premier vidage concernait le menu DÉFIS et le suivant un film, aucun ne localise le
+  défaut 3D. Essai de résolution en cours : les notes montrent des refus `COPY_TEX` à
+  1920×1080 et `fallback tex-size 780/438`, à distinguer de STPATCH.
+
+**Aucun A/B de vitesse du prototype n’a encore été lancé**, aucun gain en ms revendiqué.
+Les temps des épreuves ne sont pas des A/B au repos. Contrôle général avant b1 :
+522 OK, 0 échec, 5 ignorés depuis Terminal (`.run/tests-stpatch-terminal-0411.log`).
+Après b1, l’épreuve native ciblée passe à nouveau avec ses six mutants.

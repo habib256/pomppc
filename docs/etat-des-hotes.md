@@ -276,6 +276,26 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   Travail committé sur `main` en local, arbre propre après commit ; utilisateur invité à refaire
   `gh auth login -h github.com`, puis pousser. Aucun tag ni Release créé.
 
+### Suite du 04/11, 23 h 16 : récupération du coût des ombres, contrôle CMR en cours
+
+- **STPATCH prototype éteint par défaut**, `docs/plugin-stpatch.md` : preuves natives et
+  mutants ; premier prototype compilé dans Tiger sur copie isolée, 69 images plugmd5 égales,
+  mb/zen/ut/d3 verts, mode 2 D3 à 1 225 512 candidats sans divergence. **Aucun A/B de vitesse**.
+  b1 rétablit une frontière de flux omise pour les candidats sans clé ; natif passé,
+  compilation et preuves VM b1 restent à faire. QEMU et kext inchangés.
+- **CMR signalé défectueux par l’utilisateur au titre 3D**, aplats blancs en 1920×1080.
+  Reproduit en mode 0 ; diagnostic de résolution prioritaire. Essai 800×600 en cours dans
+  la copie `bench/tcg/ab/m4-d3-disque-0411/disques/actuel/disks/tiger.qcow2`, frontal natif.
+  Le disque quotidien n’a reçu aucun plugin expérimental ; il est arrêté pendant cet essai.
+  Pas de nouvelle référence CMR validée sur une image défectueuse.
+- **Référence D3 M4 renouvelée avec ombres**, témoin `m4-ombres-base-0411-fen/ref-1`,
+  ancienne sans ombres conservée ; seul `references.csv` modifié, pas celui du PC.
+- Contrôle général depuis Terminal : **522 OK / 0 échec / 5 ignorés** ; correctif Bash 3.2
+  du test d’empaquetage Windows committé séparément. L’ancien échec POLLNS sous service
+  ne se reproduit pas depuis Terminal ; ne pas lancer les bancs depuis le service.
+- Push toujours à terminer après réauthentification. Preuves locales sous
+  `bench/plugin/ombres-0411` et `bench/tcg/ab/m4-stpatch-*`.
+
 ### État précédent, 03/11/2026, 16 h 55
 
 **Après-midi du 03/11, demande de l'utilisateur : suivre le TODO jusqu'à 16 h 30.**
