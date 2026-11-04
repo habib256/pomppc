@@ -162,3 +162,20 @@ Aucun patch n'est encore installé sur le disque quotidien à ce stade.
 
 L'outil et le jeu original restent séparés du pilote : aucune instruction ARB TEX n'est
 réinterprétée par POMPPC et aucun nom de shader n'entre dans l'émulateur.
+
+## Lanceur Tiger pour l'ombre déjà installée
+
+Copier `tools/guest/cmr-track-projection.command` sur le Bureau de Tiger, le rendre exécutable
+(`chmod +x ...`), puis le lancer par double clic. Il attend l'original
+`$HOME/Desktop/Colin_McRae_Ready_Mac-1.dmg` et une ombre **déjà préparée et vérifiée** à
+`$HOME/Library/Application Support/POMPPC/cmr-track-projection.shadow`.
+Il n'installe aucun asset et ne crée pas d'ombre. Il ouvre le jeu uniquement si `shaders.big`
+porte le MD5 **5761b6eb3081cf0f10d7934df4a98045**, calculé sur l'archive TXP valide de SHA-256
+f9fe55f4…813e4f6. Un volume déjà correct est directement ouvert ; seul l'original connu
+(MD5 51a6cd53223114f59bd8c81ecff86938) peut être démonté, sans forçage. Une archive montée
+inconnue est laissée en place et refusée. Si nécessaire, ce démontage normal
+précède `hdiutil attach -shadow` au point `/Volumes/Colin McRae Ready Mac`, puis le fichier
+est vérifié à nouveau. Jeu lancé sur une autre archive ou volume occupé : message et arrêt,
+jamais de processus tué ni de démontage forcé. Le DMG original, le pilote et l'émulateur
+restent inchangés. Syntaxe `/bin/sh` et Bash vérifiée, ShellCheck propre ; essai du lanceur
+dans Tiger à faire après installation de l'ombre stable.
