@@ -1,5 +1,11 @@
 # M4, nuit du 01 au 02/11 : rattrapage et profils
 
+**Précision du 04/11 : DOOM 3 se mesurait ici sans ombres (`r_shadows=0`).** La copie immuable
+du disque du 01/11 et l'absence de `RB_StencilShadowPass` dans le profil le confirment.
+Le réglage courant est `r_shadows=1`, vers 37 ms/image : le comparer aux 29 ms de cette page
+sans reprendre ce réglage mélange deux qualités de rendu. Voir
+[`d3-macos272.md`](chantiers/d3-macos272.md), diagnostic du 04/11.
+
 ## 1. A/B de PACKBITS et du chemin des surfaces non simples
 
 [A] Mesures sur cet hôte Mac M4, Darwin arm64, du 01/11 à 23 h 36 au 02/11 à

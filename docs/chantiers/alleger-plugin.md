@@ -27,6 +27,23 @@ Actif sur les deux hôtes : chaque pourcent gagné vaut sur x86 et sur arm64 san
   `POMPPC_GL_QE_NONSIMPLE=0`, bande toujours juste). **Fermeture :** plugin sous 20 % du vCPU
   sur cmr et d3, aucun jeu en perte, matrice verte.
 
+## Ombres de DOOM 3 : piste mesurée le 04/11 sur le M4
+
+[A] À réglage unique sur la copie actuelle : `r_shadows=0` → `1`, **29,221 → 37,039 ms/image**,
+zéro repli (`bench/tcg/ab/m4-d3-ombres-0411`, une partie par bras). Les anciens 29 ms étaient
+sans ombres ; l'écart est expliqué, ce n'est pas une accélération obtenue en les désactivant.
+La qualité courante est conservée avec `r_shadows=1`.
+
+Le profil invité avec ombres montre `RB_StencilShadowPass` dans 114/863 échantillons du fil
+principal (13,2 %), dont **65/114 via `geom_draw_client`**. On y voit `geom_draw_native`,
+`va_scan_idx`, copies, `send_state`, `sync_to_host` et `geom_send_all`. Piste : alléger ce
+chemin géométrique **générique**, sans modifier le rendu des ombres. Pas de gain récupérable
+encore prouvé ; les obligations restent `plugmd5`, images et A/B de toute la matrice.
+Profils hôte et limites des estimations dans [`d3-macos272.md`](d3-macos272.md).
+Les compteurs du même niveau donnent aussi 2,7 fois plus de mots de commandes et deux vidages
+par image au lieu d'un, tampon plein ; attente des barrières +0,73 ms/image sur le bloc observé.
+À distinguer du travail de préparation des lots : aucun gain d'un tampon plus grand n'est encore mesuré.
+
 ## Piste proposée le 01/11 (à arbitrer par l'utilisateur)
 
 2. **Régime de compilation du plugin de l'invité.** Le plugin fait 11-28 % du vCPU selon le jeu :

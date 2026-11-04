@@ -9,6 +9,13 @@ de commit et dans `docs/`.
 
 ## 0.4.2 (non publiée)
 
+**M4, écart de vitesse de DOOM 3 expliqué le 04/11.** Les 29 ms du 02/11 étaient sans ombres,
+les 37 ms du 03/11 avec `r_shadows=1`. Copie du disque du 01/11 sous macOS 27.2 : 29,36 ms ;
+sur le disque actuel et le même QEMU reconstruit, seul ce réglage donne 29,22 puis 37,04 ms,
+zéro repli. Référence courante : 37 ms avec ombres ; aucun réglage de production modifié.
+Le soupçon macOS et l'exclusion initiale des réglages sont retirés
+([preuve](docs/chantiers/d3-macos272.md)).
+
 **AppImage Linux x86-64, construite en CI.** `POMPPC-0.4.2-x86_64.AppImage`, plancher glibc 2.31, dans une image
 Debian 11 épinglée par digest (`packaging/linux/`, `.github/workflows/release.yml`, `docs/publier-linux.md`). Données dans
 `~/POMPPC`, pilote GL de l'hôte, RUNPATH et pas de `LD_LIBRARY_PATH`. L'assistant de premier lancement est porté sous
@@ -98,6 +105,9 @@ DOOM 3 28,9 contre 48,0, UT2004 19,3 contre 25,3, Zenerchi 2,6 contre 4,3, Colin
 1920×1080 contre 50,5 en 1024×768. Dernier tour complet de la matrice : 17 vertes sur 17 le 28/10 ;
 cinq jeux le 02/11 au matin, sans le correctif des résolutions du soir (journal de
 `docs/quartz-extreme.md`). Détail ci-dessous.
+
+Précision du 04/11 : le relevé DOOM 3 du 02/11 ci-dessus avait `r_shadows=0` ; le réglage
+courant `r_shadows=1` donne 37 ms. Voir le diagnostic dans la section 0.4.2.
 
 - **Quartz Extreme à toutes les résolutions, 02/11 soir.** Passer en 1920×1080 donnait un écran
   rayé, et le défaut revenait à chaque démarrage : la VRAM restait mappée à la taille du mode de

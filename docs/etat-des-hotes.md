@@ -62,7 +62,7 @@ preuve d'équivalence (`plugmd5` à l'octet, `x-*-verify`, mutants) et A/B entre
 égale, hôte au repos, sur **toute la matrice** (mb, zen, ut, d3, cmr) : un levier n'est allumé
 que s'il ne perd sur aucun jeu ; un écart sous 3 % sur trois parties ne prouve rien (six parties
 ou un bras témoin). Pour les défauts : reproduction avant correction et contrôle après. Les
-travaux clos sont dans [CHANGELOG.md](CHANGELOG.md), les études détaillées dans `docs/`.
+travaux clos sont dans [CHANGELOG.md](../CHANGELOG.md), les études détaillées dans `docs/`.
 L'ancien tableau par domaine : `docs/archive/todo-par-domaines-2026-09-27.md`.
 
 ## 2. PC x86-64 : état au 04/11/2026, 15 h 05 (VM quotidienne allumée, binaire rapide au profil du 31/10, frontal ImGuiDock ; suite sur le M4)
@@ -240,12 +240,50 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 03/11/2026, 16 h 55 (preuve QE faite, frontal corrigé, aucune VM ne tourne ; suite sur le PC)
+## 3. Mac M4 : état au 04/11/2026, 21 h 24 (écart DOOM 3 expliqué ; VM quotidienne sous ImGuiDock ; push bloqué par l'authentification)
+
+**Reprise du 04/11 au soir, priorité DOOM 3 du TODO.**
+
+- **Chantier clos : 29 → 37 ms expliqué par `r_shadows=0` → `1`**, et non par une régression macOS démontrée
+  (`docs/chantiers/d3-macos272.md`). Sous macOS 27.2 : copie du disque immuable du 01/11 à 29,361 ms,
+  copie actuelle à 37,349 ms avec le paquet 0.4.1 ; sur la copie actuelle et le QEMU reconstruit,
+  seul `D3_SET=r_shadows=0` puis `=1` donne **29,221 puis 37,039 ms**. Quatre parties, zéro repli,
+  deux captures après profils regardées. **Référence courante : 37 ms avec ombres activées.**
+  Les anciens profils à 29 ms étaient sans ombres ; TODO, profils et CHANGELOG précisés.
+- **QEMU reconstruit depuis `fd78c51`**, `.run/build-reprise-0411.log`, capacités complètes,
+  SHA-256 `d6e6e3e2caf092f66…`. Aucun levier supplémentaire allumé, aucun fichier de `patches/`
+  modifié ici, pas de nouvelle installation du kext ou du plugin.
+- **Piège du contexte de lancement** : depuis le service des outils, QEMU était à `PRI=4` et
+  très lent, avec les deux binaires ; depuis le Terminal, application reconnue et vitesse normale.
+  Les deux tentatives lentes sont conservées mais ne fournissent aucun temps de niveau.
+  Reprendre les A/B **depuis le Terminal**, écran réveillé. Le mécanisme fin reste [F], ne pas l'appeler App Nap.
+- **Défaut du banc reproduit, à corriger** : avec un `DISK` explicite, `pgrep -f` peut choisir le
+  shell parent pour le profil hôte et l'attente du bureau. Profils hôte de `m4-d3-terminal-0411` = bash,
+  écartés ; pour l'A/B isolé, attente fixe et sélection exacte du QEMU via `POMPPC_PERF_CMD`, PID vérifié.
+  Procédure et fermeture dans `docs/chantiers/metrologie.md`.
+- **État final** : campagnes arrêtées proprement, essais sur copies isolées ; VM quotidienne relancée
+  depuis le Terminal par `matab.sh --restore`, ImGuiDock et QEMU vivants après la fin du lanceur,
+  bureau regardé et SSH contrôlé à 21 h 18. Kext GPU et Fsqrt chargés, `r_shadows=1` conservé.
+  Aucun verrou supprimé. Contrôles de cette séance : capacités QEMU, quatre tours de vitesse,
+  deux captures et cohérence des documents ; aucune nouvelle matrice complète ni endurance revendiquée.
+- **Suite utile sur ce M4** : A/B ImGuiDock contre natif et résolutions (`performances-resolution.md`),
+  puis avis d'ombre actif / plugin. Le doute sur les 29/37 ms ne bloque plus ces comparaisons.
+  À la remarque de l'utilisateur sur les +8 ms : profils comparés, passe stencil 13,2 % du fil
+  principal, 65/114 échantillons de cette passe dans `geom_draw_client`. Piste géométrique générique
+  ajoutée à `alleger-plugin.md`, avec les ombres conservées ; aucune économie récupérable encore prouvée.
+- **Push à terminer après réauthentification** : `git push origin main` échoue sur les identifiants
+  HTTPS, `gh auth status` indique un jeton invalide ; `ssh -T git@github.com` refuse la clé publique.
+  Travail committé sur `main` en local, arbre propre après commit ; utilisateur invité à refaire
+  `gh auth login -h github.com`, puis pousser. Aucun tag ni Release créé.
+
+### État précédent, 03/11/2026, 16 h 55
 
 **Après-midi du 03/11, demande de l'utilisateur : suivre le TODO jusqu'à 16 h 30.**
 - **Preuve QE aux résolutions : faite sur le M4** (`docs/chantiers/qe-resolutions.md`) : 16 cellules vertes sur 16, Colin McRae depuis quatre bureaux, A/B du plugin `20261102-modes` sans perte. Neuf références refaites et regardées.
 - **Frontal : plantage corrigé** (`9f7788b`, non publié) : lancé écran du Mac éteint, `pomppc` mourait à la première image, **0.4.1 touchée**. Correctif de version à décider par l'utilisateur.
-- **DOOM 3 à 37 ms/image au lieu de 29 sur ce M4** depuis le 03/11, macOS 27.2 installé à 12 h 48 ; cause non établie, plugin, binaire, QE, son, attente, QoS et réglages du jeu écartés (`docs/chantiers/d3-macos272.md`). **Ne pas comparer d3 aux chiffres d'avant.**
+- **DOOM 3 à 37 ms/image au lieu de 29 sur ce M4** depuis le 03/11 : le soupçon macOS 27.2 et
+  l'exclusion des réglages étaient erronés, corrigés le 04/11 ci-dessus (`docs/chantiers/d3-macos272.md`).
+  **Ne comparer qu'à `r_shadows` égal.**
 - **A/B ImGuiDock contre natif : pas fait**, les premières parties tournaient sans frontal (`docs/chantiers/performances-resolution.md`).
 - **Pièges :** écran éteint, mb-fen 8,5-9 ms contre 6,2-6,9 : allumer avant de mesurer (`caffeinate -u -t 3`, `caffeinate -d` seul ne réveille pas). `tools/tcg/matab.sh` gagne `MATAB_APRES`. Le disque quotidien démarre en **1024×768×16** (préférences du 02/11 à 18 h 51) ; le bureau en 32 bits se règle pour la session par `/var/tmp/qe0311/setmode` (invité du M4 seulement). Kext et plugin neufs reposés, empreintes vérifiées ; copies des deux bras dans `/var/tmp/bras0311/` de l'invité.
 - Aucun fichier de `patches/` touché depuis `9702c26`. `tests/run-all.sh` après le correctif du frontal : 485 OK, 0 échec, 4 ignorés. `bench/` reste local : les preuves citées ne suivent pas sur le PC.
@@ -595,11 +633,10 @@ personnalité « auto » le suit). `tcg/0057`–`0059`, `0064`–`0067` compilé
 options éteintes. `x-tcg-cold` est disponible sur arm64 système depuis `0066`,
 **éteint par défaut sur le M4** ; attente progressive via `POLLNS=3`, éteinte aussi.
 
-**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit en dernier le 02/11 à 23 h 36
-(`usbhid/0002` et `guest-driver`, en plus du cœur qgpu de 17 h 40 et de la série TCG du matin),
-série jusqu'à `0059` et `0064`–`0067`, correctif de contrat de 0058 ; empreintes
-et preuves dans le bilan du matin ci-dessus. Kext du 02/11 et plugin
-`20261102-modes` (soir).
+**Binaire et VM quotidienne** : `~/src/qemu/build` reconstruit le 04/11 vers 20 h 29,
+SHA-256 `d6e6e3e2caf092f66…`, série actuelle jusqu'à `0059` et `0064`–`0067`, `usbhid/0002`,
+`guest-driver` et port Windows du cœur qgpu (hors chemin Apple). Aucun levier nouveau.
+Kext du 02/11 et plugin `20261102-modes` conservés ; VM quotidienne restaurée le 04/11 à 21 h 18.
 
 **Fait le 30/10**
 - **Émulateurs voisins, A/B au repos** (`docs/tcg-g4.md` §42, 4 parties par bras, mb zen ut
@@ -639,6 +676,9 @@ et preuves dans le bilan du matin ci-dessus. Kext du 02/11 et plugin
 - Outil : `/var/tmp/pomppc-env` passe les variables `POMPPC_*` au WindowServer.
 
 **Pièges du M4**
+- Lancement d'un banc depuis le service des outils : priorité très basse observée le 04/11 ;
+  **lancer depuis le Terminal** et vérifier le vrai PID QEMU. Un `DISK` explicite dans la ligne
+  du shell peut aussi tromper le `pgrep -f` des profils (`chantiers/metrologie.md`).
 - `matab.sh --restore` lance la VM sous ImGuiDock, les parties de `matab.sh` sous le frontal
   natif : la résolution des jeux en plein écran en dépend (1920×1080 contre 1024×768).
 - Un frontal ImGuiDock resté ouvert après l'arrêt de sa VM tourne à 60 % d'un cœur et double
@@ -701,12 +741,12 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 
 ## 5. Référence validée
 
-Repères au 03/11 ; le détail de chaque hôte est aux §2 et §3.
+Repères au 04/11 ; le détail de chaque hôte est aux §2 et §3.
 
 | Élément | État |
 |---|---|
 | Protocole / ABI | GL **v22**, transport kext **v19** ; capacités ajoutées sans changer de version (`TEX_PRESENT`, `TEX_READBACK_ROWS`, …) |
-| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit en dernier le 02/11 à 23 h 36, série incluant `0066/0067` et `usbhid/0002`) |
+| QEMU | 11.1.2 + série `patches/` ; PC : `~/src/qemu/build-fast` (PGO du 31/10, -O3, -march=native ; le profil avec cmr du 01/11 attend son recontrôle dans `build-fast-pgo0111cmr/`) et `build/` (référence) ; M4 : `~/src/qemu/build` (reconstruit le 04/11 vers 20 h 29, `d6e6e3e2caf092f66…`, série actuelle incluant `0066/0067`, `usbhid/0002` et le port Windows de qgpu) |
 | Défauts TCG | PC : série jusqu'à `0056` (zone froide) ; M4 : série du PC jusqu'à `0052` (avec `0037`-`0039`) ; `0057`-`0059`, `0064`-`0067` compilés sur le M4, options éteintes ; zone froide arm64 disponible via `0066`. PC : reconstruire référence + rapide depuis `0066/0067` et `usbhid/0002`, puis valider le finaliseur de pools. `0060`-`0063` éteints, non nommés |
 | Invité | Tiger 10.4.11 ; PC : kext du 01/11 (méthode 6, surface non simple) et plugin `20261101-ombre`, ceux du 02/11 à installer (`docs/etat-des-hotes.md` §2) ; M4 : kext du 02/11 et plugin `20261102-modes`, VM quotidienne depuis le 02/11 à 18 h 16 (anciens dans `/var/tmp/avant-0211/` de l'invité) |
 | Matrice | PC : `references-linux.csv`, 8 références toutes validées à l'œil (d3-fen et d3-pe le 30/10, `a89515b` ; cmr-pe le 01/11), 5 cellules dans les A/B (mb, zen, ut, d3 en fenêtre, cmr plein écran **en course** depuis `6054367`) ; M4 : `references.csv` (jamais touché par le PC), 17/17 vertes le 28/10 ; le 01/11, mb et d3 fen/pe vertes avec le nouveau bundle, cmr-pe reprise (faux reflet, `docs/re/cmr-rendu-vers-texture.md` §7), six références renouvelées et validées à l'œil dans la nuit, six preuves vertes avec `0066/0067` le 02/11 |

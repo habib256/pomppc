@@ -4,6 +4,15 @@
 
 Questions de mesure encore ouvertes ; l'hôte figure entre crochets ou dans l'index.
 
+- [ ] **[Banc] PID du profil hôte avec un `DISK` explicite** (reproduit sur le M4 le 04/11) :
+  le `pgrep -f "qemu-system.*disks/tiger.qcow2"` de `matrice.py` et de `matab.sh` peut retenir
+  le shell parent, dont la ligne contient les arguments du bras. Dans
+  `bench/tcg/ab/m4-d3-terminal-0411`, les profils hôte sont ceux de **bash**, donc inutilisables ;
+  les profils invités et les temps restent distincts. **Fermeture :** sélection du vrai QEMU,
+  contrôle du nom de l'exécutable dans le profil et test négatif avec un shell parent contenant
+  le chemin du disque. Pour l'essai isolé des ombres : `MATAB_REPOS=fixe` et
+  `POMPPC_PERF_CMD` sélectionnant l'unique `pgrep -x qemu-system-ppc`, PID conservé à côté du profil.
+
 - [ ] **[Métrologie] A/B de l'attente** : `QGPU_GL_FLUSH` et `POMPPC_GL_QFLUSH` allumés le 01/10
   sans l'A/B prévu. `tools/matrice/ab-attente.sh 6 qflush` sur hôte au repos ; éteindre si une
   cellule régresse.

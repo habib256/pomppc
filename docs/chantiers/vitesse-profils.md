@@ -16,4 +16,5 @@ Synthèse commune aux chantiers de vitesse. Les chiffres courants sont en tête 
   quand les leviers TCG le laissent neutre ou le ralentissent).
 - Le fil de rendu de l'hôte (`qgpu-render`) occupe 55 % d'un cœur sur mb, 41 % sur zen, 25 %
   sur d3 (≈ 20 ms par image). Sur le PC, l'invité ne l'attend pas (0,1-3 ms/image) ; sur le M4,
-  où d3 est à 29 ms, il peut devenir le chemin critique : à mesurer.
+  où d3 était à 29 ms **sans ombres** (37 ms avec `r_shadows=1`, diagnostic du 04/11),
+  il peut devenir le chemin critique : à mesurer à réglages égaux.
