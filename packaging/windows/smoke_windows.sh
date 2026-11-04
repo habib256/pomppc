@@ -59,9 +59,16 @@ ofw() { # la machine tourne quelques secondes, puis QMP répond
   local q=$!
   sleep 6
   if { exec 3<>/dev/tcp/127.0.0.1/44555; } 2>/dev/null; then
-    printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"query-status"}' '{"execute":"quit"}' >&3
+    # quit seulement après la réponse : [A] CI du 04/11/2026, le socket se ferme par un reset sous
+    # Windows, qui peut jeter ce qui n'a pas encore été lu.
+    printf '%s\n' '{"execute":"qmp_capabilities"}' '{"execute":"query-status"}' >&3
     local l
-    while IFS= read -r -t 20 l <&3; do printf '%s\n' "$l" | tr -d '\r'; done
+    while IFS= read -r -t 20 l <&3; do
+      printf '%s\n' "$l" | tr -d '\r'
+      case "$l" in *'"status"'*) break ;; esac
+    done
+    printf '%s\n' '{"execute":"quit"}' >&3
+    while IFS= read -r -t 20 l <&3; do printf '%s\n' "$l" | tr -d '\r'; done 2>/dev/null
     exec 3<&-
   else
     echo "QMP injoignable"
@@ -75,6 +82,7 @@ contient "$SORTIE" '"status": "running"' || printf '%s\n' "$SORTIE"
 SORTIE="$(ofw -M mac99,via=pmu -cpu g4 -m 512 -smp 2 -accel tcg,thread=multi \
               -bios "$(cygpath -m "$PAQ/patches/smp-mac99/openbios-smp-screamer.elf")")"
 verifie "mac99 SMP, MTTCG, OpenBIOS unifié" contient "$SORTIE" '"status": "running"'
+contient "$SORTIE" '"status": "running"' || printf '%s\n' "$SORTIE"
 if contient "$SORTIE" "not yet converted to MTTCG"; then verifie "MTTCG déclaré sur la cible 32 bits" false; fi
 
 echo "== le bus, le listener, la surface, l'image (bridge_probe contre Open Firmware)"
