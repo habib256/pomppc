@@ -25,9 +25,10 @@ PAQ="$T/paquet"
 cp -R "$R" "$PAQ"
 cp "$B/bridge_probe.exe" "$B/launchplan_test.exe" "$PAQ/"
 
-export PATH="/c/Windows/System32:/c/Windows:/usr/bin"
-# /usr/bin reste pour timeout, grep, sleep, mais les .exe natifs n'y trouvent aucune DLL de MinGW :
-# /ucrt64/bin n'est plus dans le PATH.
+export PATH="/usr/bin:/c/Windows/System32:/c/Windows"
+# /usr/bin d'abord : [A] CI du 04/11/2026, System32 a son propre timeout.exe, qui refuse cette syntaxe,
+# et son find et son sort. Les .exe natifs n'y trouvent aucune DLL de MinGW (/ucrt64/bin n'est plus
+# dans le PATH).
 
 echoues=0
 verifie() { # verifie "libellé" commande…
@@ -92,6 +93,8 @@ verifie "le verrou existe" test -f "$DATA/.run/tiger.lock"
 SECOND="$(timeout 60 "$PAQ/bridge_probe.exe" "$LANCEUR" 5 2>&1 | tr -d '\r')"
 verifie "le second est refusé" contient "$SECOND" "already running"
 wait "$PREMIER" || true
+echo "-- premier.log"; tr -d '\r' < "$T/premier.log" | tail -20
+echo "-- second"; printf '%s\n' "$SECOND" | tail -5
 verifie "le fichier du verrou reste après la fin" test -f "$DATA/.run/tiger.lock"
 unset PROBE_PERSISTENT
 
