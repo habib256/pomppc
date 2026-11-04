@@ -9,6 +9,10 @@ de commit et dans `docs/`.
 
 ## 0.4.2 (non publiée)
 
+**Contrôle du paquet Windows sur le Mac.** Le script accepte Bash 3.2, livré avec macOS :
+conversion des noms de DLL par `tr` plutôt que `${nom,,}` (Bash 4). Les onze témoins positifs
+et négatifs passent sur le M4 ; règles du paquet inchangées.
+
 **M4, écart de vitesse de DOOM 3 expliqué le 04/11.** Les 29 ms du 02/11 étaient sans ombres,
 les 37 ms du 03/11 avec `r_shadows=1`. Copie du disque du 01/11 sous macOS 27.2 : 29,36 ms ;
 sur le disque actuel et le même QEMU reconstruit, seul ce réglage donne 29,22 puis 37,04 ms,

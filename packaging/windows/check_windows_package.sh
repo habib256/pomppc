@@ -22,13 +22,13 @@ INTERDIT='^(opengl32|glu32|d3d[0-9].*|dxgi|ig.*icd.*|nvoglv.*|atio.*|libegl|libg
 defauts_dll() { # defauts_dll <fichier imports : « module dll » par ligne> <fichier présentes>
   local mod dll bas
   while read -r mod dll; do
-    bas="${dll,,}"
+    bas=$(printf '%s' "$dll" | LC_ALL=C tr '[:upper:]' '[:lower:]')
     if grep -qix -- "$dll" "$2"; then continue; fi
     if [[ "$bas" =~ $SYSTEME ]]; then continue; fi
     echo "DLL ni au paquet ni à Windows : $dll (demandée par $mod)"
   done < "$1"
   while read -r dll; do
-    bas="${dll,,}"
+    bas=$(printf '%s' "$dll" | LC_ALL=C tr '[:upper:]' '[:lower:]')
     if [[ "$bas" =~ $INTERDIT ]]; then echo "interdit au paquet : $dll"; fi
   done < "$2"
 }
