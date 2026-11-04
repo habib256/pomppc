@@ -7,7 +7,7 @@ Chemins relatifs à la racine du dépôt. Les chantiers ouverts : `docs/chantier
 | Ce qui est fini (lots, versions du protocole, mesures) | `CHANGELOG.md` |
 | Vitesse sur le PC x86-64 (profils, leviers, chiffres) | `docs/vitesse-doom3-x86.md`, `docs/binaire-rapide-x86.md` (PGO, empreinte de la série) |
 | Parité et vitesse sur le M4 | `docs/parite-m4-2510.md`, `docs/parite-arm64-0031-0035.md`, `docs/jit-m4-2026-10-05.md`, `docs/profil-m4-0211.md`, `docs/tcg-zone-froide-arm64.md`, `docs/re/ut-attente-m4.md`, `docs/etat-des-hotes.md` §3 |
-| Allègement du plugin de l'invité | `docs/plugin-allegement.md`, `docs/d3-plugin-x86.md` |
+| Allègement du plugin de l'invité | `docs/plugin-allegement.md`, `docs/d3-plugin-x86.md`, `docs/plugin-stpatch.md` (prototype de deltas cull/stencil) |
 | Processeur émulé : relevés, patches, A/B | `docs/tcg-g4.md`, `docs/flottant-rapide.md`, `docs/ppc32-mttcg.md`, `docs/anatomie-ppc32.md`, `docs/smp-coeurs.md` |
 | Matrice de jeux (A3) : lancer, preuves, références, pièges | `docs/matrice-jeux.md` |
 | Banc d'endurance, gels et épreuves de fiabilité | `docs/endurance.md`, `docs/gel-doom3-baddisplay.md`, `docs/epreuve-gpu-bloque.md`, `docs/metrologie-boot.md` |

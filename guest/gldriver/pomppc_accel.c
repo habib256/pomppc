@@ -136,6 +136,7 @@
 #include "qgpu_proto.h"
 #include "pomppc_gld.h"
 #include "pomppc_qgpu.h"
+#include "pomppc_stpatch.h"
 
 /* v18 — DRAW_NATIVE : dessin depuis des tampons hôte BRUTS (copies telles
    quelles des VBO de l'application), sans empaquetage par l'invité. Contrat
@@ -173,7 +174,7 @@
 #define QGPU_NATTR_GEN(k)       QGPU_NA_GEN(k)
 #define QGPU_NATTR_NORMALIZED   QGPU_NA_NORMALIZED
 #endif
-#define POMPPC_PLUGIN_REV "20261102-modes"
+#define POMPPC_PLUGIN_REV "20261104-stpatch"
 /* A4 : bloc d'état allumé par défaut depuis l'A/B d'intégration du 30/09
    (bench/matrice/ab-geo-a4tout) ; POMPPC_GL_STATEBLK=0 l'éteint */
 #define STATEBLK_DEFAULT 1
@@ -917,6 +918,12 @@ typedef struct PCtx {
        c'est le device qui les tire de STATE_BLOCK et les compare à son état.
        Seules les clés des unités et des programmes restent exactes. */
     int            st_host;
+    /* STPATCH : dernier bloc froid observé. Toute perte/écriture froide hors
+       send_state invalide le snapshot ; la génération protège reserve(), qui
+       peut rendre G.mu et laisser un autre fil changer cette référence. */
+    uint32_t       stp_snap[POMPPC_STPATCH_WORDS];
+    unsigned long  stp_gen;
+    int            stp_valid;
     /* A4 : verdict des unités de la dernière série de clés chaudes. Même
        contenu (mêmes PTex, environnement, combinaison), même époque des
        textures (vd_epoch : un qtex ne bouge pas sans elle) et p->st valide :
@@ -1453,6 +1460,10 @@ static struct {
     int             stcheck;            /* lot 4 : POMPPC_GL_STATECHECK */
     int             stblk;              /* A4 : POMPPC_GL_STATEBLK (bloc d'état) */
     int             stblk_check;        /* A4 : vecteur de contrôle joint (STATECHECK) */
+    int             stpatch;            /* 04/11 : POMPPC_GL_STPATCH, défaut 0, 2 = contrôle */
+    unsigned long   n_stp_take, n_stp_keys, n_stp_full, n_stp_chk, n_stp_diff;
+    unsigned long   n_stp_race, n_stp_told;
+    unsigned long   n_stp_cache, n_stp_header, n_stp_other, n_stp_enum;
     int             wlunif;             /* 30/09 : POMPPC_GL_WLUNIF — le bit
                                            « glUniform » (+0x0c 0x04000000) est
                                            neutre pour la liste blanche et pour
@@ -3023,7 +3034,13 @@ void pomppc_backend_init(void)
                           (G.q.caps & QGPU_CAP_STATE_BLOCK) &&
                           !getenv("POMPPC_GL_NOCULL") && !getenv("POMPPC_GL_FLIPFACE") &&
                           !getenv("POMPPC_GL_GLYPHTEST");
-                G.stblk_check = G.stblk && G.stcheck;
+                e = getenv("POMPPC_GL_STPATCH");
+                G.stpatch = G.stblk && e && e[0] && e[0] != '0' ?
+                            (e[0] == '2' ? 2 : 1) : 0;
+                /* =2 : la voie complète reste envoyée, avec son vecteur de
+                   contrôle ; les deltas qu'on aurait envoyés sont comparés
+                   aux clés froides exactes tenues dans p->st. */
+                G.stblk_check = G.stblk && (G.stcheck || G.stpatch == 2);
                 /* 30/09 : glUniform (Nexuiz GLSL, 154 298 dispatches
                    recalculés sur 173 572) — le bit +0x0c 0x04000000 ne fait
                    plus recalculer ; ce qu'il peut changer au verdict (unités
@@ -3160,13 +3177,13 @@ void pomppc_backend_init(void)
                     "texmemo=%d stskip=%d statecheck=%d wlunif=%d stateblk=%d "
                     "rawsane=%d natshm=%d idxlazy=%d idxvec=%d dispone=%d unitvd=%d texpage=%d "
                     "zones=%d (flux %lu Kio) dispfast=%d progmemo=%d mtxdirty=%d stunit=%d "
-                    "displock=%d hotinline=%d uvwide=%d packbits=%d\n",
+                    "displock=%d hotinline=%d uvwide=%d packbits=%d stpatch=%d\n",
                     G.q.version, G.q.caps, G.v10, G.lazy, G.native, G.native_range,
                     G.count, G.verdict, G.vcheck, G.wl, G.texmemo, G.stskip, G.stcheck,
                     G.wlunif, G.stblk + G.stblk_check, G.rawsane, G.natshm,
                     G.idxlazy, G.idxvec, G.dispone, G.unitvd, G.texpage,
                     G.zones, G.zl_cmd_bytes >> 10, G.dispfast, G.progmemo, G.mtxdirty,
-                    G.stunit, G.displock, HOTINLINE_DEFAULT, G.uvwide, G.packbits);
+                    G.stunit, G.displock, HOTINLINE_DEFAULT, G.uvwide, G.packbits, G.stpatch);
             /* 21/10 : adresse d'un symbole exporté, pour nommer les blocs d'un
                profil d'instructions (greffon TCG hotblocks, tools/re/hotplug.py) */
             gl_note("plugin : pomppc_geom_dispatch à 0x%08lx\n",
@@ -3467,6 +3484,8 @@ static void invalidate_mirrors_from(unsigned long from)
 
     for (p = G.list; p; p = p->next) {
         p->st_valid = 0;
+        p->stp_valid = 0;
+        p->stp_gen++;
         p->g_sent = 0;
         p->md_bits = ~0UL;              /* 21/10 (MTXDIRTY) : tout à comparer */
         p->md_tex = 0xffUL;
@@ -4760,8 +4779,11 @@ static long evict_lru(PCtx *p, const PTex *keep, unsigned long *bytes)
     c = reserve(p, QGPU_LEN_TEX);
     c[0] = QGPU_CMD_HDR(QGPU_OP_TEX_DESTROY, QGPU_LEN_TEX);
     c[1] = id;
-    for (ctx = G.list; ctx; ctx = ctx->next)
+    for (ctx = G.list; ctx; ctx = ctx->next) {
         ctx->st_valid = 0;
+        ctx->stp_valid = 0;
+        ctx->stp_gen++;
+    }
     return id;
 }
 
@@ -7956,9 +7978,89 @@ static int su_check(PCtx *p, const TexInfo *ti, const TexInfo *tk)
     return d == 0;
 }
 
+/* La même photographie que celle écrite dans STATE_BLOCK. Le masque du
+ * helper n'autorise que des différences cull/stencil (et les mots arrière
+ * que le décodeur du bloc ignore). Les autres champs restent identiques. */
+static void stpatch_snapshot(uint32_t *a, unsigned long fl, PCtx *p,
+                             unsigned long sbits, const unsigned char *g)
+{
+    uint32_t *w = a + QGPU_SB_HDR;
+    int i;
+    a[0] = fl; a[1] = p->sw; a[2] = p->sh; a[3] = sbits;
+    memcpy(w, g + QGPU_SB_W0_OFF, QGPU_SB_W0_N * 4); w += QGPU_SB_W0_N;
+    memcpy(w, g + QGPU_SB_W1_OFF, QGPU_SB_W1_N * 4); w += QGPU_SB_W1_N;
+    memcpy(w, g + QGPU_SB_W2_OFF, QGPU_SB_W2_N * 4); w += QGPU_SB_W2_N;
+    memcpy(w, g + QGPU_SB_W3_OFF, QGPU_SB_W3_N * 4); w += QGPU_SB_W3_N;
+    for (i = 0; i < QGPU_SB_LOD_N; i++)
+        *w++ = GLD_U32(g, QGPU_SB_LOD_OFF + i * QGPU_SB_LOD_STRIDE);
+}
+
+static int stpatch_try(PCtx *p, const TexInfo *ti, int raw, unsigned long fl,
+                       unsigned long sbits, const unsigned char *g)
+{
+    uint32_t next[POMPPC_STPATCH_WORDS];
+    PomppcStatePatch patch;
+    unsigned long gen = p->stp_gen, *c;
+    unsigned i;
+    if (!p->st_valid || !p->stp_valid) {
+        G.n_stp_cache++;
+        return 0;
+    }
+    stpatch_snapshot(next, fl, p, sbits, g);
+    if (!pomppc_stpatch_make(p->stp_snap, next, &patch)) {
+        if (patch.why == 1) G.n_stp_header++;
+        else if (patch.why == 3) G.n_stp_enum++;
+        else G.n_stp_other++;
+        return 0;
+    }
+    if (G.stblk_check) {
+        unsigned long ref[QGPU_SK_COUNT], pred[QGPU_SK_COUNT];
+        int lo[6], hi[6], nr = state_ranges(lo, hi), r, k, nhot, diff = 0;
+        /* Mode 2 : p->st froid exact, maintenu par STATE_BLOCK_CHECK. La
+           voie pleine rend l'image, même si une hypothèse est prise en faute. */
+        hot_list(&nhot);
+        compute_state(p, ti, ref, raw);
+        memcpy(pred, p->st, sizeof(pred));
+        for (i = 0; i < patch.n; i++)
+            pred[patch.key[i]] = patch.val[i];
+        for (r = 0; r < nr; r++)
+            for (k = lo[r]; k < hi[r]; k++)
+                if (!st_is_hot[k] && pred[k] != ref[k])
+                    diff++;
+        G.n_stp_chk++;
+        if (diff) {
+            G.n_stp_diff++;
+            if (G.n_stp_told++ < 24)
+                gl_note("STPATCH écart image %lu : %d clés froides\n", G.n_frames, diff);
+        }
+        return 0;                       /* toujours la voie de référence */
+    }
+    if (patch.n) {
+        /* Une seule réservation. Elle peut attendre/vider et relâcher G.mu :
+           un changement de référence interdit d'envoyer le delta calculé sur
+           l'ancienne. CTX_BIND éventuellement posé par reserve peut rester. */
+        c = reserve(p, patch.n * QGPU_LEN_SET_STATE);
+        if (!p->st_valid || !p->stp_valid || p->stp_gen != gen) {
+            G.ncmd -= patch.n * QGPU_LEN_SET_STATE;
+            G.n_stp_race++;
+            return 0;
+        }
+        for (i = 0; i < patch.n; i++) {
+            c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
+            c[1] = patch.key[i]; c[2] = patch.val[i];
+            c += QGPU_LEN_SET_STATE;
+        }
+    }
+    pomppc_stpatch_save(p->stp_snap, next);
+    p->stp_gen++;
+    G.n_stp_take++;
+    G.n_stp_keys += patch.n;
+    return 1;
+}
+
 static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
 {
-    unsigned long v[QGPU_SK_COUNT], w[QGPU_SK_COUNT], *c, fl;
+    unsigned long v[QGPU_SK_COUNT], w[QGPU_SK_COUNT], *c, *sbargs, fl;
     unsigned long sbits = GLD_U32(p->ctx, CTX_STENCIL_BITS);
     unsigned char *g = gls(p);
     const int *hot;
@@ -8075,6 +8177,8 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
              (G.v7 ? QGPU_SB_F_V7 : 0) | (G.v8 ? QGPU_SB_F_V8 : 0) |
              (G.tex14 ? QGPU_SB_F_TEX14 : 0) | (G.prog ? QGPU_SB_F_PROG : 0) |
              (G.units > 4 ? QGPU_SB_F_UNITS8 : 0) | (G.glsl ? QGPU_SB_F_GLSL : 0);
+        if (G.stpatch && stpatch_try(p, ti, raw, fl, sbits, g))
+            goto state_written;
         c = reserve(p, G.stblk_check ? QGPU_LEN_STATE_BLOCK_CHECK : QGPU_LEN_STATE_BLOCK);
         c[0] = QGPU_CMD_HDR(QGPU_OP_STATE_BLOCK,
                             G.stblk_check ? QGPU_LEN_STATE_BLOCK_CHECK : QGPU_LEN_STATE_BLOCK);
@@ -8082,6 +8186,7 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
         c[2] = p->sw;
         c[3] = p->sh;
         c[4] = sbits;
+        sbargs = c + 1;
         c += 1 + QGPU_SB_HDR;
         memcpy(c, g + QGPU_SB_W0_OFF, QGPU_SB_W0_N * 4);
         c += QGPU_SB_W0_N;
@@ -8093,6 +8198,14 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
         c += QGPU_SB_W3_N;
         for (i = 0; i < QGPU_SB_LOD_N; i++)
             *c++ = GLD_U32(g, QGPU_SB_LOD_OFF + i * QGPU_SB_LOD_STRIDE);
+        if (G.stpatch) {
+            /* Référence = octets VRAIMENT écrits, après reserve (qui peut
+               avoir rendu G.mu), et jamais une photographie antérieure. */
+            memcpy(p->stp_snap, sbargs, sizeof(p->stp_snap));
+            p->stp_valid = 1;
+            p->stp_gen++;
+            G.n_stp_full++;
+        }
         if (G.stblk_check) {
             /* le vecteur de compute_state ; p->st reste tenu en entier (les
                clés chaudes de w sont celles envoyées ci-dessus) */
@@ -8102,6 +8215,9 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
         } else {
             p->st_host = 1;
         }
+        STC.full++;
+        STC.blk++;
+state_written:
         p->st_known = 1;
         p->st_dirty = 0;
         p->st_raw = raw;
@@ -8109,8 +8225,6 @@ static void send_state_blk(PCtx *p, const TexInfo *ti, int raw)
         p->st_sh = p->sh;
         p->st_stencil = p->stencil;
         p->st_sbits = sbits;
-        STC.full++;
-        STC.blk++;
     }
     p->st_valid = 1;
     if (G.v8 && GLD_U8(g, GS_POLY_STIPPLE))
@@ -14455,7 +14569,7 @@ static void vd_check_at(PCtx *p, const char *where, int disp, int ok, const TexI
    l'étape 3, une ligne D3X — seulement si l'un d'eux est allumé. */
 static void d3x_note(const char *why, unsigned long frame)
 {
-    if (!G.idxlazy && !G.idxvec && !G.dispone && !G.unitvd)
+    if (!G.idxlazy && !G.idxvec && !G.dispone && !G.unitvd && !G.stpatch)
         return;
     gl_note("D3X %s %lu : indices (idxlazy %d, idxvec %d) %lu dessins balayés "
             "(%lu indices, %lu par AltiVec), %lu natifs sans balayage (%lu indices), "
@@ -14493,6 +14607,14 @@ static void d3x_note(const char *why, unsigned long frame)
             "dans l'arène (%lu Kio), %lu soumissions, %lu barrières attendues (%.2f ms)\n",
             why, frame, G.zones, G.zones_force, G.zl_cmd_bytes >> 10, G.n_idxspill,
             G.idxspill_bytes >> 10, G.n_submits, G.n_waits, G.t_wait * 1000);
+    if (G.stpatch)
+        gl_note("STPATCH %s %lu : mode %d, %lu blocs remplacés par %lu clés, "
+                "%lu blocs complets, contrôle %lu candidats, %lu écarts, "
+                "%lu références changées pendant reserve ; refus cache %lu, en-tête %lu, "
+                "autres champs %lu, enum %lu\n", why, frame, G.stpatch,
+                G.n_stp_take, G.n_stp_keys, G.n_stp_full, G.n_stp_chk,
+                G.n_stp_diff, G.n_stp_race, G.n_stp_cache, G.n_stp_header,
+                G.n_stp_other, G.n_stp_enum);
 }
 
 /* À chaque échange (stats_frame, verrou tenu). */
@@ -16114,6 +16236,8 @@ static void pt_size(Batch *b, const unsigned char *v0)
     c[2] = bits;
     b->p->st[QGPU_SK_POINT_SIZE] = bits;
     b->p->st_dirty = 1;                 /* lot 4 : p->st n'est plus le calcul */
+    b->p->stp_valid = 0;
+    b->p->stp_gen++;
 }
 
 static void pt(Batch *b, const unsigned char *v0)
@@ -19473,6 +19597,8 @@ static void pix_punch_zero(PCtx *p)
     c[2] = 1;
     p->st[QGPU_SK_ALPHA_TEST] = 1;
     p->st_dirty = 1;                    /* lot 4 : le prochain send_state recalcule */
+    p->stp_valid = 0;
+    p->stp_gen++;
     c += QGPU_LEN_SET_STATE;
     c[0] = QGPU_CMD_HDR(QGPU_OP_SET_STATE, QGPU_LEN_SET_STATE);
     c[1] = QGPU_SK_ALPHA_FUNC;

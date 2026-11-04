@@ -487,6 +487,15 @@ if command -v cc >/dev/null 2>&1; then
     ko "qgpu_core_test ne compile pas"
   fi
   rm -f "$QGPU_BIN"
+  # STPATCH : helper réellement utilisé dans le plugin contre le décodeur
+  # STATE_BLOCK, puis stpatch_try extrait du plugin avec reserve réentrant.
+  STP_LOG="${TMPDIR:-/tmp}/pomppc_stpatch_test.$$.log"
+  if python3 tests/pomppc_stpatch_integration_test.py > "$STP_LOG" 2>&1; then
+    ok "STPATCH (oracle STATE_BLOCK, réserve réentrante et 5 mutants)"
+  else
+    ko "STPATCH ($(tail -1 "$STP_LOG"))"
+  fi
+  rm -f "$STP_LOG"
   # v21 : conditions du préprocesseur GLSL faites par le plugin (Tiger se
   # trompe sur les #if imbriqués) — guest/gldriver/pomppc_glslpp.h.
   PP_BIN="${TMPDIR:-/tmp}/glsl_pp_test.$$"
