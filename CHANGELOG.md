@@ -14,7 +14,7 @@ de commit et dans `docs/`.
 **Deux défauts visuels confirmés corrigés à l'œil le 05/11 sur le M4.** L'ombre de la barre de menus (ciseau du
 WindowServer dans le bloc d'état, plugin `20261105-ws-scissor`, [preuve](docs/re/qe-region-state.md)) et la route
 humide de Colin McRae (`TXP` dans une copie de l'archive de shaders, [preuve](docs/re/cmr-route-projection.md)).
-Le PC reçoit le premier avec le plugin ; l'ISO gravée le 04/11 ne le contient pas.
+Le CD invité de la 0.4.2, regravé sur le M4 le 05/11, contient ce plugin ; l'ISO gravée le 04/11 sur le PC est remplacée.
 
 **Contrôle du paquet Windows sur le Mac.** Le script accepte Bash 3.2, livré avec macOS :
 conversion des noms de DLL par `tr` plutôt que `${nom,,}` (Bash 4). Les onze témoins positifs

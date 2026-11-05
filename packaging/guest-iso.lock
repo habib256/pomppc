@@ -5,8 +5,8 @@
 # sa somme ici (docs/publier-linux.md §3). fetch_guest_iso.sh télécharge et vérifie.
 #
 # Un tag exige `version` = version du tag : une répétition (schedule, workflow_dispatch) accepte
-# le CD de la version précédente, un paquet publié jamais. Ces trois lignes visent pour l'instant
-# la 0.4.1 : le tag 0.4.2 échouera, avec ce message, tant que le PC ne les aura pas refaites.
-version=0.4.1
-url=https://github.com/habib256/pomppc/releases/download/0.4.1/pomppc-0.4.1-guest.iso
-sha256=97e6700be67d6d3c951f35aef4a6adfecf6f95b5a789ba988a3c5f0434694454
+# le CD de la version précédente, un paquet publié jamais. 0.4.2 : gravé sur le M4 le 05/11
+# (plugin 20261105-ws-scissor), déposé en pré-publication guest-iso-0.4.2.
+version=0.4.2
+url=https://github.com/habib256/pomppc/releases/download/guest-iso-0.4.2/pomppc-0.4.2-guest.iso
+sha256=9f26397856b58b7da83a54f0f679a88beedf21747acc5c068ad45f9846f845ee

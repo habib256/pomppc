@@ -4,6 +4,8 @@ POMPPC 0.4.2 adds **Linux x86-64**: a single-file AppImage that runs on Debian 1
 
 - **`POMPPC-0.4.2-x86_64.AppImage`.** Download it, make it executable, run it. Your disks and settings live in `~/POMPPC`. The first-run assistant is the one from the Mac: it creates the disk, opens the Macintosh Garden page for the install disc, checks it by MD5, runs the installation, downloads the free 10.4.11 update from Apple, and installs the POMPPC driver.
 - **Fixed:** starting POMPPC while the Mac's display was asleep crashed the front end.
+- **Fixed, Quartz Extreme:** the menu bar's shadow was missing until the first change of display mode.
+- **Fixed, Colin McRae:** white areas on the title screen at large resolutions.
 - **Preferences.** Sound and the USB gamepad can be set there too, and the window shows the current display resolution and where to change it in Mac OS. An empty Library has a **Show Folder** button.
 
 Details are in [CHANGELOG.md](https://github.com/habib256/pomppc/blob/0.4.2/CHANGELOG.md).
@@ -71,7 +73,7 @@ Not available on Windows: Tiger's web relay, USB gamepad passthrough, the startu
 
 ## Older limitations
 
-The limitations of 0.4.1 still apply: Colin McRae hasn't been retried since the resolution fix on the Mac, Warcraft III sometimes fails to reach its first scene (starting it again works), Return to Castle Wolfenstein doesn't work yet, and Core Image isn't implemented. Project docs and code comments are in French. The README and these notes are in English.
+The limitations of 0.4.1 still apply: Colin McRae's wet road shows bands, which a developer tool from the repository fixes in a copy of the game's shader archive (`tools/guest/cmr-track-projection.command`), Warcraft III sometimes fails to reach its first scene (starting it again works), Return to Castle Wolfenstein doesn't work yet, and Core Image isn't implemented. Project docs and code comments are in French. The README and these notes are in English.
 
 ## Licenses
 
