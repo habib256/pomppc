@@ -17,16 +17,23 @@ APP = "/Users/tiger/Desktop/Prey Demo/Prey.app"
 CFG = "/Users/tiger/Library/Application Support/Prey Demo/base/preyconfig.cfg"
 
 
-def fin_chargement(rows, long_ms=1000, calme=300):
+def fin_chargement(rows, long_ms=1000, calme=300, rendu_ms=5):
     """Dernière image de plus d'une seconde (chargement), si les `calme`
-    images suivantes sont là (elles durent donc toutes moins d'une seconde).
+    images suivantes sont là (elles durent donc toutes moins d'une seconde)
+    et rendent vraiment : au moins `rendu_ms` ms/image en moyenne.
     Le 26/09, la règle « > 2 s puis 300 images < 1 s » a attendu 20 min : le
-    chargement de Prey finit par des images de 1,9-2 s (images 89-91)."""
+    chargement de Prey finit par des images de 1,9-2 s (images 89-91).
+    [A] 05/11, M4 (bench/tcg/ab/m4-stpatch-ab5-0511-fen) : au démarrage, avant le chargement,
+    Prey échange parfois plus de 1 000 images vides à 0,6 ms. Si un relevé tombait entre cette
+    rafale et l'image longue suivante, la fenêtre s'y posait : 9 parties sur 12 mesurées
+    à 0,6 ms au lieu de 30, partie arrêtée à 30 s."""
     L = None
     for f in sorted(rows):
         if f - 1 in rows and rows[f][0] - rows[f - 1][0] > long_ms:
             L = f
-    return L if L is not None and L + calme in rows else None
+    if L is None or L + calme not in rows:
+        return None
+    return L if rows[L + calme][0] - rows[L][0] >= calme * rendu_ms else None
 
 
 class Prey(Jeu):

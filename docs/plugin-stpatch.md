@@ -131,6 +131,7 @@ Six parties par bras en deux tours d'ordre inversé pour cmr, ut, d3 ; trois pou
 - ut, cmr, mb, zen : bras recouverts, ni perte ni gain prouvés.
 - **Toujours éteint.** Reste avant tout allumage : mb et zen à six parties, l'endurance, la matrice.
   **Décision de l'utilisateur, 05/11 au soir : on poursuit, un levier qui ne sert qu'à d3 l'intéresse.**
-  La règle ne change pas : allumé seulement s'il ne perd sur aucun jeu.
+  **Compromis accepté par l'utilisateur le même soir :** une petite perte sur mb et zen, déjà parfaitement
+  jouables sur le M4, est acceptable si d3 et Prey gagnent. La règle reste entière pour ut et cmr. Prey reste à mesurer.
 - Première série polluée par un frontal orphelin (0,17 cœur, mêmes conditions dans les deux bras) ;
   arrêté avant la seconde. Ce biais est écrit ici plutôt que corrigé dans les chiffres.

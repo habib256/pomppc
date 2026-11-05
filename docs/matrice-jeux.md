@@ -211,7 +211,9 @@ Détails par jeu dans l'en-tête de chaque module. Points durs :
   avec l'horloge, l'image de preuve n'est donc pas la même d'un tour à l'autre. Fin du
   chargement = dernière image de plus d'une seconde, dès que 300 images la suivent (la
   première règle, « plus de 2 s puis 300 images de moins d'une seconde », a attendu 20 min en
-  plein écran : le chargement finit par des images de 1,9-2 s).
+  plein écran : le chargement finit par des images de 1,9-2 s). Depuis le 05/11, ces 300 images
+  doivent aussi rendre (au moins 5 ms/image) : une rafale d'images vides à 0,6 ms au démarrage
+  faisait mesurer le vide quand un relevé tombait juste après elle.
 - **Non automatisés** : Zenerchi en plein écran (case du menu Options, rangée dans
   `prefs.dat` chiffré ; ni Option+Entrée ni Cmd+F ne basculent) ; Warcraft III en fenêtre
   (aucun réglage connu, `LaunchCFMApp` ne passe pas d'arguments) ; Colin McRae en fenêtre

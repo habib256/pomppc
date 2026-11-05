@@ -155,6 +155,14 @@ P = prey.fin_chargement(matrice.lit_frames(serie([300] * 100 + [3000, 5000, 1900
 verifie(P == 104, "fin_chargement (L=%s, attendu 104)" % P)
 verifie(prey.fin_chargement(matrice.lit_frames(serie([300] * 100 + [3000] + [80] * 200))) is None,
         "fin_chargement : attendre 300 images")
+# 05/11 : rafale d'images vides au démarrage, relevée avant le vrai chargement
+rafale = [300] * 5 + [11000] + [0.6] * 1600 + [17] * 50
+verifie(prey.fin_chargement(matrice.lit_frames(serie(rafale))) is None,
+        "fin_chargement : une rafale d'images vides n'est pas le jeu")
+verifie(prey.JEU.fenetre(matrice.lit_frames(serie(rafale))) is None,
+        "fenêtre Prey : pas dans la rafale d'images vides")
+P = prey.fin_chargement(matrice.lit_frames(serie(rafale + [26000, 2000] + [30] * 400)))
+verifie(P == 1658, "fin_chargement après la rafale (L=%s, attendu 1658)" % P)
 
 # tous les modules de jeux se chargent, clés uniques, modes connus
 jeux = matrice.charge_jeux()
