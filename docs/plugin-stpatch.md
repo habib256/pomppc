@@ -135,3 +135,23 @@ Six parties par bras en deux tours d'ordre inversé pour cmr, ut, d3 ; trois pou
   jouables sur le M4, est acceptable si d3 et Prey gagnent. La règle reste entière pour ut et cmr. Prey reste à mesurer.
 - Première série polluée par un frontal orphelin (0,17 cœur, mêmes conditions dans les deux bras) ;
   arrêté avant la seconde. Ce biais est écrit ici plutôt que corrigé dans les chiffres.
+
+## Soirée du 05/11 : mb, zen et Prey (M4)
+
+[A] Terminal, hôte au repos, frontal natif, ms/image, médianes, modes 0 contre 1.
+mb et zen avec `r_shadows=1` passé par le banc, sans effet sur eux : `bench/tcg/ab/m4-stpatch-ab{,3,4}-0511-fen`. Prey : `m4-stpatch-ab6-0511-fen`.
+
+| jeu | parties | mode 0 | mode 1 | écart | étendue 0 | étendue 1 |
+|---|---:|---:|---:|---:|---:|---:|
+| mb fenêtre | 12 | 6,236 | 6,313 | +1,2 % | série par série : +0,6, +3,2, +0,0 % | |
+| zen fenêtre | 12 | 3,164 | 3,219 | +1,7 % | série par série : +0,5, +0,8, +2,3 % | |
+| **Prey fenêtre** | 6 | 30,535 | 32,445 | **+6,3 %** | 30,29-30,70 | 32,20-32,67 |
+| Prey, 90 s à horloge égale | 6 | 30,255 | 30,795 | **+1,8 %** | 30,01-30,37 | 30,66-30,98 |
+
+- **Prey perd, bras disjoints sur les deux mesures.** La scène suit l'horloge, d'où la seconde mesure : images rendues de 10 à 100 s
+  après le chargement. Par tranche : 10-40 s +4,4 %, 40-70 s +0,6 %, 70-100 s +1,7 %.
+- **La condition du compromis n'est pas remplie** (d3 **et** Prey gagnent) : **STPATCH reste éteint.** Allumage, endurance et matrice
+  ne sont pas lancés ; la décision revient à l'utilisateur.
+- [F] Cause inconnue. Compteurs à l'image 6500 de Prey : 1 416 170 blocs remplacés par 440 342 clés, donc un flux plus petit,
+  et pourtant plus lent. Tranché par : un profil de l'invité et de l'hôte sur 10-40 s après le chargement, modes 0 et 1.
+- L'A/B `m4-stpatch-ab5-0511-fen` est écarté : 9 parties sur 12 mesuraient une rafale d'images vides (`tools/matrice/jeux/prey.py`).
