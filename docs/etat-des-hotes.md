@@ -240,29 +240,28 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 05/11/2026, 07 h 07 (transmission demandée ; quotidienne restaurée ; correctifs expérimentaux sur copie)
+## 3. Mac M4 : état au 05/11/2026, 12 h 37 (quotidienne allumée, plugin `20261105-ws-scissor`, repris de la transmission du matin)
 
-**Arrêt demandé pour transmettre à une autre IA : lire d'abord
-[le point de reprise du 05/11](reprise-2026-11-05.md).**
+**Séance du 05/11, 7 h-13 h, demande de l'utilisateur : « attaque la suite ». Reprise de [la transmission](reprise-2026-11-05.md).**
 
-- Quotidienne restaurée sous ImGuiDock, SSH et bureau contrôlés à 07 h 06. Un seul QEMU,
-  `disks/tiger.qcow2`, plugin original MD5 `d3d4c9c0fcbb554fd8c6c292c87459d1`, kext GPU/Fsqrt chargés.
-  Clone arrêté proprement, aucun verrou supprimé, aucun nouveau plugin/patch de jeu sur le quotidien.
-- Bundle `20261104-texblank` sur copie : 69 images plugmd5 identiques 0/1/2 (assertion tex14
-  préexistante), **cinq jeux verts**, D3 mode2 sans divergence, 527 OK / 0 échec / 5 ignorés.
-  Les grandes copies1920×1080 et les titres CMR aux deux résolutions sont éprouvés.
-- Route humide : archive du jeu corrigée TEX→TXP (deux octets), chargée/vérifiée en VM ;
-  original conservé, lanceur prêt, installation quotidienne non faite. Premier patch TEP rejeté,
-  conservé et corrigé ; voir le document de reprise pour ne pas réutiliser le mauvais fichier.
-- **Dernier défaut actif : ombre figée sous la barre de menus.** Essais simples fenêtres/menus
-  sans traces résiduelles ; contrôle STATECHECK lancé puis journaux sauvegardés avant arrêt.
-  Code de région/ciseaux préparé et testé nativement : `5cdc0a7`, worktree
-  `/private/tmp/pomppc-qe-region-state-0511`, **non fusionné, non construit dans Tiger**.
-- **Aucun A/B STPATCH lancé, aucun gain de vitesse revendiqué**, défaut toujours éteint.
-  Reprendre la preuve du bureau, puis A/B des cinq jeux avant tout allumage.
-- Tous les travaux sur main sont locaux tant que l'authentification GitHub ne permet pas
-  le push. Les preuves `bench/` et scripts `.run/` restent sur ce M4 ; sauvegarde Git locale
-  `.run/reprise-2026-11-05.bundle` pour main et la branche WS.
+- **Ombre de la barre de menus : reproduite et corrigée** (`docs/re/qe-region-state.md`). Le bloc d'état perdait le
+  ciseau du WindowServer ; l'ombre manquait jusqu'au premier changement de mode. Le test d'avant ne pouvait pas le voir :
+  il comparait deux images du même état faux. Plugin `20261105-ws-scissor` (MD5 `0054a39d…`), égal à l'oracle scalaire,
+  plugmd5 69 images, cinq jeux verts, 531 tests OK, 0 échec. **À confirmer à l'œil par l'utilisateur.**
+- **Installé sur la quotidienne et dans `disks/prebuilt`** (remplace `20261102-modes`, qui avait aussi le défaut). Ancien
+  bundle dans `/var/tmp/GLDriver-POMPPC-avant-ws-scissor-0511.bundle` de l'invité et
+  `bench/plugin/ws-scissor-0511/prebuilt-avant.tar`. Inclut TEXBLANK (aplats blancs de cmr) ; STPATCH compilé, éteint.
+  L'ISO 0.4.2 gravée le 04/11 sur le PC et `packaging/guest-iso.lock` ne contiennent **pas** ces correctifs.
+- **A/B STPATCH au repos** (`docs/plugin-stpatch.md`, fin) : d3 −2,16 %, soit 0,8 ms sur les 8 ms des ombres ; ut, cmr, mb, zen
+  sans écart prouvé. **Reste éteint** : mb et zen à six parties, endurance, et décision de l'utilisateur.
+- **A/B ImGuiDock contre natif** en 1920×1080×32 (`docs/chantiers/performances-resolution.md`) : zen −7,0 %, cmr −3,0 %,
+  mb −2,2 %, ut +2,5 %, d3 +3,0 %. Le frontal n'explique pas de gros ralentissement de cmr sur le M4.
+- **Piège trouvé** : une restauration lancée depuis le service des outils tourne à PRI 4 (celle de 7 h 06 l'était). Lancer
+  par `osascript … do script` dans Terminal et vérifier `ps -o pri` (97 attendu). Un `pomppc` orphelin survit à l'arrêt de sa VM :
+  `MATAB_AVANT` doit le fermer (0,17 cœur dans la première série STPATCH, signalé dans sa page).
+- **Lanceur de cmr posé sur le Bureau de la quotidienne** (« Colin McRae route corrigee », ombre TXP ; DMG original intact, CRC32 vérifié par `hdiutil`), essayé jusqu'au dialogue d'options ; garde `ps` corrigée. Comptez 3 min au lancement.
+- **Pas fait** : endurance de ce bundle, route humide réellement jouée, le PC.
+- **Dépôt** : `main` poussé (GitHub répond de nouveau). Les preuves `bench/` et les scripts `.run/` restent locaux.
 
 ### Diagnostic du 04/11 au soir (historique)
 

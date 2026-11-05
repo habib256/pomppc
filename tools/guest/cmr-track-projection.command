@@ -41,7 +41,8 @@ fi
 
 # Ne jamais tuer une partie ni detacher son volume. -c donne le nom reel du
 # processus, pas les arguments d'un shell qui cite le nom de l'application.
-if /bin/ps -axwwc -o comm= | /usr/bin/grep -F 'Colin McRae Rally Mac' >/dev/null 2>&1; then
+# [A] Tiger refuse le mot-cle comm (« keyword not found ») : la garde ne voyait rien.
+if /bin/ps -axc -o command | /usr/bin/grep -F 'Colin McRae Rally Mac' >/dev/null 2>&1; then
     fail 'Le jeu est deja lance avec une autre archive. Quittez-le normalement, puis relancez cette commande.'
 fi
 

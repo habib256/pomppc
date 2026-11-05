@@ -177,5 +177,11 @@ inconnue est laissée en place et refusée. Si nécessaire, ce démontage normal
 précède `hdiutil attach -shadow` au point `/Volumes/Colin McRae Ready Mac`, puis le fichier
 est vérifié à nouveau. Jeu lancé sur une autre archive ou volume occupé : message et arrêt,
 jamais de processus tué ni de démontage forcé. Le DMG original, le pilote et l'émulateur
-restent inchangés. Syntaxe `/bin/sh` et Bash vérifiée, ShellCheck propre ; essai du lanceur
-dans Tiger à faire après installation de l'ombre stable.
+restent inchangés.
+
+**Essai dans Tiger, quotidienne, 05/11 [A].** Ombre posée, lanceur sur le Bureau (« Colin McRae route
+corrigee ») : CRC32 du DMG vérifié par `hdiutil`, « Archive TXP verifiee », jeu jusqu'à son dialogue
+d'options (`bench/plugin/ws-scissor-0511/lanceur/jeu.png`). Comptez environ 3 min : c'est cette vérification.
+L'essai a révélé que `ps -o comm=` est refusé sous Tiger : la garde « jeu déjà lancé » ne détectait
+rien. Corrigée (`ps -axc -o command`) et vérifiée, jeu ouvert ou non. **Pas fait :** une route humide
+réellement jouée sur la quotidienne, à regarder par l'utilisateur.

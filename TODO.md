@@ -3,7 +3,7 @@
 > **Deux hôtes (PC x86-64 et Mac M4) en alternance** : l'état de chacun et ce qui y reste à faire
 > sont dans [docs/etat-des-hotes.md](docs/etat-des-hotes.md), à lire en premier.
 
-État au 04/11/2026 (PC : lot 0.4.2 préparé, non publié, machine checks à décoder, `docs/etat-des-hotes.md` §2). Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 05/11/2026 (PC : lot 0.4.2 préparé, non publié, machine checks à décoder ; M4 : ombre de la barre corrigée ; `docs/etat-des-hotes.md`). Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
@@ -50,10 +50,9 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
   **Fermeture :** par levier, preuve et A/B des cinq jeux, allumé ou archivé. [Fiche](docs/chantiers/leviers-jit-x86.md)
 
 **Sur le M4**
-- [ ] **[CMR / bureau] Finir les preuves et l'installation quotidienne** : copies1920 et shader humide éprouvés sur clone ; ombre figée de la barre de menus à reproduire/corriger. Correctif de région WS prêt sur branche, non construit. [Point de reprise](docs/reprise-2026-11-05.md).
-- [ ] **[Jeux] Performances selon la résolution** : gros ralentissements de cmr en 1920×1080, autres jeux et
-  modes. Rien ne le ferme encore : la piste ImGuiDock de la fiche en donnerait la preuve.
-  [Fiche](docs/chantiers/performances-resolution.md)
+- [ ] **[CMR / bureau] Confirmer à l'œil** l'ombre de la barre de menus (`docs/re/qe-region-state.md`) et la route humide de Colin McRae par le lanceur du bureau (`docs/re/cmr-route-projection.md`). Installés sur la quotidienne le 05/11. **Fermeture :** confirmation de l'utilisateur.
+- [ ] **[Jeux] Performances selon la résolution** : ImGuiDock mis hors de cause pour cmr en 1920×1080 le 05/11 (écarts −7 à +3 %) ; autres jeux et modes à balayer.
+  **Fermeture :** temps et replis par résolution à scène égale. [Fiche](docs/chantiers/performances-resolution.md)
 
 ## Ensuite
 
@@ -83,11 +82,10 @@ Détail : [`utilisateur.md`](docs/chantiers/utilisateur.md).
 Proposées le 01/11, dans l'ordre recommandé ; rien n'est lancé sans décision. Une piste retenue
 devient active si l'hôte a une place.
 
-1. **ImGuiDock contre le frontal natif** : une journée. [Fiche](docs/chantiers/performances-resolution.md)
-2. **Régime de compilation du plugin** : deux à trois jours. [Fiche](docs/chantiers/alleger-plugin.md)
-3. **Attributs convertis une fois sur l'hôte** : deux jours ; le profil M4 ne la place pas en tête. [Fiche](docs/chantiers/rendu-hote.md)
-4. **Boîte noire des paniques** : une journée. [Fiche](docs/chantiers/fiabilite.md)
-5. **Temps de chargement des jeux** : une demi-journée pour la mesure. [Fiche](docs/chantiers/chargement.md)
+1. **Régime de compilation du plugin** : deux à trois jours. [Fiche](docs/chantiers/alleger-plugin.md)
+2. **Attributs convertis une fois sur l'hôte** : deux jours ; le profil M4 ne la place pas en tête. [Fiche](docs/chantiers/rendu-hote.md)
+3. **Boîte noire des paniques** : une journée. [Fiche](docs/chantiers/fiabilite.md)
+4. **Temps de chargement des jeux** : une demi-journée pour la mesure. [Fiche](docs/chantiers/chargement.md)
 
 ## Le reste
 

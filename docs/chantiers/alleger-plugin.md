@@ -50,8 +50,9 @@ Le prototype remplace les blocs froids ne changeant que cull/stencil par les cl�
 existantes ; ni protocole ni QEMU modifiés. Preuve native différentielle et mutants,
 contrôles VM partiels du premier prototype dans [`plugin-stpatch.md`](../plugin-stpatch.md).
 La révision b1 rétablit la réservation même sans clé ; à reconstruire et valider dans Tiger.
-**Aucun gain de vitesse prouvé, aucun allumage.** CMR titre 3D présente des aplats blancs aussi
-avec STPATCH désactivé ; diagnostic de résolution en cours avant toute reprise des A/B.
+**A/B du 05/11 : d3 −2,16 % (0,8 ms sur les 8 ms des ombres), ut, cmr, mb, zen sans écart prouvé.
+Toujours éteint** : détail et reste à faire à la fin de [`plugin-stpatch.md`](../plugin-stpatch.md).
+Les aplats blancs du titre de CMR étaient un autre défaut, corrigé (`20261104-texblank`).
 
 ## Piste proposée le 01/11 (à arbitrer par l'utilisateur)
 

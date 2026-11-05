@@ -98,7 +98,7 @@ Les épreuves ci-dessous précèdent b1 et ne valent pas validation de b1.
   défaut 3D. Essai de résolution en cours : les notes montrent des refus `COPY_TEX` à
   1920×1080 et `fallback tex-size 780/438`, à distinguer de STPATCH.
 
-**Aucun A/B de vitesse du prototype n’a encore été lancé**, aucun gain en ms revendiqué.
+Pas d’A/B de ce premier prototype ; celui du bundle du 05/11 est à la fin de cette page.
 Les temps des épreuves ne sont pas des A/B au repos. Contrôle général avant b1 :
 522 OK, 0 échec, 5 ignorés depuis Terminal (`.run/tests-stpatch-terminal-0411.log`).
 Après b1, l’épreuve native ciblée passe à nouveau avec ses six mutants.
@@ -111,3 +111,26 @@ Compilation Tiger sur la même copie de disque, MD5 `b3dd60c9465b73bc45fba929b7b
 CMR est décrit dans [`cmr-rendu-vers-texture.md` §8](re/cmr-rendu-vers-texture.md#8-niveaux-vierges-plus-grands-que-larène-04112026).
 Les titres 800×600 et 1920×1080 se rejouent sans erreur et à 0,00 / 0,00 % de leur capture.
 La matrice complète de ce bundle reste à terminer avant A/B. STPATCH reste éteint par défaut.
+
+## A/B au repos du bundle `20261105-ws-scissor` (05/11, M4)
+
+[A] Terminal, hôte au repos, frontal natif, `r_shadows=1`, ms/image, médianes, modes 0 contre 1.
+Six parties par bras en deux tours d'ordre inversé pour cmr, ut, d3 ; trois pour mb et zen.
+`bench/tcg/ab/m4-stpatch-ab-0511-{fen,pe}`, `m4-stpatch-ab2-0511-{fen,pe}`.
+
+| jeu | parties | mode 0 | mode 1 | écart | étendue 0 | étendue 1 |
+|---|---:|---:|---:|---:|---:|---:|
+| d3 fenêtre | 6 | 36,862 | 36,067 | **−2,16 %** | 36,458-37,158 | 35,598-36,584 |
+| ut fenêtre | 6 | 19,502 | 19,700 | +1,01 % | 19,239-19,809 | 19,410-20,238 |
+| cmr en course | 6 | 39,603 | 39,867 | +0,67 % | 38,945-40,647 | 39,456-41,069 |
+| mb fenêtre | 3 | 6,362 | 6,398 | +0,57 % | 6,233-6,423 | 6,193-6,473 |
+| zen fenêtre | 3 | 3,451 | 3,469 | +0,52 % | 3,435-3,454 | 3,447-3,473 |
+
+- **d3 gagne environ 0,8 ms/image** : bras disjoints dans chacun des deux tours. Sur les ~8 ms que
+  coûtent les ombres (`chantiers/d3-macos272.md`), STPATCH en rend donc un dixième : réduire la
+  taille du flux ne suffit pas à récupérer ce coût.
+- ut, cmr, mb, zen : bras recouverts, ni perte ni gain prouvés.
+- **Toujours éteint.** Reste avant tout allumage : mb et zen à six parties, l'endurance, et la
+  décision de l'utilisateur sur l'intérêt d'un levier qui ne sert qu'à d3.
+- Première série polluée par un frontal orphelin (0,17 cœur, mêmes conditions dans les deux bras) ;
+  arrêté avant la seconde. Ce biais est écrit ici plutôt que corrigé dans les chiffres.

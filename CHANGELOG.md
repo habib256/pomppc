@@ -113,6 +113,10 @@ cinq jeux le 02/11 au matin, sans le correctif des résolutions du soir (journal
 Précision du 04/11 : le relevé DOOM 3 du 02/11 ci-dessus avait `r_shadows=0` ; le réglage
 courant `r_shadows=1` donne 37 ms. Voir le diagnostic dans la section 0.4.2.
 
+- **Ombre de la barre de menus, 05/11 (M4).** Plugin `20261105-ws-scissor` : le bloc d'état perdait
+  le ciseau de la région du WindowServer, et l'ombre manquait sous la barre jusqu'au premier changement
+  de mode. Comparé à l'oracle scalaire, plugmd5 69 images, cinq jeux verts
+  (`docs/re/qe-region-state.md`). Aucun changement de QEMU, de kext ni de protocole.
 - **Quartz Extreme à toutes les résolutions, 02/11 soir.** Passer en 1920×1080 donnait un écran
   rayé, et le défaut revenait à chaque démarrage : la VRAM restait mappée à la taille du mode de
   démarrage (kext). En 2560×1080, bureau comprimé à 2048 de large (`GL_MAX_VIEWPORT_DIMS`) et
