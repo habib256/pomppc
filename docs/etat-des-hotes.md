@@ -240,7 +240,17 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 05/11/2026, 22 h 35 (quotidienne allumée, plugin `20261105-ws-scissor`, STPATCH abandonné)
+## 3. Mac M4 : état au 05/11/2026, 23 h 20 (0.4.2 publiée, quotidienne allumée, plugin `20261105-ws-scissor`, STPATCH abandonné)
+
+**0.4.2 publiée le 05/11 vers 23 h 15** (demande de l'utilisateur), tag `0.4.2` sur `1ddc6a0`, Release « Latest » :
+AppImage et zip Windows par la CI (toutes vertes), `.dmg`, archive et CD invité déposés depuis le M4.
+- CD invité regravé sur le M4 (plugin `20261105-ws-scissor`, `__text` et `__data` identiques au plugin de la quotidienne),
+  pré-publication `guest-iso-0.4.2`, `packaging/guest-iso.lock` à jour. Binaires de l'invité dans `bench/release-0.4.2/prebuilt`.
+- QEMU de publication reconstruit dans `~/src/qemu-rel04` (sources remises à neuf), frontal dans `~/src/pomppc-frontend-rel04`.
+- Archive éprouvée sur une copie du disque (SNAPSHOT=1, port 2240) : x-tb-fast, `install.sh` du CD, kexts chargés, gltest
+  cube/arbfp/glsl verts, `setmode` 1024×768, 1920×1080, 2560×1080, Marble Blast en jeu, `lib/` du paquet seul. **Pas essayée sur
+  le M1 sous macOS 15.8, ni le zip sur un vrai PC Windows.**
+- Le PC n'a plus à graver l'ISO 0.4.2 : celle du 04/11 (`bench/iso-042/`) est remplacée.
 
 **Soirée du 05/11 (coupure de courant vers 21 h 05, VM arrêtée à ce moment, `qemu-img check` sans erreur sur la quotidienne et le disque des A/B).**
 

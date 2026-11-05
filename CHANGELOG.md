@@ -7,7 +7,7 @@ reconstruire QEMU et le plugin ; le kext ne change que si l'ABI de transport cha
 sont celles prises le jour même, sur l'hôte indiqué. Le détail de chaque lot est dans le message
 de commit et dans `docs/`.
 
-## 0.4.2 (non publiée)
+## 0.4.2 (publiée le 05/11/2026)
 
 **STPATCH abandonné (05/11, M4)** : d3 −2,16 % mais Prey +6,3 % ; code laissé éteint (`docs/plugin-stpatch.md`). La matrice ne mesure plus la rafale d'images vides du démarrage de Prey.
 
