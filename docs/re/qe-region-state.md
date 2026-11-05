@@ -2,9 +2,9 @@
 
 La voie `STATE_BLOCK` ne transportait pas l'ajustement du ciseau à la région du
 WindowServer. La voie scalaire `compute_state`, elle, le faisait depuis Quartz Extreme.
-Ce défaut du contrat logiciel est reproduit nativement. **Son attribution aux traces sous
-la barre des menus et sa correction visuelle restent à vérifier dans Tiger** ; le plugin
-`20261105-ws-scissor` ne doit pas être installé en production avant cette preuve.
+Ce défaut du contrat logiciel est reproduit nativement, **et dans Tiger depuis le 05/11** :
+c'est bien lui qui retirait l'ombre sous la barre des menus (§ « Preuve dans Tiger »).
+Plugin `20261105-ws-scissor`, MD5 `0054a39d43c15d4b17a2227ed745f433`.
 
 ## Écart certain et correction
 
@@ -69,7 +69,45 @@ u16 : il n'assimile pas les octets bruts du GS à l'ordre des octets de l'hôte 
 - Cinq mutants détectés : ancien paquet non ajusté, snapshot non ajusté, oubli de `st_dirty`,
   référence STPATCH conservée et perte de `st_valid`.
 
-Les tests n'émulent ni le noyau, ni les attentes de barrière, ni le GPU. Ils ne remplacent
-pas la compilation Tiger, le dommage/retracé du bureau à définition fixe, les menus et les
-fenêtres superposées, ni le contrôle des jeux avec le plugin reconstruit. Aucun résultat de
-cette validation visuelle n'est revendiqué ici.
+Les tests n'émulent ni le noyau, ni les attentes de barrière, ni le GPU : la preuve visuelle
+est au paragraphe suivant.
+
+## Preuve dans Tiger (05/11, M4)
+
+**Reproduction [A].** Le test du 05/11 à 00 h 15 ne voyait rien parce qu'il comparait le bureau
+avant et après dans le même état faux (zéro pixel de différence). La bonne mesure est le
+**profil vertical sous la barre**, ici le vert à x=300, y=22..30, juste après le démarrage
+(1024×768×16, `bench/qe-menu-0511/*/bureau.ppm`) :
+
+| Plugin et chemin | y=22..30 | ombre |
+|---|---|---|
+| `texblank`, bloc d'état (quotidienne `modes` comprise) | 152 128 136 136 136 128 136 136 136 | **absente** |
+| `texblank`, `STATECHECK=1` (vecteur de l'invité appliqué) | 96 88 96 104 112 112 120 120 128 | présente |
+| `ws-scissor`, bloc d'état (défaut) | 96 88 96 104 112 112 120 120 128 | présente |
+| `ws-scissor`, `STATEBLK=0 STSKIP=0` (oracle scalaire) | 96 88 96 104 112 112 120 120 128 | présente |
+
+Le journal de QEMU sous `STATECHECK=1` confirme la cause : `bloc d'état : écart, 4 clé(s),
+première 15 : cœur 0, invité 1`, 15 étant `QGPU_SK_SCISSOR`. Avec l'ancien plugin, un changement
+de mode rend l'ombre, ce qui expliquait l'aspect instable du défaut. Le défaut ne date pas de
+`texblank` : la quotidienne en `20261102-modes` montre le même profil.
+
+**Correction [A].**
+- `ws-scissor` par défaut contre oracle scalaire, redémarrage entre les deux, 26 images (repos,
+  TextEdit déplacé sous la barre, huit menus Finder) : à part l'horloge et le curseur de texte,
+  seuls 10 pixels des triangles du Dock diffèrent. Ces pixels varient aussi entre deux tours de
+  la même configuration (`fix-normal-fen` contre `fix-normal2-fen`) : minutage du Dock, pas
+  chemin d'état.
+- Changements de mode 1920×1080×32, 1024×768×32, 1920×1080×16, 1024×768×32 : images égales au
+  témoin à l'horloge près (`fix-normal-modes`).
+- plugmd5 aux modes 0/1/2 : 69 images égales entre elles et égales à `texblank`, avec le seul
+  témoin déjà connu `tex14` (`bench/plugin/ws-scissor-0511/plugmd5-tailles`).
+- Jeux, défaut (`STPATCH=0`) : mb, zen, ut, d3 en fenêtre, cmr en course 1920×1080, tous verts,
+  zéro repli, rejeux et références à 0,00 % sauf le curseur de mb
+  (`bench/tcg/ab/m4-wsscissor-preuve-0511-*`) ; d3 en `STPATCH=2` vert
+  (`m4-wsscissor-controle-0511-d3`).
+
+**Limites.** [F] Aucune comparaison avec un vrai G4 : l'oracle est le chemin scalaire, et la
+bonne image celle que Tiger montre après un changement de mode. La capture de l'utilisateur
+n'a pas pu être lue (dossier temporaire de macOS) : « traces anormales » est rapproché de cette
+ombre par son texte, sa confirmation à l'œil reste à obtenir. Le rapport ne vaut pas pour le PC
+tant que le plugin n'y est pas installé (code de l'invité, rien à porter).
