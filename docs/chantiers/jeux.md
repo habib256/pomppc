@@ -19,7 +19,9 @@
   blanc) ; menu principal juste au 26/09, à revoir en partie.
 - [ ] **[Outils] A3, suites** : Zenerchi en plein écran et Warcraft III en fenêtre.
 - [ ] **[Outils] Rejeu : `SURF_READBACK` d'une surface jamais liée** — corrigé le 07/10 sur le
-  PC ; à confirmer sur le tour `20260926-2156` du M4.
+  PC. Le tour `20260926-2156` n'existe plus sur le M4 (05/11), et les vidages actuels portent
+  `surfaces.txt`, donc n'exercent pas ce cas : leurs rejeux sans `NO_SURF` ne le confirment pas. Reste à
+  retrouver un vidage antérieur au 27/09, ou à retirer cette entrée (décision de l'utilisateur).
 - [ ] **[Plugin] Mode immédiat sous programme de sommets** : revu sur DOOM 3 (PC, 07/10) ;
   reste Colin McRae au M4 (`POMPPC_GL_VPIMM=0` pour l'A/B).
 - [ ] **[Backend GL] `gltest tex14` « λ=2 sans biais »** : défaut du GL de l'hôte macOS.

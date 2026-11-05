@@ -5,7 +5,7 @@ Il fait rendre la géométrie des applications OpenGL de Tiger par le GPU de
 l'hôte, à travers le kext `POMPPCGPU` et le device QEMU `qgpu-pci`.
 Conception, rétro-ingénierie et mesures : `docs/gpu-3d-tiger.md`.
 
-**Au 02/11/2026** : révision `20261102-modes` (`POMPPC_PLUGIN_REV` de `pomppc_accel.c`),
+**Au 05/11/2026** : révision `20261105-ws-scissor` (`POMPPC_PLUGIN_REV` de `pomppc_accel.c`),
 protocole qgpu v22 (`docs/protocole.md`). Plusieurs paragraphes ci-dessous datent de septembre
 (v7 à v9) et sont marqués là où ils ne valent plus. Les défauts font foi dans le code : macros
 `*_DEFAULT` et lectures `getenv("POMPPC_GL_…")` de `pomppc_accel.c`.

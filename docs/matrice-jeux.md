@@ -65,7 +65,7 @@ sous le seuil du jeu. Une scène `gltest` comparée au rendu d'Apple éprouve ch
 nouvelle. Les modes fenêtre et plein écran sont requis quand le jeu les propose.
 
 **M4, dernier tour complet : `bench/matrice/qe-res-0311-*`** (03/11, QE, plugin `20261102-modes`, macOS 27.2) : **16
-vertes sur 16 jouées** ; avant, `20261028-1854` (28/10) : 17 sur 17. **PC, dernier tour complet : `bench/matrice/20261007-0709`** (07/10) ;
+vertes sur 16 jouées** ; le plugin `20261105-ws-scissor` n'a passé que cinq cellules (mb, zen, ut, d3 en fenêtre, cmr en course, `bench/tcg/ab/m4-wsscissor-preuve-0511-*`) ; avant, `20261028-1854` (28/10) : 17 sur 17. **PC, dernier tour complet : `bench/matrice/20261007-0709`** (07/10) ;
 depuis, les cellules sont rejouées par les A/B (`bench/tcg/ab/*`), un tour complet avec le cœur
 corrigé du 31/10 reste à faire.
 

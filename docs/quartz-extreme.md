@@ -12,7 +12,9 @@ x86-64 le 30/10 ; `QE=0` l'éteint). Les défauts d'ombre sur une fenêtre GL so
 liaison le 30/10 (`tex_bind_id`, plugin), l'image figée sous l'ombre le 01/11 (kext méthode 6
 `POMPPC_GA_PRESENT2`, plugin `20261101-ombre`) ; bande confirmée à l'œil sur le M4 le 01/11 à
 22 h 39. Le 02/11, toutes les résolutions (kext, plugin `20261102-modes`, cœur qgpu ; journal) : le
-M4 les a, le PC les reçoit avec le bundle. Restent : le coût d'un avis d'ombre actif sous une fenêtre
+M4 les a, le PC les reçoit avec le bundle. Le 05/11, l'ombre de la barre de menus, qui manquait sur le
+bureau, est rendue : le bloc d'état perdait le ciseau du WindowServer ([détail](re/qe-region-state.md), plugin
+`20261105-ws-scissor`, M4 seulement pour l'instant). Restent : le coût d'un avis d'ombre actif sous une fenêtre
 posée (l'A/B `m4-bundle-0111n` ne le prouve pas) et un avis borné au rectangle non visible, pour
 rendre l'avis des surfaces non simples moins cher (TODO).
 

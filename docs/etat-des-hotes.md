@@ -260,7 +260,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   par `osascript … do script` dans Terminal et vérifier `ps -o pri` (97 attendu). Un `pomppc` orphelin survit à l'arrêt de sa VM :
   `MATAB_AVANT` doit le fermer (0,17 cœur dans la première série STPATCH, signalé dans sa page).
 - **Lanceur de cmr posé sur le Bureau de la quotidienne** (« Colin McRae route corrigee », ombre TXP ; DMG original intact, CRC32 vérifié par `hdiutil`), essayé jusqu'au dialogue d'options ; garde `ps` corrigée. Comptez 3 min au lancement.
-- **Banc** : PID du profil hôte corrigé (`tools/matrice/qemupid.py`, CHANGELOG) ; `matab.sh` ferme le frontal orphelin. Pas encore passé par une vraie campagne.
+- **Banc** : PID du profil hôte corrigé (`tools/matrice/qemupid.py`, CHANGELOG) ; `matab.sh` ferme le frontal orphelin. Éprouvé en campagne (`bench/tcg/ab/m4-banc-preuve-0511`).
 - **Pas fait** : endurance de ce bundle, route humide réellement jouée, le PC.
 - **Dépôt** : `main` poussé (GitHub répond de nouveau). Les preuves `bench/` et les scripts `.run/` restent locaux.
 

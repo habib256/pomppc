@@ -1,11 +1,10 @@
 # STPATCH : deltas cull et stencil sans changer le protocole
 
-Prototype du 04/11/2026, **éteint par défaut**, dans le plugin `20261104-stpatch-b1`.
-Ni QEMU ni kext à reconstruire. Aucun gain de jeu ni équivalence d'image en VM encore revendiqué.
+Prototype du 04/11/2026, **éteint par défaut**, présent dans le plugin courant `20261105-ws-scissor`.
+Ni QEMU ni kext à reconstruire. **État au 05/11 :** équivalence d'image prouvée en VM, A/B à la fin de cette page.
 La révision b1 rétablit la frontière de flux des candidats sans clé, omise dans le premier
-prototype. Un défaut visuel a été signalé au titre 3D de Colin McRae sous ce prototype ;
-**b1 n'est pas encore une correction visuelle CMR prouvée**. La comparaison de cette scène
-aux modes 0/1/2 reste à faire, indépendamment de la preuve native de frontière rétablie.
+prototype. Le défaut visuel signalé au titre 3D de Colin McRae n'en venait pas : il existait aussi
+en mode 0, et il est corrigé par TEXBLANK ([détail](re/cmr-rendu-vers-texture.md#8-niveaux-vierges-plus-grands-que-larène-04112026)).
 
 Le niveau de DOOM 3 avec ombres envoie environ 700 `STATE_BLOCK` de 109 mots par image.
 L'audit du flux du témoin montre qu'environ trois quarts de ces blocs ne changent que

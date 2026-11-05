@@ -13,7 +13,7 @@ défaut (`*_DEFAULT 0`) ; éteints, le plugin se comporte comme `20261001-tout` 
 
 (01/11 : dépassé. Les trois leviers A-C sont allumés par défaut depuis le 04/10 (`2363682`,
 révision `20261004-d3x`), le levier D `ZONES=1` depuis le 20/10 (`b8484d5`), les cinq du §10
-depuis le 21/10 ; `*_DEFAULT 1` dans `pomppc_accel.c`. Plugin courant : `20261101-ombre`.)
+depuis le 21/10 ; `*_DEFAULT 1` dans `pomppc_accel.c`. Plugin courant : `20261105-ws-scissor`.)
 
 ## 1. Où vont les ~45 ms
 

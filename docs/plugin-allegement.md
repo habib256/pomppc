@@ -15,7 +15,7 @@ VM de dev, A/B des quatre jeux joué (UT2004 −1,6 %, DOOM 3 −1,4 %, mb et ze
 allumé par défaut dans le plugin `20261023-uvwon` : §7.**
 
 **01/11 : `POMPPC_GL_PACKBITS` (bornage des flottants sur leurs bits) prouvé, A/B des cinq jeux
-gagnant, allumé par défaut (`20261101-packbits`) : §8.** Le plugin courant est `20261101-ombre`
+gagnant, allumé par défaut (`20261101-packbits`) : §8.** Le plugin courant est `20261105-ws-scissor`
 (`POMPPC_PLUGIN_REV`), qui garde ces défauts et ajoute l'avis des surfaces non simples de
 Quartz Extreme (`docs/quartz-extreme.md`, journal du 01/11).
 

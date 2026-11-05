@@ -118,7 +118,7 @@ courant `r_shadows=1` donne 37 ms. Voir le diagnostic dans la section 0.4.2.
   et un profil `sample` qui n'est pas celui de QEMU est écarté (`.rejete`). Épreuve réelle : shell parent
   écarté à côté du vrai QEMU, ancien profil de bash refusé, profil de QEMU accepté ; tests natifs dans
   `tests/qemupid_test.py`. `matab.sh` ferme aussi un frontal orphelin, seulement si plus aucun QEMU ne tourne
-  (éprouvé avec des substituts de `pgrep` et `pkill`, pas encore en campagne).
+  (campagne `m4-banc-preuve-0511`, `DISK` explicite : frontal fermé, profil de `qemu-system-ppc`).
 - **Ombre de la barre de menus, 05/11 (M4).** Plugin `20261105-ws-scissor` : le bloc d'état perdait
   le ciseau de la région du WindowServer, et l'ombre manquait sous la barre jusqu'au premier changement
   de mode. Comparé à l'oracle scalaire, plugmd5 69 images, cinq jeux verts
