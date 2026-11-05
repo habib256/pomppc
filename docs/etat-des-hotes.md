@@ -247,21 +247,21 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
 - **Ombre de la barre de menus : reproduite et corrigée** (`docs/re/qe-region-state.md`). Le bloc d'état perdait le
   ciseau du WindowServer ; l'ombre manquait jusqu'au premier changement de mode. Le test d'avant ne pouvait pas le voir :
   il comparait deux images du même état faux. Plugin `20261105-ws-scissor` (MD5 `0054a39d…`), égal à l'oracle scalaire,
-  plugmd5 69 images, cinq jeux verts, 531 tests OK, 0 échec. **À confirmer à l'œil par l'utilisateur.**
+  plugmd5 69 images, cinq jeux verts, 531 tests OK, 0 échec. **Confirmé à l'œil par l'utilisateur le 05/11 au soir.**
 - **Installé sur la quotidienne et dans `disks/prebuilt`** (remplace `20261102-modes`, qui avait aussi le défaut). Ancien
   bundle dans `/var/tmp/GLDriver-POMPPC-avant-ws-scissor-0511.bundle` de l'invité et
   `bench/plugin/ws-scissor-0511/prebuilt-avant.tar`. Inclut TEXBLANK (aplats blancs de cmr) ; STPATCH compilé, éteint.
   L'ISO 0.4.2 gravée le 04/11 sur le PC et `packaging/guest-iso.lock` ne contiennent **pas** ces correctifs.
 - **A/B STPATCH au repos** (`docs/plugin-stpatch.md`, fin) : d3 −2,16 %, soit 0,8 ms sur les 8 ms des ombres ; ut, cmr, mb, zen
-  sans écart prouvé. **Reste éteint** : mb et zen à six parties, endurance, et décision de l'utilisateur.
+  sans écart prouvé. **Reste éteint** : mb et zen à six parties, endurance, matrice. L'utilisateur veut poursuivre (05/11 au soir).
 - **A/B ImGuiDock contre natif** en 1920×1080×32 (`docs/chantiers/performances-resolution.md`) : zen −7,0 %, cmr −3,0 %,
   mb −2,2 %, ut +2,5 %, d3 +3,0 %. Le frontal n'explique pas de gros ralentissement de cmr sur le M4.
 - **Piège trouvé** : une restauration lancée depuis le service des outils tourne à PRI 4 (celle de 7 h 06 l'était). Lancer
   par `osascript … do script` dans Terminal et vérifier `ps -o pri` (97 attendu). Un `pomppc` orphelin survit à l'arrêt de sa VM :
   `MATAB_AVANT` doit le fermer (0,17 cœur dans la première série STPATCH, signalé dans sa page).
-- **Lanceur de cmr posé sur le Bureau de la quotidienne** (« Colin McRae route corrigee », ombre TXP ; DMG original intact, CRC32 vérifié par `hdiutil`), essayé jusqu'au dialogue d'options ; garde `ps` corrigée. Comptez 3 min au lancement.
+- **Lanceur de cmr posé sur le Bureau de la quotidienne** (« Colin McRae route corrigee », ombre TXP ; DMG original intact, CRC32 vérifié par `hdiutil`), essayé jusqu'au dialogue d'options ; garde `ps` corrigée. Comptez 3 min au lancement. **Route humide confirmée corrigée en jeu par l'utilisateur le 05/11 au soir.**
 - **Banc** : PID du profil hôte corrigé (`tools/matrice/qemupid.py`, CHANGELOG) ; `matab.sh` ferme le frontal orphelin. Éprouvé en campagne (`bench/tcg/ab/m4-banc-preuve-0511`).
-- **Pas fait** : endurance de ce bundle, route humide réellement jouée, le PC.
+- **Pas fait** : endurance de ce bundle, le PC.
 - **Dépôt** : `main` poussé (GitHub répond de nouveau). Les preuves `bench/` et les scripts `.run/` restent locaux.
 
 ### Diagnostic du 04/11 au soir (historique)

@@ -5,6 +5,7 @@ WindowServer. La voie scalaire `compute_state`, elle, le faisait depuis Quartz E
 Ce défaut du contrat logiciel est reproduit nativement, **et dans Tiger depuis le 05/11** :
 c'est bien lui qui retirait l'ombre sous la barre des menus (§ « Preuve dans Tiger »).
 Plugin `20261105-ws-scissor`, MD5 `0054a39d43c15d4b17a2227ed745f433`.
+**[A] Confirmé à l'œil par l'utilisateur le 05/11 au soir, sur la quotidienne du M4 : ombre juste.**
 
 ## Écart certain et correction
 

@@ -129,7 +129,8 @@ Six parties par bras en deux tours d'ordre inversé pour cmr, ut, d3 ; trois pou
   coûtent les ombres (`chantiers/d3-macos272.md`), STPATCH en rend donc un dixième : réduire la
   taille du flux ne suffit pas à récupérer ce coût.
 - ut, cmr, mb, zen : bras recouverts, ni perte ni gain prouvés.
-- **Toujours éteint.** Reste avant tout allumage : mb et zen à six parties, l'endurance, et la
-  décision de l'utilisateur sur l'intérêt d'un levier qui ne sert qu'à d3.
+- **Toujours éteint.** Reste avant tout allumage : mb et zen à six parties, l'endurance, la matrice.
+  **Décision de l'utilisateur, 05/11 au soir : on poursuit, un levier qui ne sert qu'à d3 l'intéresse.**
+  La règle ne change pas : allumé seulement s'il ne perd sur aucun jeu.
 - Première série polluée par un frontal orphelin (0,17 cœur, mêmes conditions dans les deux bras) ;
   arrêté avant la seconde. Ce biais est écrit ici plutôt que corrigé dans les chiffres.

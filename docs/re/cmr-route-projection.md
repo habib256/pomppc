@@ -4,6 +4,8 @@ Le correctif porte sur **une copie de l'archive de shaders du jeu**, pas sur le 
 l'émulateur. Il remplace `TEX` par `TXP` pour le seul échantillonnage **t2** de `Track.xpu`.
 Le diagnostic au rejeu sur le M4 supprime les bandes de la route humide. **L'archive corrigée
 est installée et son programme vérifié dans une VM de diagnostic** (preuve du 05/11 ci-dessous).
+**[A] Route humide confirmée corrigée à l'œil par l'utilisateur le 05/11 au soir, en jeu sur la
+quotidienne du M4, par le lanceur du Bureau.**
 Aucun vrai PowerMac G4 n'a été testé ; le comportement de son pilote d'origine reste inconnu.
 
 ## Contrat et diagnostic

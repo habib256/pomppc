@@ -3,7 +3,7 @@
 > **Deux hôtes (PC x86-64 et Mac M4) en alternance** : l'état de chacun et ce qui y reste à faire
 > sont dans [docs/etat-des-hotes.md](docs/etat-des-hotes.md), à lire en premier.
 
-État au 05/11/2026 (PC : lot 0.4.2 préparé, non publié, machine checks à décoder ; M4 : ombre de la barre corrigée ; `docs/etat-des-hotes.md`). Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
+État au 05/11/2026 (PC : lot 0.4.2 préparé, non publié, machine checks à décoder ; M4 : ombre de la barre et route humide confirmées à l'œil, STPATCH en cours d'allumage ; `docs/etat-des-hotes.md`). Objectif : Mac OS X Tiger sous QEMU, bureau et jeux OpenGL
 sur le GPU de l'hôte, avec une matrice de jeux verte comme preuve.
 
 **Où on en est.** La fiabilité a été tenue (endurance PC 683 démarrages sans incident le 28/10,
@@ -50,7 +50,7 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
   **Fermeture :** par levier, preuve et A/B des cinq jeux, allumé ou archivé. [Fiche](docs/chantiers/leviers-jit-x86.md)
 
 **Sur le M4**
-- [ ] **[CMR / bureau] Confirmer à l'œil** l'ombre de la barre de menus (`docs/re/qe-region-state.md`) et la route humide de Colin McRae par le lanceur du bureau (`docs/re/cmr-route-projection.md`). Installés sur la quotidienne le 05/11. **Fermeture :** confirmation de l'utilisateur.
+- [ ] **[Plugin] Allumer STPATCH** (d3 −2,16 %, décision de l'utilisateur du 05/11 : on poursuit). Reste : mb et zen à six parties, endurance, matrice. **Fermeture :** aucun jeu en perte, endurance sans incident, défaut allumé. [Fiche](docs/plugin-stpatch.md)
 - [ ] **[Jeux] Performances selon la résolution** : ImGuiDock mis hors de cause pour cmr en 1920×1080 le 05/11 (écarts −7 à +3 %) ; autres jeux et modes à balayer.
   **Fermeture :** temps et replis par résolution à scène égale. [Fiche](docs/chantiers/performances-resolution.md)
 
