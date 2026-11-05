@@ -50,6 +50,13 @@ stop_vm() {
   fi
 }
 
+# 05/11 : un frontal survit à l'arrêt de sa VM et consomme 0,17 cœur pendant les parties
+# suivantes. On ne le ferme que si plus aucun QEMU ne tourne : pas celui d'une autre VM.
+close_orphan_frontend() {
+  pgrep -x qemu-system-ppc >/dev/null 2>&1 || pkill -x pomppc 2>/dev/null
+  return 0
+}
+
 wait_ssh() {
   for i in $(seq 1 60); do
     $TS true >/dev/null 2>&1 && return 0
@@ -67,6 +74,7 @@ start_vm() { # start_vm JOURNAL [VAR=v …]  (les parties : fenêtre QEMU native
 
 if [ "${1:-}" = "--restore" ]; then
   stop_vm
+  close_orphan_frontend
   # 31/10 : le binaire et les leviers d'un bras (QEMU_BIN, QEMU_FAST, TCGCOLD…) hérités de
   # l'appelant ne doivent pas suivre la VM quotidienne ; le binaire lancé est affiché.
   # (28/10 13 h 40 : chaine4.sh tué en pleine partie ref-3, la VM qemu-ceil/build/ de la
@@ -107,6 +115,7 @@ for p in "${ordre[@]}"; do
   D="$OUT/$nom-$k"; mkdir -p "$D"
   echo "$(date +%H:%M:%S) $nom-$k : $vars" | tee -a "$OUT/journal.txt"
   stop_vm
+  close_orphan_frontend
   # MATAB_AVANT="commande" : barrière avant chaque partie, VM arrêtée (p. ex. attendre l'hôte
   # au repos) ; un code non nul arrête la campagne (06/10 : une autre session occupait l'hôte)
   if [ -n "${MATAB_AVANT:-}" ]; then
@@ -125,7 +134,7 @@ for p in "${ordre[@]}"; do
   fi
   # bureau au repos (Finder, Dock, mds) : on attend que le QEMU retombe sous 0,25 cœur
   # (au plus 60 s, l'ancienne attente fixe) ; MATAB_REPOS=fixe rend les 60 s d'avant
-  qpid=$(pgrep -f "qemu-system.*disks/tiger.qcow2" | head -1)
+  qpid=$(python3 "$WT/tools/matrice/qemupid.py")  # le vrai QEMU, pas le shell parent (04/11)
   if [ "${MATAB_REPOS:-}" = fixe ] || [ -z "$qpid" ]; then
     sleep 60
   else

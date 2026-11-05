@@ -504,6 +504,13 @@ if command -v cc >/dev/null 2>&1; then
     ko "WS SCISSOR ($(tail -1 "$WS_SCISSOR_LOG"))"
   fi
   rm -f "$WS_SCISSOR_LOG"
+  QP_LOG="${TMPDIR:-/tmp}/qemupid_test.$$.log"
+  if python3 tests/qemupid_test.py > "$QP_LOG" 2>&1; then
+    ok "PID de QEMU (shell parent citant le disque ecarte, profil controle)"
+  else
+    ko "PID de QEMU ($(tail -1 "$QP_LOG"))"
+  fi
+  rm -f "$QP_LOG"
   TB_LOG="${TMPDIR:-/tmp}/pomppc_texblank_test.$$.log"
   if python3 tests/pomppc_texblank_test.py > "$TB_LOG" 2>&1; then
     ok "TEXBLANK (vraie branche plugin, oracle texels et 3 mutants)"

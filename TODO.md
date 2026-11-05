@@ -62,7 +62,7 @@ Dans l'ordre, l'hôte entre crochets. Un chantier d'un hôte n'y monte que si un
 2. **[Les deux] Endurance sur la configuration par défaut** : gardien ssh, panique #76, une tranche après chaque allumage. [Fiche](docs/chantiers/fiabilite.md)
 3. **[Les deux] Plantages en jeu sans cause** : au prochain gel, `kpanic.py` avant tout reset. [Fiche](docs/chantiers/fiabilite.md)
 4. **[Les deux] OS 9** : A/B des profils CPU, autres jeux, application AltiVec. [Fiche](docs/chantiers/jeux.md)
-5. **[Les deux] A/B de l'attente**, **troisième facteur de lenteur** et **PID des profils sur disque explicite**. [Fiche](docs/chantiers/metrologie.md)
+5. **[Les deux] A/B de l'attente** et **troisième facteur de lenteur**. [Fiche](docs/chantiers/metrologie.md)
 6. **[M4] Alertes TLB/RETVERIFY du témoin**, cause inconnue [F]. [Fiche](docs/chantiers/metrologie.md)
 7. **[PC] « Sans traduction » de `x-ret-verify`** en fin de session. [Fiche](docs/chantiers/metrologie.md)
 8. **[Les deux] Jeux** : DOOM 3 et Prey en plein écran, Marble Blast 800×600, Warcraft III, A3, rejeu, `tex14`. [Fiche](docs/chantiers/jeux.md)

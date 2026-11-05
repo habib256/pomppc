@@ -50,6 +50,7 @@ if sys.platform.startswith("linux"):
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hote import Hote, MAIN, WT, VMEnPause, journal   # noqa: E402
+import qemupid
 from jeu import NOM_MODE, MODES                    # noqa: E402
 
 ICI = os.path.dirname(os.path.abspath(__file__))
@@ -535,8 +536,7 @@ class Cellule:
             if self.sample_hote_s:
                 # profil du processus QEMU (fils vCPU : code généré, helpers), AVANT
                 # le `sample` de l'invité qui ralentit le jeu
-                q = subprocess.run(["pgrep", "-f", "qemu-system.*disks/tiger.qcow2"],
-                                   capture_output=True, text=True).stdout.split()
+                q = [str(n) for n in qemupid.pids()]
                 if q:
                     # à la racine de la cellule : le rapatriement remplace <sous>/
                     os.makedirs(self.dir, exist_ok=True)
@@ -556,9 +556,13 @@ class Cellule:
                         os.unlink(sp + ".on")
                         time.sleep(2)
                     elif sys.platform == "darwin":
-                        subprocess.run(["sample", q[0], str(self.sample_hote_s), "-file",
-                                        os.path.join(self.dir, "sample-hote-%s.txt" % self.sous)],
+                        prof = os.path.join(self.dir, "sample-hote-%s.txt" % self.sous)
+                        subprocess.run(["sample", q[0], str(self.sample_hote_s), "-file", prof],
                                        capture_output=True)
+                        if not qemupid.profil_de_qemu(prof):
+                            journal("⚠ profil hôte écarté : ce n'est pas QEMU (%s)" % prof)
+                            if os.path.exists(prof):
+                                os.replace(prof, prof + ".rejete")
                     else:
                         # Linux : perf (kernel.perf_event_paranoid ≤ 1) ; le code JIT est
                         # nommé par la carte /tmp/perf-<pid>.map de QEMU (-perfmap :
