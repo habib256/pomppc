@@ -155,3 +155,5 @@ mb et zen avec `r_shadows=1` passé par le banc, sans effet sur eux : `bench/tcg
 - [F] Cause inconnue. Compteurs à l'image 6500 de Prey : 1 416 170 blocs remplacés par 440 342 clés, donc un flux plus petit,
   et pourtant plus lent. Tranché par : un profil de l'invité et de l'hôte sur 10-40 s après le chargement, modes 0 et 1.
 - L'A/B `m4-stpatch-ab5-0511-fen` est écarté : 9 parties sur 12 mesuraient une rafale d'images vides (`tools/matrice/jeux/prey.py`).
+
+**Décision de l'utilisateur, 05/11 au soir : STPATCH abandonné.** Pas de profil de Prey. Le code reste dans le plugin, éteint par défaut ; aucun allumage prévu.

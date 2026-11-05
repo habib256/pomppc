@@ -44,7 +44,9 @@ Les compteurs du même niveau donnent aussi 2,7 fois plus de mots de commandes e
 par image au lieu d'un, tampon plein ; attente des barrières +0,73 ms/image sur le bloc observé.
 À distinguer du travail de préparation des lots : aucun gain d'un tampon plus grand n'est encore mesuré.
 
-## STPATCH expérimental (04/11, éteint)
+## STPATCH expérimental (04/11) — abandonné le 05/11
+
+**Abandonné par l'utilisateur le 05/11 au soir** : Prey +6,3 %, pour un gain de 0,8 ms/image sur d3. Le code reste compilé, éteint par défaut (`POMPPC_GL_STPATCH=0`).
 
 Le prototype remplace les blocs froids ne changeant que cull/stencil par les clés canoniques
 existantes ; ni protocole ni QEMU modifiés. Preuve native différentielle et mutants,

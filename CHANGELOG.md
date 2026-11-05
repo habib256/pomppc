@@ -9,6 +9,8 @@ de commit et dans `docs/`.
 
 ## 0.4.2 (non publiée)
 
+**STPATCH abandonné (05/11, M4)** : d3 −2,16 % mais Prey +6,3 % ; code laissé éteint (`docs/plugin-stpatch.md`). La matrice ne mesure plus la rafale d'images vides du démarrage de Prey.
+
 **Deux défauts visuels confirmés corrigés à l'œil le 05/11 sur le M4.** L'ombre de la barre de menus (ciseau du
 WindowServer dans le bloc d'état, plugin `20261105-ws-scissor`, [preuve](docs/re/qe-region-state.md)) et la route
 humide de Colin McRae (`TXP` dans une copie de l'archive de shaders, [preuve](docs/re/cmr-route-projection.md)).

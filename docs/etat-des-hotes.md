@@ -240,12 +240,12 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 05/11/2026, 22 h 35 (quotidienne allumée, plugin `20261105-ws-scissor`, STPATCH éteint : Prey y perd)
+## 3. Mac M4 : état au 05/11/2026, 22 h 35 (quotidienne allumée, plugin `20261105-ws-scissor`, STPATCH abandonné)
 
 **Soirée du 05/11 (coupure de courant vers 21 h 05, VM arrêtée à ce moment, `qemu-img check` sans erreur sur la quotidienne et le disque des A/B).**
 
 - **STPATCH : Prey perd** +6,3 % en fenêtre, +1,8 % sur 90 s à horloge égale, bras disjoints ; d3 gagne 2,16 %, mb +1,2 %, zen +1,7 %.
-  Le compromis de l'utilisateur (petite perte sur mb et zen si d3 **et** Prey gagnent) n'est pas rempli : **reste éteint**, décision à l'utilisateur.
+  Le compromis de l'utilisateur (petite perte sur mb et zen si d3 **et** Prey gagnent) n'est pas rempli : **abandonné par l'utilisateur** (22 h 40), code laissé éteint.
   Chiffres et cause à trancher : fin de `docs/plugin-stpatch.md`.
 - **Matrice, Prey corrigé** (`c9c858a`) : une rafale d'images vides à 0,6 ms au démarrage faisait parfois mesurer le vide. La règle exige
   désormais 5 ms/image. Les mesures de Prey à 30-32 ms restent bonnes : c'est la scène scriptée, pas le chargement.
