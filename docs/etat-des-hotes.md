@@ -240,7 +240,7 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 05/11/2026, 23 h 20 (0.4.2 publiée, quotidienne allumée, plugin `20261105-ws-scissor`, STPATCH abandonné)
+## 3. Mac M4 : état au 05/11/2026, 23 h 30 (0.4.2 publiée, quotidienne arrêtée proprement, plugin `20261105-ws-scissor`, STPATCH abandonné)
 
 **0.4.2 publiée le 05/11 vers 23 h 15** (demande de l'utilisateur), tag `0.4.2` sur `1ddc6a0`, Release « Latest » :
 AppImage et zip Windows par la CI (toutes vertes), `.dmg`, archive et CD invité déposés depuis le M4.
