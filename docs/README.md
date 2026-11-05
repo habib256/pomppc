@@ -4,6 +4,7 @@ Chemins relatifs à la racine du dépôt. Les chantiers ouverts : `docs/chantier
 
 | Sujet | Fichier |
 |---|---|
+| Transmission à une autre IA, séance M4 du 4–5/11 | [`docs/reprise-2026-11-05.md`](reprise-2026-11-05.md) |
 | Ce qui est fini (lots, versions du protocole, mesures) | `CHANGELOG.md` |
 | Vitesse sur le PC x86-64 (profils, leviers, chiffres) | `docs/vitesse-doom3-x86.md`, `docs/binaire-rapide-x86.md` (PGO, empreinte de la série) |
 | Parité et vitesse sur le M4 | `docs/parite-m4-2510.md`, `docs/parite-arm64-0031-0035.md`, `docs/jit-m4-2026-10-05.md`, `docs/profil-m4-0211.md`, `docs/tcg-zone-froide-arm64.md`, `docs/re/ut-attente-m4.md`, `docs/etat-des-hotes.md` §3 |

@@ -50,7 +50,7 @@ de travail sont dans `docs/etat-des-hotes.md` §1, la référence validée au §
   **Fermeture :** par levier, preuve et A/B des cinq jeux, allumé ou archivé. [Fiche](docs/chantiers/leviers-jit-x86.md)
 
 **Sur le M4**
-- [ ] **[CMR] Finir la validation des défauts du titre** : grandes textures corrigées et éprouvées en 800×600/1920×1080 ; matrice du bundle en cours. Projection de route humide : patch corrigé (deux octets) chargé et vérifié en VM de diagnostic ; installation quotidienne à finir (premier essai `TEP` rejeté). [Texture](docs/re/cmr-rendu-vers-texture.md#8-niveaux-vierges-plus-grands-que-larène-04112026), [route](docs/re/cmr-route-projection.md).
+- [ ] **[CMR / bureau] Finir les preuves et l'installation quotidienne** : copies1920 et shader humide éprouvés sur clone ; ombre figée de la barre de menus à reproduire/corriger. Correctif de région WS prêt sur branche, non construit. [Point de reprise](docs/reprise-2026-11-05.md).
 - [ ] **[Jeux] Performances selon la résolution** : gros ralentissements de cmr en 1920×1080, autres jeux et
   modes. Rien ne le ferme encore : la piste ImGuiDock de la fiche en donnerait la preuve.
   [Fiche](docs/chantiers/performances-resolution.md)

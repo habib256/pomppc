@@ -240,7 +240,31 @@ sont fondus dans la liste de la section 2. Le détail est dans les journaux cit�
   tour avec preuve d'image vert, identique à la référence d'alors (0,00 %), non reproduit ; un
   premier essai avait gelé au lancement (aucune image GL).
 
-## 3. Mac M4 : état au 04/11/2026, 23 h 49 (textures CMR corrigées sur copie ; preuves en cours ; push bloqué par l'authentification)
+## 3. Mac M4 : état au 05/11/2026, 07 h 07 (transmission demandée ; quotidienne restaurée ; correctifs expérimentaux sur copie)
+
+**Arrêt demandé pour transmettre à une autre IA : lire d'abord
+[le point de reprise du 05/11](reprise-2026-11-05.md).**
+
+- Quotidienne restaurée sous ImGuiDock, SSH et bureau contrôlés à 07 h 06. Un seul QEMU,
+  `disks/tiger.qcow2`, plugin original MD5 `d3d4c9c0fcbb554fd8c6c292c87459d1`, kext GPU/Fsqrt chargés.
+  Clone arrêté proprement, aucun verrou supprimé, aucun nouveau plugin/patch de jeu sur le quotidien.
+- Bundle `20261104-texblank` sur copie : 69 images plugmd5 identiques 0/1/2 (assertion tex14
+  préexistante), **cinq jeux verts**, D3 mode2 sans divergence, 527 OK / 0 échec / 5 ignorés.
+  Les grandes copies1920×1080 et les titres CMR aux deux résolutions sont éprouvés.
+- Route humide : archive du jeu corrigée TEX→TXP (deux octets), chargée/vérifiée en VM ;
+  original conservé, lanceur prêt, installation quotidienne non faite. Premier patch TEP rejeté,
+  conservé et corrigé ; voir le document de reprise pour ne pas réutiliser le mauvais fichier.
+- **Dernier défaut actif : ombre figée sous la barre de menus.** Essais simples fenêtres/menus
+  sans traces résiduelles ; contrôle STATECHECK lancé puis journaux sauvegardés avant arrêt.
+  Code de région/ciseaux préparé et testé nativement : `5cdc0a7`, worktree
+  `/private/tmp/pomppc-qe-region-state-0511`, **non fusionné, non construit dans Tiger**.
+- **Aucun A/B STPATCH lancé, aucun gain de vitesse revendiqué**, défaut toujours éteint.
+  Reprendre la preuve du bureau, puis A/B des cinq jeux avant tout allumage.
+- Tous les travaux sur main sont locaux tant que l'authentification GitHub ne permet pas
+  le push. Les preuves `bench/` et scripts `.run/` restent sur ce M4 ; sauvegarde Git locale
+  `.run/reprise-2026-11-05.bundle` pour main et la branche WS.
+
+### Diagnostic du 04/11 au soir (historique)
 
 **Reprise du 04/11 au soir, priorité DOOM 3 du TODO.**
 
