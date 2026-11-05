@@ -786,6 +786,17 @@ références de la matrice **du M4** (le PC utilise `references-linux.csv` et ne
 
 ## 4. À faire en passant d'un hôte à l'autre
 
+- **Venu du M4 le 05/11 au soir (pour le PC, prochaine séance), dans l'ordre :**
+  1. `git pull`. **Pas de reconstruction de QEMU** : ni `patches/` ni `build_qemu_qfb.sh` ni le frontal n'ont changé depuis
+     la séance du PC du 04/11. Seuls le plugin et la matrice ont bougé.
+  2. **Installer le plugin `20261105-ws-scissor` sur la quotidienne du PC** : CD `pomppc-0.4.2-guest.iso` de la Release 0.4.2
+     (ou `packaging/linux/fetch_guest_iso.sh`), `install.sh`, redémarrer l'invité. Il corrige l'ombre de la barre de menus
+     (`docs/re/qe-region-state.md`) et les aplats blancs du titre de cmr. Contrôle : l'ombre est là dès l'ouverture de session,
+     puis mb, zen et ut dans la matrice. STPATCH, compilé dedans, reste éteint (abandonné).
+  3. **0.4.2 publiée** : essayer l'AppImage **téléchargée de la Release** sur le PC (Tiger, `backend gl`, QE, `gltest`, son),
+     puis ce qui reste de `docs/publier-linux.md` §5. Le zip Windows attend toujours un vrai PC Windows.
+  4. Reprendre la section 2 : machine checks (`ras-mc-ctl --errors`), puis `tcg/0063` témoin et la cible de 50 ms de DOOM 3.
+
 - **Venu du PC le 01/11 (pour le M4), dans l'ordre** — reprend les entrées du 30/10 et du
   31/10, réduites le 01/11 à ce qui n'y figure pas :
   (Bilan du 02/11 : points 1-2 faits, la VM **quotidienne** servant de VM de dev ; preuves
